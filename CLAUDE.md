@@ -1,5 +1,18 @@
 # Инструкции для Claude Code — funding-service
 
+## Старт каждой сессии (ОБЯЗАТЕЛЬНО)
+
+После `/clear` контекст сбрасывается полностью. Перед выполнением любой задачи:
+
+1. Прочитать `C:\projects\obsidianVaults\defaultVault\funding\00-home\index.md` — текущее состояние
+2. Прочитать `C:\projects\obsidianVaults\defaultVault\funding\00-home\priorities.md` — следующая задача и backlog
+3. Прочитать нужный раздел `funding-service-plan.md` — полное описание задачи и критерий готовности
+4. При необходимости заглянуть в `atlas/architecture.md` и `atlas/stack.md`
+
+Без этого шага браться за код нельзя — контекст потерян после `/clear`.
+
+---
+
 ## Правила работы над проектом
 
 ### Коммиты
