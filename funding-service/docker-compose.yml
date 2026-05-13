@@ -15,6 +15,7 @@ services:
       - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - funding-net
     healthcheck:
@@ -25,7 +26,6 @@ services:
 
   backend:
     build: ./backend
-    command: ["echo", "backend placeholder"]
     ports:
       - "${BACKEND_PORT:-8080}:${BACKEND_PORT:-8080}"
     environment:
@@ -44,9 +44,8 @@ services:
 
   frontend:
     build: ./frontend
-    command: ["echo", "frontend placeholder"]
     ports:
-      - "5173:5173"
+      - "80:80"
     networks:
       - funding-net
 

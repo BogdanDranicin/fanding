@@ -17,11 +17,18 @@ Real-time сервис для анализа ставок фандинга на 
 git clone <repo-url>
 cd funding-service
 cp .env.example .env
-# Заполнить .env нужными значениями
+# Заполнить .env: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, TELEGRAM_BOT_TOKEN
 docker compose up
 ```
 
-Фронтенд доступен на `http://localhost:5173`.
+Фронтенд доступен на `http://localhost:80`.  
+Бэкенд API: `http://localhost:8080`.
+
+### Проверка TimescaleDB
+
+```bash
+docker compose exec postgres psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT extname FROM pg_extension;"
+```
 
 ## Стек
 
