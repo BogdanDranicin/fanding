@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/funding-service/backend/internal/config"
+	_ "github.com/funding-service/backend/internal/source"
 )
 
 func main() {
