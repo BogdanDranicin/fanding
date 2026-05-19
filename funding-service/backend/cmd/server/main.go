@@ -16,9 +16,12 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/funding-service/backend/internal/api"
 	"github.com/funding-service/backend/internal/config"
 	"github.com/funding-service/backend/internal/funding"
+	"github.com/funding-service/backend/internal/metrics"
 	"github.com/funding-service/backend/internal/source"
 	"github.com/funding-service/backend/internal/source/cbr"
 	"github.com/funding-service/backend/internal/source/moexiss"
@@ -105,6 +108,7 @@ func main() {
 	router.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	router.Handle("GET /metrics", promhttp.Handler())
 	router.Handle("/api/", apiRouter)
 
 	router.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +161,28 @@ func main() {
 					log.Warn().Err(err).Msg("ws encode snapshot failed")
 					continue
 				}
+				metrics.SnapshotLatency.Observe(time.Since(snap.Timestamp).Seconds())
 				hub.Broadcast(data)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Fan-out cbrSrc.OnNewPublication: always count metric; forward to dispatcher if bot is enabled.
+	dispPubCh := make(chan time.Time, 1)
+	go func() {
+		for {
+			select {
+			case t, ok := <-cbrSrc.OnNewPublication:
+				if !ok {
+					return
+				}
+				metrics.CBPublications.Inc()
+				select {
+				case dispPubCh <- t:
+				default:
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -171,7 +196,7 @@ func main() {
 		} else {
 			go bot.Run(ctx)
 			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
-			go disp.Run(ctx, cbrSrc.OnNewPublication)
+			go disp.Run(ctx, dispPubCh)
 		}
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")

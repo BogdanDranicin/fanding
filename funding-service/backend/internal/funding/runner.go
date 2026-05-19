@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/funding-service/backend/internal/metrics"
 	"github.com/funding-service/backend/internal/source"
 )
 
@@ -94,6 +95,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				}
 				r.engine.Ingest(tick)
 				r.sendToObs(tick)
+				metrics.TicksReceived.WithLabelValues(tick.Source, tick.Symbol).Inc()
 			case <-ctx.Done():
 				return
 			}

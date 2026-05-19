@@ -4,6 +4,8 @@ import (
 	"sync"
 
 	"github.com/rs/zerolog"
+
+	"github.com/funding-service/backend/internal/metrics"
 )
 
 // Hub maintains the set of active WebSocket clients and broadcasts messages to them.
@@ -26,6 +28,7 @@ func (h *Hub) Register(c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.clients[c] = struct{}{}
+	metrics.WSClients.Set(float64(len(h.clients)))
 }
 
 // Unregister removes a client from the hub.
@@ -33,6 +36,7 @@ func (h *Hub) Unregister(c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.clients, c)
+	metrics.WSClients.Set(float64(len(h.clients)))
 }
 
 // Broadcast sends msg to every registered client.
