@@ -13,6 +13,7 @@ type Config struct {
 	PostgresHost     string `envconfig:"POSTGRES_HOST"         default:"postgres"`
 	PostgresPort     int    `envconfig:"POSTGRES_PORT"         default:"5432"`
 	TelegramToken    string `envconfig:"TELEGRAM_BOT_TOKEN"`
+	TelegramBotName  string `envconfig:"TELEGRAM_BOT_USERNAME"` // e.g. "my_funding_bot"
 	TwelveDataAPIKey string `envconfig:"TWELVEDATA_API_KEY"`
 	MOEXPollMs       int    `envconfig:"MOEX_POLL_INTERVAL_MS" default:"250"`
 	Port             int    `envconfig:"BACKEND_PORT"          default:"8080"`

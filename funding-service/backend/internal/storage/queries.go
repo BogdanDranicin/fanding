@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"time"
 )
 
@@ -74,4 +76,42 @@ func (s *Store) RecentCBPublications(ctx context.Context, days int) ([]CBPublica
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// UserRecord is returned by CreateUser.
+type UserRecord struct {
+	ID        int64
+	LinkToken string
+}
+
+// CreateUser inserts a new user row with a random 32-hex-char link_token.
+func (s *Store) CreateUser(ctx context.Context) (UserRecord, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return UserRecord{}, err
+	}
+	token := hex.EncodeToString(buf)
+
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO users (link_token) VALUES ($1) RETURNING id`,
+		token,
+	).Scan(&id)
+	if err != nil {
+		return UserRecord{}, err
+	}
+	return UserRecord{ID: id, LinkToken: token}, nil
+}
+
+// UserByID returns a user's link_token and whether Telegram is linked.
+func (s *Store) UserByID(ctx context.Context, id int64) (linkToken string, linked bool, err error) {
+	var chatID *int64
+	err = s.pool.QueryRow(ctx,
+		`SELECT link_token, telegram_chat_id FROM users WHERE id = $1`,
+		id,
+	).Scan(&linkToken, &chatID)
+	if err != nil {
+		return "", false, err
+	}
+	return linkToken, chatID != nil, nil
 }

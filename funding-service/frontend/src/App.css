@@ -122,6 +122,74 @@
   color: var(--text-muted);
 }
 
+/* Settings page */
+.settings-page {
+  max-width: 480px;
+  margin: 48px auto;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.settings-page h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.settings-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-section p {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.btn-tg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #2196F3;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.btn-tg:hover { background: #1976D2; }
+.btn-tg:disabled { opacity: 0.5; cursor: default; }
+
+.settings-nav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.nav-link {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.nav-link:hover { color: var(--text-primary); }
+
 /* Flash animations (tasks 5.4) */
 @keyframes flash-up {
   0%   { background: var(--accent-up); color: #fff; }

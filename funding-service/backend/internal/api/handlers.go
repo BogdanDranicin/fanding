@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -26,7 +27,7 @@ var instruments = []instrumentMeta{
 }
 
 // NewRouter builds and returns the chi router for the HTTP API.
-func NewRouter(store *storage.Store, log zerolog.Logger) http.Handler {
+func NewRouter(store *storage.Store, botUsername string, log zerolog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
@@ -35,6 +36,8 @@ func NewRouter(store *storage.Store, log zerolog.Logger) http.Handler {
 	r.Get("/api/v1/instruments", handleInstruments)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
 	r.Get("/api/v1/cb-publications", handleCBPublications(store))
+	r.Post("/api/v1/users", handleCreateUser(store))
+	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
 
 	return r
 }
@@ -77,6 +80,43 @@ func handleCBPublications(store *storage.Store) http.HandlerFunc {
 	}
 }
 
+func handleCreateUser(store *storage.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec, err := store.CreateUser(r.Context())
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"id":    rec.ID,
+			"token": rec.LinkToken,
+		})
+	}
+}
+
+func handleTelegramLink(store *storage.Store, botUsername string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if botUsername == "" {
+			http.Error(w, "bot not configured", http.StatusServiceUnavailable)
+			return
+		}
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		token, linked, err := store.UserByID(r.Context(), id)
+		if err != nil {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":    fmt.Sprintf("https://t.me/%s?start=%s", botUsername, token),
+			"linked": linked,
+		})
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -86,7 +126,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
