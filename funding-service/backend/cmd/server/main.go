@@ -170,6 +170,8 @@ func main() {
 			log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
 		} else {
 			go bot.Run(ctx)
+			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
+			go disp.Run(ctx, cbrSrc.OnNewPublication)
 		}
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")
