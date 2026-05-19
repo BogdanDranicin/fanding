@@ -139,6 +139,26 @@ func main() {
 		Handler: router,
 	}
 
+	const wsBroadcastInterval = 250 * time.Millisecond
+	go func() {
+		ticker := time.NewTicker(wsBroadcastInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				snap := eng.Snapshot()
+				data, err := appws.EncodeSnapshot(snap)
+				if err != nil {
+					log.Warn().Err(err).Msg("ws encode snapshot failed")
+					continue
+				}
+				hub.Broadcast(data)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	runDone := make(chan error, 1)
 	go func() { runDone <- runner.Run(ctx) }()
 	go writer.Run(ctx)
