@@ -24,6 +24,7 @@ import (
 	"github.com/funding-service/backend/internal/source/moexiss"
 	"github.com/funding-service/backend/internal/source/multiplex"
 	"github.com/funding-service/backend/internal/storage"
+	tgbot "github.com/funding-service/backend/internal/telegram"
 	appws "github.com/funding-service/backend/internal/ws"
 )
 
@@ -162,6 +163,17 @@ func main() {
 			}
 		}
 	}()
+
+	if cfg.TelegramToken != "" {
+		bot, err := tgbot.New(cfg.TelegramToken, pool, log.Logger)
+		if err != nil {
+			log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
+		} else {
+			go bot.Run(ctx)
+		}
+	} else {
+		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")
+	}
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- runner.Run(ctx) }()
