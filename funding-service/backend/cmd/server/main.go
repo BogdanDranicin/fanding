@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/funding-service/backend/internal/api"
 	"github.com/funding-service/backend/internal/config"
 	"github.com/funding-service/backend/internal/funding"
 	"github.com/funding-service/backend/internal/source"
@@ -96,11 +97,14 @@ func main() {
 
 	hub := appws.NewHub(log.Logger)
 
+	apiRouter := api.NewRouter(store, log.Logger)
+
 	router := http.NewServeMux()
 
 	router.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	router.Handle("/api/", apiRouter)
 
 	router.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
