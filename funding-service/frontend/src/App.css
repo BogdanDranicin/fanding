@@ -1,0 +1,137 @@
+/* Layout */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.app-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 16px;
+  gap: 24px;
+}
+
+/* Status dot */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-connected    { background: var(--accent-up); }
+.status-connecting   { background: #eab308; }
+.status-disconnected { background: var(--accent-down); }
+
+/* USDT card */
+.usdt-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 28px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 240px;
+}
+
+.usdt-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.usdt-price {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.usdt-price.up   { color: var(--accent-up); }
+.usdt-price.down { color: var(--accent-down); }
+
+/* Funding table */
+.funding-table {
+  border-collapse: collapse;
+  min-width: 560px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.funding-table th,
+.funding-table td {
+  padding: 10px 20px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.funding-table thead th {
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.funding-table tbody tr:last-child td,
+.funding-table tbody tr:last-child th {
+  border-bottom: none;
+}
+
+.row-label {
+  text-align: left !important;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  min-width: 120px;
+}
+
+.cell {
+  color: var(--text-primary);
+}
+
+.cell.muted {
+  color: var(--text-muted);
+}
+
+/* Flash animations (tasks 5.4) */
+@keyframes flash-up {
+  0%   { background: var(--accent-up); color: #fff; }
+  100% { background: transparent; color: var(--text-primary); }
+}
+
+@keyframes flash-down {
+  0%   { background: var(--accent-down); color: #fff; }
+  100% { background: transparent; color: var(--text-primary); }
+}
+
+.flash-up   { animation: flash-up   400ms ease-out forwards; }
+.flash-down { animation: flash-down 400ms ease-out forwards; }
