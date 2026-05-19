@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS cb_publications;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS funding_snapshots;
+DROP TABLE IF EXISTS ticks;

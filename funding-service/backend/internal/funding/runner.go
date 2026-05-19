@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/funding-service/backend/internal/source"
 )
 
@@ -17,6 +19,8 @@ type Runner struct {
 	symbols          []string
 	snapshotInterval time.Duration
 	out              chan<- FundingSnapshot
+	tickObs          chan source.Tick
+	obsLog           zerolog.Logger
 }
 
 // NewRunner creates a Runner. symbols is the list passed to src.Subscribe.
@@ -34,6 +38,36 @@ func NewRunner(
 		symbols:          symbols,
 		snapshotInterval: snapshotInterval,
 		out:              out,
+	}
+}
+
+// SetTickObserver wires an optional channel that receives a copy of every ingested tick.
+// When the channel is full the oldest entry is dropped and a warning is logged.
+// Must be called before Run.
+func (r *Runner) SetTickObserver(ch chan source.Tick, log zerolog.Logger) {
+	r.tickObs = ch
+	r.obsLog = log
+}
+
+// sendToObs forwards tick to the observer channel without blocking.
+// If the buffer is full, the oldest entry is dropped first.
+func (r *Runner) sendToObs(tick source.Tick) {
+	if r.tickObs == nil {
+		return
+	}
+	select {
+	case r.tickObs <- tick:
+	default:
+		// full: drop oldest, enqueue newest
+		select {
+		case <-r.tickObs:
+		default:
+		}
+		select {
+		case r.tickObs <- tick:
+		default:
+		}
+		r.obsLog.Warn().Str("symbol", tick.Symbol).Msg("tick observer buffer full, dropped oldest")
 	}
 }
 
@@ -59,6 +93,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					return
 				}
 				r.engine.Ingest(tick)
+				r.sendToObs(tick)
 			case <-ctx.Done():
 				return
 			}
