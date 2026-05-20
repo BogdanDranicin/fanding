@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: funding-backend
+    runtime: docker
+    dockerfilePath: ./funding-service/backend/Dockerfile
+    dockerContext: ./funding-service/backend
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: MOEX_POLL_INTERVAL_MS
+        value: 250
+      - key: BACKEND_PORT
+        value: 10000
+      - key: LOG_LEVEL
+        value: warn

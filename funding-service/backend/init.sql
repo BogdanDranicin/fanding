@@ -1,1 +1,1 @@
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- no extensions required (plain PostgreSQL)

@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS ticks (
     source      TEXT          NOT NULL DEFAULT ''
 );
 
-SELECT create_hypertable('ticks', 'timestamp', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_ticks_symbol_ts ON ticks (symbol, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS funding_snapshots (
@@ -21,7 +20,7 @@ CREATE TABLE IF NOT EXISTS funding_snapshots (
     official_rate NUMERIC(18,8)
 );
 
-SELECT create_hypertable('funding_snapshots', 'timestamp', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_snapshots_symbol_ts ON funding_snapshots (symbol, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS users (
     id                BIGSERIAL    PRIMARY KEY,

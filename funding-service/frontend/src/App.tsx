@@ -6,7 +6,8 @@ import { USDTPriceCard } from './components/USDTPriceCard';
 import { SettingsPage } from './components/SettingsPage';
 import './App.css';
 
-const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const WS_URL = import.meta.env.VITE_WS_URL as string
+  ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
 function StatusDot() {
   const status = useFundingStore((s) => s.wsStatus);

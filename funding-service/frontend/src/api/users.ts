@@ -1,5 +1,6 @@
 const USER_ID_KEY = 'user_id';
 const USER_TOKEN_KEY = 'user_token';
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
 
 export interface UserRecord {
   id: number;
@@ -19,7 +20,7 @@ export async function ensureUser(): Promise<UserRecord> {
     return { id: parseInt(storedId, 10), token: storedToken };
   }
 
-  const res = await fetch('/api/v1/users', { method: 'POST' });
+  const res = await fetch(`${API_BASE}/api/v1/users`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to create user');
 
   const data: UserRecord = await res.json();
@@ -29,7 +30,7 @@ export async function ensureUser(): Promise<UserRecord> {
 }
 
 export async function getTelegramLink(userId: number): Promise<TelegramLinkResponse> {
-  const res = await fetch(`/api/v1/users/${userId}/telegram-link`);
+  const res = await fetch(`${API_BASE}/api/v1/users/${userId}/telegram-link`);
   if (!res.ok) throw new Error('Failed to get telegram link');
   return res.json();
 }

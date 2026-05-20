@@ -4,7 +4,7 @@ networks:
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
