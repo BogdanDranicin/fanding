@@ -27,8 +27,49 @@ var instruments = []instrumentMeta{
 	{Symbol: "CNYRUBF", Description: "CNY/RUB futures (MOEX)", Sources: []string{"moex_vwap"}},
 }
 
+// TokenRefresher предоставляет кэшированный accessToken.
+type TokenRefresher interface {
+	Token() string
+}
+
+// PositionFetcher получает позиции из tradersdiaries.com.
+type PositionFetcher interface {
+	GetPositions(accessToken string) ([]PositionJSON, error)
+}
+
+// BrokerStore сохраняет и читает настройки подключения брокера.
+type BrokerStore interface {
+	UpsertBrokerConnection(ssoSession, deviceID, expiresAt string) error
+	GetBrokerConnection() *BrokerConnectionStatus
+}
+
+// PositionJSON — JSON-представление позиции для API.
+type PositionJSON struct {
+	Symbol     string   `json:"symbol"`
+	Exchange   string   `json:"exchange"`
+	Side       string   `json:"side"`
+	Pos        int      `json:"pos"`
+	Profit     *float64 `json:"profit"`
+	ProfitPerc *float64 `json:"profit_perc"`
+	Date       string   `json:"date"`
+	Time       string   `json:"time"`
+	Asset      string   `json:"asset"`
+}
+
+// BrokerConnectionStatus — статус подключения для GET /settings/positions/status.
+type BrokerConnectionStatus struct {
+	Configured bool   `json:"configured"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+}
+
+// BrokerSettingsRequest — тело POST /settings/positions.
+type BrokerSettingsRequest struct {
+	SSOSession string `json:"sso_session"`
+	DeviceID   string `json:"device_id"`
+}
+
 // NewRouter builds and returns the chi router for the HTTP API.
-func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger) http.Handler {
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, refresher TokenRefresher, fetcher PositionFetcher, brokerStore BrokerStore) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(allowedOrigin))
@@ -44,7 +85,61 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 		Post("/api/v1/users", handleCreateUser(store))
 	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
 
+	r.Get("/api/v1/positions", HandleGetPositions(refresher, fetcher))
+	r.Post("/api/v1/settings/positions", HandlePostSettingsPositions(brokerStore))
+	r.Get("/api/v1/settings/positions/status", HandleGetSettingsPositionsStatus(brokerStore))
+
 	return r
+}
+
+// HandleGetPositions возвращает активные позиции.
+func HandleGetPositions(r TokenRefresher, f PositionFetcher) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		token := r.Token()
+		if token == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_configured"})
+			return
+		}
+		pos, err := f.GetPositions(token)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, pos)
+	}
+}
+
+// HandlePostSettingsPositions сохраняет sso_session и device_id.
+func HandlePostSettingsPositions(s BrokerStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		var body BrokerSettingsRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.SSOSession == "" || body.DeviceID == "" {
+			http.Error(w, "sso_session and device_id required", http.StatusBadRequest)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+		if err := s.UpsertBrokerConnection(body.SSOSession, body.DeviceID, expiresAt); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "expires_at": expiresAt})
+	}
+}
+
+// HandleGetSettingsPositionsStatus возвращает статус подключения.
+func HandleGetSettingsPositionsStatus(s BrokerStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		conn := s.GetBrokerConnection()
+		if conn == nil {
+			writeJSON(w, http.StatusOK, BrokerConnectionStatus{Configured: false})
+			return
+		}
+		writeJSON(w, http.StatusOK, conn)
+	}
 }
 
 func handleInstruments(w http.ResponseWriter, _ *http.Request) {
