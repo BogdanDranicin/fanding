@@ -106,7 +106,12 @@ func handleTelegramLink(store *storage.Store, botUsername string) http.HandlerFu
 			http.Error(w, "invalid id", http.StatusBadRequest)
 			return
 		}
-		token, linked, err := store.UserByID(r.Context(), id)
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "token required", http.StatusUnauthorized)
+			return
+		}
+		linked, err := store.UserByIDAndToken(r.Context(), id, token)
 		if err != nil {
 			http.Error(w, "user not found", http.StatusNotFound)
 			return

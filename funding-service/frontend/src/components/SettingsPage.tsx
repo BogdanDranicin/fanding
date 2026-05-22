@@ -17,7 +17,7 @@ export function SettingsPage({ onBack }: Props) {
     (async () => {
       try {
         const user = await ensureUser();
-        const link = await getTelegramLink(user.id);
+        const link = await getTelegramLink(user.id, user.token);
         if (!cancelled) {
           setTgUrl(link.url);
           setLinked(link.linked);
