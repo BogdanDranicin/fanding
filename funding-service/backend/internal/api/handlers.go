@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -34,10 +35,13 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	r.Use(zerologMiddleware(log))
 	r.Use(maxBodyMiddleware(1 << 10)) // 1 KB limit
 
+	userLimiter := newIPLimiter()
+
 	r.Get("/api/v1/instruments", handleInstruments)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
 	r.Get("/api/v1/cb-publications", handleCBPublications(store))
-	r.Post("/api/v1/users", handleCreateUser(store))
+	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute)).
+		Post("/api/v1/users", handleCreateUser(store))
 	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
 
 	return r
