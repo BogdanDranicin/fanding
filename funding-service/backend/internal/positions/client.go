@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -91,7 +92,23 @@ func (c *Client) GetAccessToken(ctx context.Context, ssoSession, deviceID string
 var positionsBody = []byte(`{"filter":{},"sort":[{"col":"symbol","asc":true}]}`)
 
 // GetPositions вызывает get-positions endpoint и возвращает активные позиции.
+// При EOF (сброс соединения сервером) делает один повтор.
 func (c *Client) GetPositions(ctx context.Context, accessToken string) ([]Position, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		pos, err := c.doGetPositions(ctx, accessToken)
+		if err == nil {
+			return pos, nil
+		}
+		lastErr = err
+		if !isEOF(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *Client) doGetPositions(ctx context.Context, accessToken string) ([]Position, error) {
 	url := fmt.Sprintf("%s/prod/prop/get-positions", c.apiBase)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(positionsBody))
@@ -116,4 +133,12 @@ func (c *Client) GetPositions(ctx context.Context, accessToken string) ([]Positi
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return pos, nil
+}
+
+func isEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset")
 }

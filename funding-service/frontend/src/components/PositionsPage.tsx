@@ -71,11 +71,16 @@ export function PositionsPage({ onGoToSettings }: Props) {
         <>
           <div className="positions-header">
             <span className="positions-title">Активные позиции</span>
-            {fmtTime && (
-              <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-                обновлено {fmtTime}
-              </span>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {fmtTime && (
+                <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                  обновлено {fmtTime}
+                </span>
+              )}
+              <button className="nav-link" onClick={load} style={{ fontSize: 12 }}>
+                Обновить
+              </button>
+            </div>
           </div>
 
           {positions.length === 0 ? (

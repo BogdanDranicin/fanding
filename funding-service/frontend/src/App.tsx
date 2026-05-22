@@ -13,9 +13,9 @@ type Page = 'main' | 'positions' | 'settings';
 
 const VALID_PAGES: Page[] = ['main', 'positions', 'settings'];
 
-function pageFromHash(): Page {
-  const h = window.location.hash.slice(1) as Page;
-  return VALID_PAGES.includes(h) ? h : 'main';
+function pageFromPath(): Page {
+  const p = window.location.pathname.slice(1) as Page;
+  return VALID_PAGES.includes(p) ? p : 'main';
 }
 
 function StatusDot() {
@@ -25,19 +25,20 @@ function StatusDot() {
 
 export default function App() {
   useWebSocket(WS_URL);
-  const [page, setPage] = useState<Page>(pageFromHash);
+  const [page, setPage] = useState<Page>(pageFromPath);
 
   const current = useFundingStore((s) => s.current);
   const previous = useFundingStore((s) => s.previous);
 
   useEffect(() => {
-    const handler = () => setPage(pageFromHash());
-    window.addEventListener('hashchange', handler);
-    return () => window.removeEventListener('hashchange', handler);
+    const handler = () => setPage(pageFromPath());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
   }, []);
 
   const navigate = (p: Page) => {
-    window.location.hash = p === 'main' ? '' : p;
+    const path = p === 'main' ? '/' : `/${p}`;
+    window.history.pushState({}, '', path);
     setPage(p);
   };
 
