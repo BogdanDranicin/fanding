@@ -31,12 +31,21 @@ func (s *Store) GetBrokerConnection(ctx context.Context) (*BrokerConnection, err
 	return &c, nil
 }
 
-// UpsertBrokerConnection заменяет единственную запись (truncate + insert).
+// UpsertBrokerConnection заменяет единственную запись.
 func (s *Store) UpsertBrokerConnection(ctx context.Context, conn BrokerConnection) error {
-	_, err := s.pool.Exec(ctx,
-		`TRUNCATE broker_connection;
-		 INSERT INTO broker_connection (sso_session, device_id, expires_at)
-		 VALUES ($1, $2, $3)`,
-		conn.SSOSession, conn.DeviceID, conn.ExpiresAt)
-	return err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM broker_connection`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO broker_connection (sso_session, device_id, expires_at) VALUES ($1, $2, $3)`,
+		conn.SSOSession, conn.DeviceID, conn.ExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
