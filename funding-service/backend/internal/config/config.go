@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/kelseyhightower/envconfig"
 )
@@ -29,6 +30,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.PostgresPassword == "" && cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("POSTGRES_PASSWORD or DATABASE_URL must be set")
+	}
+	if cfg.AllowedOrigin == "*" {
+		fmt.Fprintln(os.Stderr, "WARNING: ALLOWED_ORIGIN=* — set to your frontend URL in production")
 	}
 	return &cfg, nil
 }
