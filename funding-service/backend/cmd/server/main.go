@@ -112,9 +112,15 @@ func main() {
 	router.Handle("/api/", apiRouter)
 
 	router.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // TODO: restrict origins in production
-		})
+		wsOpts := &websocket.AcceptOptions{}
+		if cfg.AllowedOrigin != "*" && cfg.AllowedOrigin != "" {
+			wsOpts.OriginPatterns = []string{cfg.AllowedOrigin}
+		} else {
+			wsOpts.InsecureSkipVerify = true
+			log.Warn().Str("ALLOWED_ORIGIN", cfg.AllowedOrigin).
+				Msg("WS origin check disabled — set ALLOWED_ORIGIN=<frontend-url> in production")
+		}
+		conn, err := websocket.Accept(w, r, wsOpts)
 		if err != nil {
 			log.Warn().Err(err).Str("remote", r.RemoteAddr).Msg("ws accept failed")
 			return
@@ -144,8 +150,12 @@ func main() {
 	})
 
 	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	const wsBroadcastInterval = 250 * time.Millisecond
