@@ -128,6 +128,8 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 			s.maybeEmit(ch, symbol, "LAST", source.KindLastPrice, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "BID", source.KindBid, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "OFFER", source.KindAsk, resp.MarketData, vol, ts)
+			s.maybeEmit(ch, symbol, "SETTLEPRICE", source.KindSettlePrice, resp.MarketData, vol, ts)
+			s.emitSwapRate(ch, symbol, resp.MarketData, ts)
 			log.Debug().Msg("polled")
 		}
 	}
@@ -163,6 +165,36 @@ func (s *Source) maybeEmit(ch chan<- source.Tick, symbol, field string, kind sou
 	}
 }
 
+// emitSwapRate emits a KindSwapRate tick for the given symbol.
+// Unlike maybeEmit, it allows zero values because SWAPRATE=0 is valid (within K1 deadband).
+func (s *Source) emitSwapRate(ch chan<- source.Tick, symbol string, md map[string]interface{}, ts time.Time) {
+	v, ok := md["SWAPRATE"]
+	if !ok || v == nil {
+		return
+	}
+	rate, ok := v.(float64)
+	if !ok {
+		return
+	}
+
+	key := symbol + ":SWAPRATE"
+	if prev, loaded := s.lastValues.Load(key); loaded && prev.(float64) == rate {
+		return
+	}
+	s.lastValues.Store(key, rate)
+
+	select {
+	case ch <- source.Tick{
+		Symbol:    symbol,
+		Price:     rate,
+		Kind:      source.KindSwapRate,
+		Timestamp: ts,
+		Source:    s.Name(),
+	}:
+	default:
+	}
+}
+
 func parseTime(md map[string]interface{}) time.Time {
 	v, ok := md["SYSTIME"]
 	if !ok || v == nil {
@@ -172,7 +204,7 @@ func parseTime(md map[string]interface{}) time.Time {
 	if !ok {
 		return time.Now()
 	}
-	t, err := time.ParseInLocation(sysTimeLayout, str, time.Local)
+	t, err := time.ParseInLocation(sysTimeLayout, str, time.FixedZone("MSK", 3*60*60))
 	if err != nil {
 		return time.Now()
 	}
