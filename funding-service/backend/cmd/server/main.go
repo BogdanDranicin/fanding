@@ -117,7 +117,7 @@ func main() {
 		cfg.AllowedOrigin,
 		log.Logger,
 		posRefresher,
-		&positionFetcherAdapter{client: posClient},
+		&positionFetcherAdapter{client: posClient, httpClient: &http.Client{Timeout: 5 * time.Second}, log: log.Logger},
 		brokerAdapter,
 	)
 
@@ -296,27 +296,49 @@ func (a *brokerStoreAdapter) GetBrokerConnection() *api.BrokerConnectionStatus {
 
 // positionFetcherAdapter адаптирует positions.Client к api.PositionFetcher.
 type positionFetcherAdapter struct {
-	client *positions.Client
+	client     *positions.Client
+	httpClient *http.Client
+	log        zerolog.Logger
 }
 
 func (a *positionFetcherAdapter) GetPositions(accessToken string) ([]api.PositionJSON, error) {
-	pos, err := a.client.GetPositions(context.Background(), accessToken)
+	ctx := context.Background()
+	pos, err := a.client.GetPositions(ctx, accessToken)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]api.PositionJSON, len(pos))
 	for i, p := range pos {
-		result[i] = api.PositionJSON{
+		var entryPrice float64
+		if p.Pos > 0 {
+			entryPrice = p.TotalBuy / float64(p.Pos)
+		}
+
+		pj := api.PositionJSON{
 			Symbol:     p.Symbol,
 			Exchange:   p.Exchange,
 			Side:       p.Side,
 			Pos:        p.Pos,
-			Profit:     p.Profit,
-			ProfitPerc: p.ProfitPerc,
+			EntryPrice: entryPrice,
 			Date:       p.Date,
 			Time:       p.Time,
 			Asset:      p.Asset,
 		}
+
+		if entryPrice > 0 && p.Board != "" {
+			cur, err := positions.FetchMOEXLastPrice(ctx, a.httpClient, p.Symbol, p.Board)
+			if err != nil {
+				a.log.Debug().Err(err).Str("symbol", p.Symbol).Msg("positions: moex price fetch failed")
+			} else {
+				pct := (cur - entryPrice) / entryPrice * 100
+				profit := (cur - entryPrice) * float64(p.Pos)
+				pj.CurrentPrice = &cur
+				pj.UnrealizedProfitPct = &pct
+				pj.UnrealizedProfit = &profit
+			}
+		}
+
+		result[i] = pj
 	}
 	return result, nil
 }

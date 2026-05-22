@@ -45,15 +45,17 @@ type BrokerStore interface {
 
 // PositionJSON — JSON-представление позиции для API.
 type PositionJSON struct {
-	Symbol     string   `json:"symbol"`
-	Exchange   string   `json:"exchange"`
-	Side       string   `json:"side"`
-	Pos        int      `json:"pos"`
-	Profit     *float64 `json:"profit"`
-	ProfitPerc *float64 `json:"profit_perc"`
-	Date       string   `json:"date"`
-	Time       string   `json:"time"`
-	Asset      string   `json:"asset"`
+	Symbol              string   `json:"symbol"`
+	Exchange            string   `json:"exchange"`
+	Side                string   `json:"side"`
+	Pos                 int      `json:"pos"`
+	EntryPrice          float64  `json:"entry_price"`
+	CurrentPrice        *float64 `json:"current_price,omitempty"`
+	UnrealizedProfit    *float64 `json:"unrealized_profit,omitempty"`
+	UnrealizedProfitPct *float64 `json:"unrealized_profit_pct,omitempty"`
+	Date                string   `json:"date"`
+	Time                string   `json:"time"`
+	Asset               string   `json:"asset"`
 }
 
 // BrokerConnectionStatus — статус подключения для GET /settings/positions/status.
@@ -85,7 +87,7 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 		Post("/api/v1/users", handleCreateUser(store))
 	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
 
-	r.Get("/api/v1/positions", HandleGetPositions(refresher, fetcher))
+	r.Get("/api/v1/positions", HandleGetPositions(refresher, fetcher, log))
 	r.Post("/api/v1/settings/positions", HandlePostSettingsPositions(brokerStore))
 	r.Get("/api/v1/settings/positions/status", HandleGetSettingsPositionsStatus(brokerStore))
 
@@ -93,7 +95,7 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 }
 
 // HandleGetPositions возвращает активные позиции.
-func HandleGetPositions(r TokenRefresher, f PositionFetcher) http.HandlerFunc {
+func HandleGetPositions(r TokenRefresher, f PositionFetcher, log zerolog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		token := r.Token()
 		if token == "" {
@@ -102,6 +104,7 @@ func HandleGetPositions(r TokenRefresher, f PositionFetcher) http.HandlerFunc {
 		}
 		pos, err := f.GetPositions(token)
 		if err != nil {
+			log.Warn().Err(err).Msg("positions: fetch failed")
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}

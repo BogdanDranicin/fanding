@@ -108,12 +108,12 @@ export function PositionsPage({ onGoToSettings }: Props) {
                       </span>
                     </td>
                     <td className="cell">{p.pos}</td>
-                    <td className={`cell ${p.profit != null && p.profit >= 0 ? 'funding-positive' : 'funding-negative'}`}>
-                      {p.profit != null ? fmtProfit.format(p.profit) : '—'}
+                    <td className={`cell ${p.unrealized_profit != null && p.unrealized_profit >= 0 ? 'funding-positive' : 'funding-negative'}`}>
+                      {p.unrealized_profit != null ? fmtProfit.format(p.unrealized_profit) : '—'}
                     </td>
-                    <td className={`cell ${p.profit_perc != null && p.profit_perc >= 0 ? 'funding-positive' : 'funding-negative'}`}>
-                      {p.profit_perc != null
-                        ? `${p.profit_perc >= 0 ? '+' : ''}${p.profit_perc.toFixed(2)}%`
+                    <td className={`cell ${p.unrealized_profit_pct != null && p.unrealized_profit_pct >= 0 ? 'funding-positive' : 'funding-negative'}`}>
+                      {p.unrealized_profit_pct != null
+                        ? `${p.unrealized_profit_pct >= 0 ? '+' : ''}${p.unrealized_profit_pct.toFixed(2)}%`
                         : '—'}
                     </td>
                     <td className="cell" style={{ color: 'var(--text-muted)', fontSize: 12 }}>

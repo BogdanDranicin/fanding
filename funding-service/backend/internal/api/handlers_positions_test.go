@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/funding-service/backend/internal/api"
+	"github.com/rs/zerolog"
 )
 
 type mockRefresher struct{ token string }
@@ -35,7 +36,7 @@ func (m *mockBrokerStore) GetBrokerConnection() *api.BrokerConnectionStatus { re
 
 func TestHandleGetPositions_NotConfigured(t *testing.T) {
 	refresher := &mockRefresher{token: ""}
-	h := api.HandleGetPositions(refresher, nil)
+	h := api.HandleGetPositions(refresher, nil, zerolog.Nop())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/positions", nil)
 	w := httptest.NewRecorder()
@@ -49,7 +50,7 @@ func TestHandleGetPositions_NotConfigured(t *testing.T) {
 func TestHandleGetPositions_Success(t *testing.T) {
 	refresher := &mockRefresher{token: "valid-token"}
 	fetcher := &mockFetcher{positions: []api.PositionJSON{{Symbol: "VTBR", Side: "buy"}}}
-	h := api.HandleGetPositions(refresher, fetcher)
+	h := api.HandleGetPositions(refresher, fetcher, zerolog.Nop())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/positions", nil)
 	w := httptest.NewRecorder()

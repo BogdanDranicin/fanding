@@ -29,8 +29,10 @@ export interface Position {
   exchange: string;
   side: 'buy' | 'sell';
   pos: number;
-  profit: number | null;
-  profit_perc: number | null;
+  entry_price: number;
+  current_price?: number;
+  unrealized_profit?: number;
+  unrealized_profit_pct?: number;
   date: string;
   time: string;
   asset: string;

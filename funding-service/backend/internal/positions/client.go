@@ -18,8 +18,11 @@ const (
 type Position struct {
 	Symbol     string   `json:"symbol"`
 	Exchange   string   `json:"exchange"`
+	Board      string   `json:"board"`
 	Side       string   `json:"side"`
 	Pos        int      `json:"pos"`
+	TotalBuy   float64  `json:"total_buy"`
+	TotalSell  float64  `json:"total_sell"`
 	Profit     *float64 `json:"profit"`
 	ProfitPerc *float64 `json:"profit_perc"`
 	Date       string   `json:"date"`
