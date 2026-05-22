@@ -101,7 +101,7 @@ func main() {
 
 	hub := appws.NewHub(log.Logger)
 
-	apiRouter := api.NewRouter(store, cfg.TelegramBotName, log.Logger)
+	apiRouter := api.NewRouter(store, cfg.TelegramBotName, cfg.AllowedOrigin, log.Logger)
 
 	router := http.NewServeMux()
 

@@ -27,11 +27,12 @@ var instruments = []instrumentMeta{
 }
 
 // NewRouter builds and returns the chi router for the HTTP API.
-func NewRouter(store *storage.Store, botUsername string, log zerolog.Logger) http.Handler {
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	r.Use(corsMiddleware(allowedOrigin))
 	r.Use(zerologMiddleware(log))
+	r.Use(maxBodyMiddleware(1 << 10)) // 1 KB limit
 
 	r.Get("/api/v1/instruments", handleInstruments)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
@@ -123,17 +124,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func corsMiddleware(allowedOrigin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			if allowedOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func zerologMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
@@ -145,6 +151,15 @@ func zerologMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
 				Str("path", r.URL.Path).
 				Str("remote", r.RemoteAddr).
 				Msg("http request")
+		})
+	}
+}
+
+func maxBodyMiddleware(limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
 		})
 	}
 }
