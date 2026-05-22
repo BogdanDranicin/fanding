@@ -8,10 +8,12 @@ import (
 	"github.com/funding-service/backend/internal/metrics"
 )
 
+const maxClients = 5000
+
 // Hub maintains the set of active WebSocket clients and broadcasts messages to them.
 type Hub struct {
 	clients map[*Client]struct{}
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	log     zerolog.Logger
 }
 
@@ -23,12 +25,16 @@ func NewHub(log zerolog.Logger) *Hub {
 	}
 }
 
-// Register adds a client to the hub.
-func (h *Hub) Register(c *Client) {
+// Register adds a client to the hub. Returns false if the hub is at capacity.
+func (h *Hub) Register(c *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.clients) >= maxClients {
+		return false
+	}
 	h.clients[c] = struct{}{}
 	metrics.WSClients.Set(float64(len(h.clients)))
+	return true
 }
 
 // Unregister removes a client from the hub.
@@ -40,12 +46,16 @@ func (h *Hub) Unregister(c *Client) {
 }
 
 // Broadcast sends msg to every registered client.
-// Slow clients whose send buffer is full are skipped with a warning — they never
-// block or slow down the broadcast for other clients.
+// Copies the client list under RLock, then sends without holding the lock.
 func (h *Hub) Broadcast(msg []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range clients {
 		select {
 		case c.send <- msg:
 		default:
@@ -56,7 +66,7 @@ func (h *Hub) Broadcast(msg []byte) {
 
 // Len returns the current number of connected clients.
 func (h *Hub) Len() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return len(h.clients)
 }

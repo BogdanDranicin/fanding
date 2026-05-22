@@ -127,7 +127,11 @@ func main() {
 		}
 
 		c := appws.NewClient(conn, hub, r.RemoteAddr, log.Logger)
-		hub.Register(c)
+		if !hub.Register(c) {
+			conn.Close(websocket.StatusTryAgainLater, "server at capacity")
+			log.Warn().Str("remote", r.RemoteAddr).Msg("ws rejected: server at capacity")
+			return
+		}
 		log.Info().Str("remote", r.RemoteAddr).Int("clients", hub.Len()).Msg("ws client connected")
 
 		connCtx, connCancel := context.WithCancel(ctx)
