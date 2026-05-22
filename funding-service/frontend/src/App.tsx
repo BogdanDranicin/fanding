@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFundingStore } from './store/fundingStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { FundingTable } from './components/FundingTable';
@@ -11,6 +11,13 @@ const WS_URL = import.meta.env.VITE_WS_URL as string
 
 type Page = 'main' | 'positions' | 'settings';
 
+const VALID_PAGES: Page[] = ['main', 'positions', 'settings'];
+
+function pageFromHash(): Page {
+  const h = window.location.hash.slice(1) as Page;
+  return VALID_PAGES.includes(h) ? h : 'main';
+}
+
 function StatusDot() {
   const status = useFundingStore((s) => s.wsStatus);
   return <span className={`status-dot status-${status}`} title={status} />;
@@ -18,10 +25,21 @@ function StatusDot() {
 
 export default function App() {
   useWebSocket(WS_URL);
-  const [page, setPage] = useState<Page>('main');
+  const [page, setPage] = useState<Page>(pageFromHash);
 
   const current = useFundingStore((s) => s.current);
   const previous = useFundingStore((s) => s.previous);
+
+  useEffect(() => {
+    const handler = () => setPage(pageFromHash());
+    window.addEventListener('hashchange', handler);
+    return () => window.removeEventListener('hashchange', handler);
+  }, []);
+
+  const navigate = (p: Page) => {
+    window.location.hash = p === 'main' ? '' : p;
+    setPage(p);
+  };
 
   return (
     <div className="app">
@@ -31,21 +49,21 @@ export default function App() {
           <button
             className="nav-link"
             style={{ fontWeight: page === 'main' ? 600 : undefined }}
-            onClick={() => setPage('main')}
+            onClick={() => navigate('main')}
           >
             Таблица
           </button>
           <button
             className="nav-link"
             style={{ fontWeight: page === 'positions' ? 600 : undefined }}
-            onClick={() => setPage('positions')}
+            onClick={() => navigate('positions')}
           >
             Позиции
           </button>
           <button
             className="nav-link"
             style={{ fontWeight: page === 'settings' ? 600 : undefined }}
-            onClick={() => setPage('settings')}
+            onClick={() => navigate('settings')}
           >
             Настройки
           </button>
@@ -55,10 +73,10 @@ export default function App() {
 
       <main className="app-main">
         {page === 'settings' && (
-          <SettingsPage onBack={() => setPage('main')} />
+          <SettingsPage onBack={() => navigate('main')} />
         )}
         {page === 'positions' && (
-          <PositionsPage onGoToSettings={() => setPage('settings')} />
+          <PositionsPage onGoToSettings={() => navigate('settings')} />
         )}
         {page === 'main' && (
           <FundingTable current={current} previous={previous} />
