@@ -22,6 +22,7 @@ import (
 	"github.com/funding-service/backend/internal/config"
 	"github.com/funding-service/backend/internal/funding"
 	"github.com/funding-service/backend/internal/metrics"
+	"github.com/funding-service/backend/internal/positions"
 	"github.com/funding-service/backend/internal/source"
 	"github.com/funding-service/backend/internal/source/cbr"
 	"github.com/funding-service/backend/internal/source/moexiss"
@@ -69,6 +70,15 @@ func main() {
 
 	store := storage.NewStore(pool)
 
+	posClient := positions.New()
+	posRefresher := positions.NewRefresher(posClient, log.Logger)
+	if conn, err := store.GetBrokerConnection(ctx); err == nil && conn != nil {
+		posRefresher.Reload(conn.SSOSession, conn.DeviceID)
+	}
+	go posRefresher.Run(ctx)
+
+	brokerAdapter := &brokerStoreAdapter{store: store, refresher: posRefresher}
+
 	moexSrc := moexiss.New(time.Duration(cfg.MOEXPollMs)*time.Millisecond, log.Logger)
 	cbrSrc := cbr.New(log.Logger)
 
@@ -101,7 +111,15 @@ func main() {
 
 	hub := appws.NewHub(log.Logger)
 
-	apiRouter := api.NewRouter(store, cfg.TelegramBotName, cfg.AllowedOrigin, log.Logger)
+	apiRouter := api.NewRouter(
+		store,
+		cfg.TelegramBotName,
+		cfg.AllowedOrigin,
+		log.Logger,
+		posRefresher,
+		&positionFetcherAdapter{client: posClient},
+		brokerAdapter,
+	)
 
 	router := http.NewServeMux()
 
@@ -240,4 +258,65 @@ func main() {
 
 	cancel()
 	<-runDone
+}
+
+// brokerStoreAdapter связывает storage.Store и positions.Refresher с api.BrokerStore.
+type brokerStoreAdapter struct {
+	store     *storage.Store
+	refresher *positions.Refresher
+}
+
+func (a *brokerStoreAdapter) UpsertBrokerConnection(ssoSession, deviceID, expiresAtStr string) error {
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		return fmt.Errorf("parse expires_at: %w", err)
+	}
+	conn := storage.BrokerConnection{
+		SSOSession: ssoSession,
+		DeviceID:   deviceID,
+		ExpiresAt:  expiresAt,
+	}
+	if err := a.store.UpsertBrokerConnection(context.Background(), conn); err != nil {
+		return err
+	}
+	a.refresher.Reload(ssoSession, deviceID)
+	return nil
+}
+
+func (a *brokerStoreAdapter) GetBrokerConnection() *api.BrokerConnectionStatus {
+	conn, err := a.store.GetBrokerConnection(context.Background())
+	if err != nil || conn == nil {
+		return nil
+	}
+	return &api.BrokerConnectionStatus{
+		Configured: true,
+		ExpiresAt:  conn.ExpiresAt.UTC().Format("02.01.2006"),
+	}
+}
+
+// positionFetcherAdapter адаптирует positions.Client к api.PositionFetcher.
+type positionFetcherAdapter struct {
+	client *positions.Client
+}
+
+func (a *positionFetcherAdapter) GetPositions(accessToken string) ([]api.PositionJSON, error) {
+	pos, err := a.client.GetPositions(context.Background(), accessToken)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]api.PositionJSON, len(pos))
+	for i, p := range pos {
+		result[i] = api.PositionJSON{
+			Symbol:     p.Symbol,
+			Exchange:   p.Exchange,
+			Side:       p.Side,
+			Pos:        p.Pos,
+			Profit:     p.Profit,
+			ProfitPerc: p.ProfitPerc,
+			Date:       p.Date,
+			Time:       p.Time,
+			Asset:      p.Asset,
+		}
+	}
+	return result, nil
 }
