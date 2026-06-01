@@ -57,13 +57,16 @@ type columnData struct {
 }
 
 type issResponse struct {
+	Securities columnData `json:"securities"`
 	MarketData columnData `json:"marketdata"`
 }
 
-// RawResponse holds the parsed marketdata section from a single MOEX ISS response.
+// RawResponse holds the parsed marketdata and securities sections from a single MOEX ISS response.
 type RawResponse struct {
 	// MarketData maps column names to values from data[0].
 	MarketData map[string]interface{}
+	// Securities maps column names to values from securities.data[0].
+	Securities map[string]interface{}
 	ETag       string
 }
 
@@ -141,6 +144,11 @@ func (c *Client) doRequest(ctx context.Context, url string) (*RawResponse, error
 		return nil, fmt.Errorf("parse marketdata: %w", err)
 	}
 
+	var sec map[string]interface{}
+	if len(raw.Securities.Data) > 0 {
+		sec, _ = parseColumnData(raw.Securities)
+	}
+
 	etag := resp.Header.Get("ETag")
 	if etag != "" {
 		c.etags.Store(url, etag)
@@ -148,6 +156,7 @@ func (c *Client) doRequest(ctx context.Context, url string) (*RawResponse, error
 
 	return &RawResponse{
 		MarketData: md,
+		Securities: sec,
 		ETag:       etag,
 	}, nil
 }

@@ -22,7 +22,6 @@ import (
 	"github.com/funding-service/backend/internal/config"
 	"github.com/funding-service/backend/internal/funding"
 	"github.com/funding-service/backend/internal/metrics"
-	"github.com/funding-service/backend/internal/positions"
 	"github.com/funding-service/backend/internal/source"
 	"github.com/funding-service/backend/internal/source/cbr"
 	"github.com/funding-service/backend/internal/source/moexiss"
@@ -70,15 +69,6 @@ func main() {
 
 	store := storage.NewStore(pool)
 
-	posClient := positions.New()
-	posRefresher := positions.NewRefresher(posClient, log.Logger)
-	if conn, err := store.GetBrokerConnection(ctx); err == nil && conn != nil {
-		posRefresher.Reload(conn.SSOSession, conn.DeviceID)
-	}
-	go posRefresher.Run(ctx)
-
-	brokerAdapter := &brokerStoreAdapter{store: store, refresher: posRefresher}
-
 	moexSrc := moexiss.New(time.Duration(cfg.MOEXPollMs)*time.Millisecond, log.Logger)
 	cbrSrc := cbr.New(log.Logger)
 
@@ -86,16 +76,20 @@ func main() {
 		source.SymbolUSDRUBF:        moexSrc,
 		source.SymbolEURRUBF:        moexSrc,
 		source.SymbolCNYRUBF:        moexSrc,
+		source.SymbolUSDRubTOM:      moexSrc,
 		source.SymbolUSDRubOfficial: cbrSrc,
 		source.SymbolEURRubOfficial: cbrSrc,
 	}
 	mux := multiplex.New(routing)
 
 	// USDTRUB (crypto) has no source yet; omitted until a crypto feed is added.
+	// USDRUB_TOM is the spot "tomorrow" leg whose 10:00–15:30 MSK WAPRICE predicts the CBR fixing.
+	// EUR/RUB_TOM doesn't trade on MOEX — EUR predicted CB rate uses EUR/USD × USD/RUB cross.
 	symbols := []string{
 		source.SymbolUSDRUBF,
 		source.SymbolEURRUBF,
 		source.SymbolCNYRUBF,
+		source.SymbolUSDRubTOM,
 		source.SymbolUSDRubOfficial,
 		source.SymbolEURRubOfficial,
 	}
@@ -116,9 +110,7 @@ func main() {
 		cfg.TelegramBotName,
 		cfg.AllowedOrigin,
 		log.Logger,
-		posRefresher,
-		&positionFetcherAdapter{client: posClient, httpClient: &http.Client{Timeout: 5 * time.Second}, log: log.Logger},
-		brokerAdapter,
+		moexSrc.GetSpecs,
 	)
 
 	router := http.NewServeMux()
@@ -228,7 +220,7 @@ func main() {
 		} else {
 			go bot.Run(ctx)
 			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
-			go disp.Run(ctx, dispPubCh)
+			go disp.Run(ctx, eng.SettlementCh(), dispPubCh)
 		}
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")
@@ -258,87 +250,4 @@ func main() {
 
 	cancel()
 	<-runDone
-}
-
-// brokerStoreAdapter связывает storage.Store и positions.Refresher с api.BrokerStore.
-type brokerStoreAdapter struct {
-	store     *storage.Store
-	refresher *positions.Refresher
-}
-
-func (a *brokerStoreAdapter) UpsertBrokerConnection(ssoSession, deviceID, expiresAtStr string) error {
-	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
-	if err != nil {
-		return fmt.Errorf("parse expires_at: %w", err)
-	}
-	conn := storage.BrokerConnection{
-		SSOSession: ssoSession,
-		DeviceID:   deviceID,
-		ExpiresAt:  expiresAt,
-	}
-	if err := a.store.UpsertBrokerConnection(context.Background(), conn); err != nil {
-		return err
-	}
-	a.refresher.Reload(ssoSession, deviceID)
-	return nil
-}
-
-func (a *brokerStoreAdapter) GetBrokerConnection() *api.BrokerConnectionStatus {
-	conn, err := a.store.GetBrokerConnection(context.Background())
-	if err != nil || conn == nil {
-		return nil
-	}
-	return &api.BrokerConnectionStatus{
-		Configured: true,
-		ExpiresAt:  conn.ExpiresAt.UTC().Format("02.01.2006"),
-	}
-}
-
-// positionFetcherAdapter адаптирует positions.Client к api.PositionFetcher.
-type positionFetcherAdapter struct {
-	client     *positions.Client
-	httpClient *http.Client
-	log        zerolog.Logger
-}
-
-func (a *positionFetcherAdapter) GetPositions(accessToken string) ([]api.PositionJSON, error) {
-	ctx := context.Background()
-	pos, err := a.client.GetPositions(ctx, accessToken)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]api.PositionJSON, len(pos))
-	for i, p := range pos {
-		var entryPrice float64
-		if p.Pos > 0 {
-			entryPrice = p.TotalBuy / float64(p.Pos)
-		}
-
-		pj := api.PositionJSON{
-			Symbol:     p.Symbol,
-			Exchange:   p.Exchange,
-			Side:       p.Side,
-			Pos:        p.Pos,
-			EntryPrice: entryPrice,
-			Date:       p.Date,
-			Time:       p.Time,
-			Asset:      p.Asset,
-		}
-
-		if entryPrice > 0 && p.Board != "" {
-			cur, err := positions.FetchMOEXLastPrice(ctx, a.httpClient, p.Symbol, p.Board)
-			if err != nil {
-				a.log.Debug().Err(err).Str("symbol", p.Symbol).Msg("positions: moex price fetch failed")
-			} else {
-				pct := (cur - entryPrice) / entryPrice * 100
-				profit := (cur - entryPrice) * float64(p.Pos)
-				pj.CurrentPrice = &cur
-				pj.UnrealizedProfitPct = &pct
-				pj.UnrealizedProfit = &profit
-			}
-		}
-
-		result[i] = pj
-	}
-	return result, nil
 }

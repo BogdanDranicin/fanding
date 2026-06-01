@@ -16,6 +16,7 @@ import (
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/transform"
 
+	"github.com/funding-service/backend/internal/metrics"
 	"github.com/funding-service/backend/internal/source"
 )
 
@@ -31,9 +32,9 @@ var knownCodes = map[string]string{
 }
 
 // Source implements source.MarketDataSource for the CBR official FX rate.
-// It uses an adaptive poll interval: 200 ms during the 11:25–11:45 Moscow window,
-// 5 minutes outside it. OnNewPublication receives a signal whenever a new daily
-// publication is detected (for downstream Telegram alerts).
+// It uses an adaptive poll interval: 3 s during the 16:00–19:00 Moscow publication
+// window, 5 minutes outside it. OnNewPublication receives a signal whenever a new
+// daily publication is detected (for downstream Telegram alerts).
 type Source struct {
 	url        string
 	logger     zerolog.Logger
@@ -115,49 +116,96 @@ func (s *Source) Close() error {
 	return nil
 }
 
-// pollLoop sleeps for intervalFn() between HTTP requests. intervalFn is re-evaluated
-// each iteration, so the interval can switch between 5 min and 200 ms without code changes.
+// pollLoop fetches immediately on startup, then sleeps for intervalFn() between requests.
+// intervalFn is re-evaluated each iteration, so the interval can switch between 5 min and
+// 200 ms without code changes. On transient errors (network not yet ready at container start)
+// it retries every retryInterval up to maxRetries times before falling back to intervalFn.
 func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- source.Tick) {
+	const retryInterval = 3 * time.Second
+	const maxRetries = 5
+
 	log := s.logger.With().Str("source", "cbr").Logger()
+	failures := 0
 
 	for {
+		iv := s.intervalFn()
+
+		fetchStart := time.Now()
+		vc, err := s.fetchRates(ctx)
+		fetchDur := time.Since(fetchStart)
+		metrics.CBRFetchDuration.Observe(fetchDur.Seconds())
+
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			log.Warn().Err(err).Dur("fetch_latency", fetchDur).Msg("fetch failed")
+			failures++
+			wait := retryInterval
+			if failures > maxRetries {
+				failures = 0
+			}
+			if iv < wait {
+				wait = iv
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			continue
+		}
+
+		failures = 0
+		if vc.Date == s.lastDate {
+			log.Debug().Str("date", vc.Date).Msg("no new publication")
+		} else {
+			// isNew=true если дата в ответе ЦБ позже сегодня (публикация уже состоялась,
+			// в т.ч. при рестарте после 16:30 когда lastDate ещё пустой).
+			isNew := s.lastDate != "" || isFutureDate(vc.Date)
+			s.lastDate = vc.Date
+			s.emitTicks(vc, symbols, ch, isNew)
+
+			// Новую публикацию логируем на Warn, чтобы событие было видно в проде
+			// (LOG_LEVEL=warn). Добавляем диагностику задержки: латентность HTTP-запроса,
+			// действующий интервал опроса и время МСК — этого не хватало для разбора
+			// «почему курсы пришли позже остальных».
+			ev := log.Info()
+			if isNew {
+				ev = log.Warn()
+			}
+			ev.Str("date", vc.Date).
+				Bool("is_update", isNew).
+				Dur("fetch_latency", fetchDur).
+				Dur("poll_interval", iv).
+				Str("msk_time", time.Now().In(time.FixedZone("MSK", mskOffset)).Format("15:04:05")).
+				Msg("cbr rates emitted")
+
+			if isNew {
+				select {
+				case s.OnNewPublication <- time.Now():
+				default:
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(s.intervalFn()):
-		}
-
-		vc, err := s.fetchRates(ctx)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Warn().Err(err).Msg("fetch failed")
-			}
-			continue
-		}
-
-		if vc.Date == s.lastDate {
-			log.Debug().Str("date", vc.Date).Msg("no new publication")
-			continue
-		}
-
-		isUpdate := s.lastDate != ""
-		s.lastDate = vc.Date
-		s.emitTicks(vc, symbols, ch)
-		log.Debug().Str("date", vc.Date).Bool("is_update", isUpdate).Msg("rates emitted")
-
-		if isUpdate {
-			select {
-			case s.OnNewPublication <- time.Now():
-			default:
-			}
+		case <-time.After(iv):
 		}
 	}
 }
 
-func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick) {
+func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick, isNew bool) {
 	wantedSet := make(map[string]bool, len(symbols))
 	for _, sym := range symbols {
 		wantedSet[sym] = true
+	}
+
+	kind := source.KindOfficialRate
+	if isNew {
+		kind = source.KindNewOfficialRate
 	}
 
 	for _, v := range vc.Valutes {
@@ -179,7 +227,7 @@ func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick)
 		case ch <- source.Tick{
 			Symbol:    internalSym,
 			Price:     price,
-			Kind:      source.KindOfficialRate,
+			Kind:      kind,
 			Timestamp: time.Now(),
 			Source:    s.Name(),
 		}:
@@ -193,6 +241,7 @@ func (s *Source) fetchRates(ctx context.Context) (*valCurs, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; funding-service/1.0)")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -237,8 +286,20 @@ type valute struct {
 	Value    string `xml:"Value"`
 }
 
+// isFutureDate reports whether the CBR date string ("DD.MM.YYYY") is strictly after today MSK.
+// A future date means CBR has already published fresh rates for the next business day.
+func isFutureDate(cbrDate string) bool {
+	t, err := time.Parse("02.01.2006", cbrDate)
+	if err != nil {
+		return false
+	}
+	now := time.Now().In(time.FixedZone("MSK", mskOffset))
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return t.Truncate(24 * time.Hour).After(today)
+}
+
 // MoscowAdaptiveInterval is the production interval function.
-// It returns 200 ms during 11:25–11:45 Moscow time, 5 minutes otherwise.
+// It returns 3 s during 16:00–19:00 Moscow time (CBR publication window), 5 minutes otherwise.
 func MoscowAdaptiveInterval() time.Duration {
 	return AdaptiveInterval(time.Now().In(time.FixedZone("MSK", mskOffset)))
 }
@@ -246,9 +307,13 @@ func MoscowAdaptiveInterval() time.Duration {
 // AdaptiveInterval computes the poll interval for a given Moscow time.
 // Exported so it can be unit-tested without depending on real wall time.
 func AdaptiveInterval(t time.Time) time.Duration {
-	h, m, _ := t.Clock()
-	if h == 11 && m >= 25 && m < 45 {
-		return 200 * time.Millisecond
+	h, _, _ := t.Clock()
+	// CBR publishes next-day rates between ~16:30 and 18:00 MSK.
+	// Poll every 3 s in the extended window 16:00–19:00 so the CB funding
+	// appears within seconds of the publication rather than up to 30 s later.
+	// The window is wider than the typical publication time to catch late releases.
+	if h >= 16 && h < 19 {
+		return 3 * time.Second
 	}
 	return 5 * time.Minute
 }

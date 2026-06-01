@@ -4,6 +4,13 @@ services:
     runtime: docker
     dockerfilePath: ./funding-service/backend/Dockerfile
     dockerContext: ./funding-service/backend
+    # На free-тарифе сервис останавливается после 15 мин без входящего трафика
+    # (холодный старт ~30–60 с при пробуждении). Пока держим его тёплым в окне
+    # публикации курсов через .github/workflows/keepalive.yml (бесплатно).
+    #
+    # ПЕРЕХОД НА ПЛАТНЫЙ ПЛАН (когда окупится): поменять `plan: free` → `plan: starter`.
+    # Тогда сервис не спит вообще, и keepalive больше не нужен — отключить workflow
+    # keepalive (Actions → keepalive-cbr-window → ⋯ → Disable workflow) или удалить файл.
     plan: free
     healthCheckPath: /healthz
     envVars:

@@ -26,4 +26,10 @@ var (
 		Name: "funding_cb_publications_detected_total",
 		Help: "Total number of new CBR rate publications detected.",
 	})
+
+	CBRFetchDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "funding_cbr_fetch_duration_seconds",
+		Help:    "Latency of a single CBR HTTP poll request (the time to fetch and parse the rate XML).",
+		Buckets: prometheus.DefBuckets,
+	})
 )

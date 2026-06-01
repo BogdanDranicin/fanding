@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,6 +87,43 @@ func TestSource_TicksDelivered(t *testing.T) {
 		if tk.Price == 0 {
 			t.Error("price must not be zero")
 		}
+	}
+}
+
+func TestSource_SpotTOMUsesSecidAndInternalSymbol(t *testing.T) {
+	// The spot TOM instrument is requested from MOEX by its SECID (USD000UTSTOM) on the
+	// currency/selt/CETS board, but ticks must carry the internal symbol (USDRUB_TOM).
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, issResponse("USD000UTSTOM", 71.37, 71.36, 71.38))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv.URL)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubTOM})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	var tick source.Tick
+	for tk := range ch {
+		tick = tk
+		break
+	}
+
+	if tick.Symbol != source.SymbolUSDRubTOM {
+		t.Errorf("tick symbol: want %q, got %q", source.SymbolUSDRubTOM, tick.Symbol)
+	}
+	wantSegment := "/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json"
+	if !strings.HasSuffix(gotPath, wantSegment) {
+		t.Errorf("request path: want suffix %q, got %q", wantSegment, gotPath)
 	}
 }
 

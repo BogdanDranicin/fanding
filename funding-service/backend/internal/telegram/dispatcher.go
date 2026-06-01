@@ -15,7 +15,7 @@ import (
 
 const sendRateLimit = 40 * time.Millisecond // 25 msg/sec max
 
-// Dispatcher listens to OnNewPublication and sends Telegram alerts.
+// Dispatcher listens to settlement and publication signals and sends Telegram alerts.
 type Dispatcher struct {
 	api        *tgbotapi.BotAPI
 	pool       *pgxpool.Pool
@@ -33,18 +33,25 @@ func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.Fundi
 	}
 }
 
-// Run blocks, forwarding each publication signal to all linked users.
-func (d *Dispatcher) Run(ctx context.Context, pubCh <-chan time.Time) {
+// Run blocks, forwarding each settlement and publication signal to all linked users.
+func (d *Dispatcher) Run(ctx context.Context, settlCh, pubCh <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case pubTime, ok := <-pubCh:
+		case t, ok := <-settlCh:
 			if !ok {
 				return
 			}
 			snap := d.snapshotFn()
-			text := formatAlert(pubTime, snap)
+			text := formatSettlAlert(t, snap)
+			d.broadcast(ctx, text)
+		case t, ok := <-pubCh:
+			if !ok {
+				return
+			}
+			snap := d.snapshotFn()
+			text := formatCBRAlert(t, snap)
 			d.broadcast(ctx, text)
 		}
 	}
@@ -80,25 +87,65 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string) {
 		}
 	}
 
-	d.log.Info().Int("recipients", len(chatIDs)).Msg("publication alert sent")
+	d.log.Info().Int("recipients", len(chatIDs)).Msg("alert sent")
 }
 
-func formatAlert(pubTime time.Time, snap funding.FundingSnapshot) string {
-	date := pubTime.Format("2006-01-02")
+// formatSettlAlert строит сообщение об фиксации прогнозного фандинга (~15:30 МСК).
+func formatSettlAlert(settlTime time.Time, snap funding.FundingSnapshot) string {
+	msk := time.FixedZone("MSK", 3*60*60)
+	t := settlTime.In(msk)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "<b>НОВЫЕ ДАННЫЕ:</b>\nДата: %s\n", date)
+	fmt.Fprintf(&sb, "⏱ <b>Прогнозный фандинг зафиксирован</b>\n%s МСК\n", t.Format("15:04:05"))
+
+	usdPred := snap.USDRUBF.PredictedFunding
+	eurPred := snap.EURRUBF.PredictedFunding
+
+	if usdPred != nil || eurPred != nil {
+		sb.WriteString("\n<b>Прогнозные фандинги:</b>\n")
+		if usdPred != nil {
+			fmt.Fprintf(&sb, "USDRUBF: %+.6f\n", *usdPred)
+		}
+		if eurPred != nil {
+			fmt.Fprintf(&sb, "EURRUBF: %+.6f\n", *eurPred)
+		}
+	}
 
 	usdRate := snap.USDRUBF.OfficialRate
 	eurRate := snap.EURRUBF.OfficialRate
 
 	if usdRate != nil || eurRate != nil {
-		sb.WriteString("\n<b>Межбанк:</b>\n")
+		sb.WriteString("\n<b>Курсы ЦБ (старые):</b>\n")
 		if usdRate != nil {
-			fmt.Fprintf(&sb, "Курс USD %.4f\n", *usdRate)
+			fmt.Fprintf(&sb, "USD/RUB %.4f\n", *usdRate)
 		}
 		if eurRate != nil {
-			fmt.Fprintf(&sb, "Курс EUR %.4f\n", *eurRate)
+			fmt.Fprintf(&sb, "EUR/RUB %.4f\n", *eurRate)
+		}
+	}
+
+	return sb.String()
+}
+
+// formatCBRAlert строит сообщение о публикации новых курсов ЦБ и точных фандингах.
+func formatCBRAlert(pubTime time.Time, snap funding.FundingSnapshot) string {
+	msk := time.FixedZone("MSK", 3*60*60)
+	t := pubTime.In(msk)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📢 <b>Новые курсы ЦБ опубликованы</b>\nДата: %s · %s МСК\n",
+		t.Format("2006-01-02"), t.Format("15:04:05"))
+
+	usdRate := snap.USDRUBF.OfficialRate
+	eurRate := snap.EURRUBF.OfficialRate
+
+	if usdRate != nil || eurRate != nil {
+		sb.WriteString("\n<b>Курсы ЦБ (новые):</b>\n")
+		if usdRate != nil {
+			fmt.Fprintf(&sb, "USD/RUB %.4f\n", *usdRate)
+		}
+		if eurRate != nil {
+			fmt.Fprintf(&sb, "EUR/RUB %.4f\n", *eurRate)
 		}
 	}
 
@@ -107,7 +154,7 @@ func formatAlert(pubTime time.Time, snap funding.FundingSnapshot) string {
 	cnyFund := snap.CNYRUBF.MOEXFunding
 
 	if usdFund != nil || eurFund != nil || cnyFund != nil {
-		sb.WriteString("\n<b>Фандинги:</b>\n")
+		sb.WriteString("\n<b>Точные фандинги:</b>\n")
 		if usdFund != nil {
 			fmt.Fprintf(&sb, "USDRUBF: %+.6f\n", *usdFund)
 		}

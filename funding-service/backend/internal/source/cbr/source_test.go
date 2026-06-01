@@ -1,10 +1,12 @@
 package cbr_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,13 +41,18 @@ func TestAdaptiveInterval_FastWindow(t *testing.T) {
 		h, m int
 		fast bool
 	}{
-		{11, 25, true},
-		{11, 35, true},
-		{11, 44, true},
-		{11, 24, false},
-		{11, 45, false},
-		{10, 30, false},
-		{12, 0, false},
+		{16, 0, true},
+		{16, 30, true},
+		{16, 45, true},
+		{17, 0, true},
+		{17, 59, true},
+		{18, 0, true},
+		{18, 30, true},
+		{18, 59, true},
+		{15, 59, false},
+		{19, 0, false},
+		{11, 30, false},
+		{15, 30, false},
 	}
 	for _, tc := range cases {
 		t := t
@@ -53,8 +60,8 @@ func TestAdaptiveInterval_FastWindow(t *testing.T) {
 		t.Run(fmt.Sprintf("%02d:%02d", tc.h, tc.m), func(t *testing.T) {
 			ts := time.Date(2026, 5, 19, tc.h, tc.m, 0, 0, msk)
 			got := cbr.AdaptiveInterval(ts)
-			if tc.fast && got != 200*time.Millisecond {
-				t.Errorf("want 200ms, got %v", got)
+			if tc.fast && got != 3*time.Second {
+				t.Errorf("want 3s, got %v", got)
 			}
 			if !tc.fast && got != 5*time.Minute {
 				t.Errorf("want 5min, got %v", got)
@@ -228,6 +235,52 @@ func TestSource_OnNewPublication_NotFiredOnFirstPoll(t *testing.T) {
 		t.Error("OnNewPublication must NOT fire on first poll")
 	case <-ctx.Done():
 		// correct — no publication event on first poll
+	}
+}
+
+// TestSource_LogsDetectionAtWarn проверяет, что обнаружение новой публикации курсов
+// логируется на уровне Warn — иначе при проде с LOG_LEVEL=warn событие не видно,
+// и нельзя диагностировать задержку «публикация→детект».
+func TestSource_LogsDetectionAtWarn(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		date := "19.05.2026"
+		if n >= 2 {
+			date = "20.05.2026" // дата меняется → новая публикация
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, validXML(date))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).Level(zerolog.WarnLevel)
+	s := cbr.NewWithURL(srv.URL, fastInterval, logger)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+	case <-ctx.Done():
+		t.Fatal("OnNewPublication not signalled within timeout")
+	}
+	s.Close() // остановить опрос перед чтением буфера
+
+	out := buf.String()
+	if !strings.Contains(out, "cbr rates emitted") {
+		t.Errorf("ожидался лог детекта на уровне Warn, получено: %q", out)
 	}
 }
 

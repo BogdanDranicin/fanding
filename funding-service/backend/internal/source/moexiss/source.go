@@ -14,15 +14,30 @@ import (
 
 const sysTimeLayout = "2006-01-02 15:04:05"
 
+// InstrumentSpec holds static contract parameters from the MOEX ISS securities block.
+type InstrumentSpec struct {
+	Symbol        string  `json:"symbol"`
+	InitialMargin float64 `json:"initial_margin"` // ГО per lot in rubles
+	LotSize       float64 `json:"lot_size"`        // contract size (e.g. 1000 for currency futures)
+	StepPrice     float64 `json:"step_price"`      // rubles per minimum step
+	MinStep       float64 `json:"min_step"`         // minimum price step
+}
+
 type securityParams struct {
 	engine, market, board string
+	// secid is the MOEX ISS security identifier used in the request path. When empty,
+	// the internal symbol itself is used (true for futures, whose SECID equals the symbol).
+	secid string
 }
 
 // knownSecurities maps symbol constants to their MOEX ISS path parameters.
+// Spot "tomorrow" instruments live on currency/selt/CETS and have a SECID distinct
+// from the internal symbol; ticks are re-tagged with the internal symbol on emit.
 var knownSecurities = map[string]securityParams{
-	source.SymbolUSDRUBF: {engine: "futures", market: "forts", board: ""},
-	source.SymbolEURRUBF: {engine: "futures", market: "forts", board: ""},
-	source.SymbolCNYRUBF: {engine: "futures", market: "forts", board: ""},
+	source.SymbolUSDRUBF:    {engine: "futures", market: "forts", board: ""},
+	source.SymbolEURRUBF:    {engine: "futures", market: "forts", board: ""},
+	source.SymbolCNYRUBF:    {engine: "futures", market: "forts", board: ""},
+	source.SymbolUSDRubTOM:  {engine: "currency", market: "selt", board: "CETS", secid: "USD000UTSTOM"},
 }
 
 // Source implements source.MarketDataSource by polling MOEX ISS REST API.
@@ -34,6 +49,7 @@ type Source struct {
 	mu           sync.Mutex
 	started      bool
 	lastValues   sync.Map // "symbol:field" -> float64, for deduplication
+	specs        sync.Map // symbol -> InstrumentSpec
 }
 
 // New creates a Source that polls MOEX ISS at the given interval.
@@ -88,6 +104,16 @@ func (s *Source) Subscribe(ctx context.Context, symbols []string) (<-chan source
 	return ch, nil
 }
 
+// GetSpecs returns a snapshot of the latest instrument specs received from MOEX ISS.
+func (s *Source) GetSpecs() map[string]InstrumentSpec {
+	result := make(map[string]InstrumentSpec)
+	s.specs.Range(func(k, v any) bool {
+		result[k.(string)] = v.(InstrumentSpec)
+		return true
+	})
+	return result
+}
+
 // Close cancels all polling goroutines started by Subscribe.
 func (s *Source) Close() error {
 	s.mu.Lock()
@@ -103,6 +129,12 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 
+	// secid identifies the security in the request path; for futures it equals the symbol.
+	secid := symbol
+	if params.secid != "" {
+		secid = params.secid
+	}
+
 	log := s.logger.With().Str("source", "moex-iss").Str("symbol", symbol).Logger()
 
 	for {
@@ -110,7 +142,7 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp, err := s.client.FetchSecurity(ctx, params.board, params.market, params.engine, symbol)
+			resp, err := s.client.FetchSecurity(ctx, params.board, params.market, params.engine, secid)
 			if errors.Is(err, ErrNotModified) {
 				log.Debug().Msg("not modified")
 				continue
@@ -125,10 +157,15 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 			ts := parseTime(resp.MarketData)
 			vol, _ := resp.MarketData["VOLTODAY"].(float64)
 
+			if resp.Securities != nil {
+				s.updateSpec(symbol, resp.Securities)
+			}
+
 			s.maybeEmit(ch, symbol, "LAST", source.KindLastPrice, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "BID", source.KindBid, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "OFFER", source.KindAsk, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "SETTLEPRICE", source.KindSettlePrice, resp.MarketData, vol, ts)
+			s.maybeEmit(ch, symbol, "WAPRICE", source.KindWaprice, resp.MarketData, 0, ts)
 			s.emitSwapRate(ch, symbol, resp.MarketData, ts)
 			log.Debug().Msg("polled")
 		}
@@ -166,14 +203,15 @@ func (s *Source) maybeEmit(ch chan<- source.Tick, symbol, field string, kind sou
 }
 
 // emitSwapRate emits a KindSwapRate tick for the given symbol.
-// Unlike maybeEmit, it allows zero values because SWAPRATE=0 is valid (within K1 deadband).
+// Zero is treated as "not available" because MOEX ISS returns SWAPRATE=0 for continuous
+// currency futures series (USDRUBF/EURRUBF), making 0 indistinguishable from missing data.
 func (s *Source) emitSwapRate(ch chan<- source.Tick, symbol string, md map[string]interface{}, ts time.Time) {
 	v, ok := md["SWAPRATE"]
 	if !ok || v == nil {
 		return
 	}
 	rate, ok := v.(float64)
-	if !ok {
+	if !ok || rate == 0 {
 		return
 	}
 
@@ -192,6 +230,26 @@ func (s *Source) emitSwapRate(ch chan<- source.Tick, symbol string, md map[strin
 		Source:    s.Name(),
 	}:
 	default:
+	}
+}
+
+func (s *Source) updateSpec(symbol string, sec map[string]interface{}) {
+	spec := InstrumentSpec{Symbol: symbol}
+	if v, ok := sec["INITIALMARGIN"].(float64); ok && v > 0 {
+		spec.InitialMargin = v
+	}
+	// MOEX ISS uses LOTVOLUME (int32 → parsed as float64 by JSON decoder)
+	if v, ok := sec["LOTVOLUME"].(float64); ok && v > 0 {
+		spec.LotSize = v
+	}
+	if v, ok := sec["STEPPRICE"].(float64); ok && v > 0 {
+		spec.StepPrice = v
+	}
+	if v, ok := sec["MINSTEP"].(float64); ok && v > 0 {
+		spec.MinStep = v
+	}
+	if spec.InitialMargin > 0 {
+		s.specs.Store(symbol, spec)
 	}
 }
 

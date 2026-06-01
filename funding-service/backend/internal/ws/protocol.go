@@ -33,6 +33,12 @@ func instrPayload(f funding.InstrumentFunding) map[string]any {
 	if f.OfficialRate != nil {
 		m["official_rate"] = *f.OfficialRate
 	}
+	if f.PredictedFunding != nil {
+		m["predicted_funding"] = *f.PredictedFunding
+	}
+	if f.PredictedCBRate != nil {
+		m["predicted_cb_rate"] = *f.PredictedCBRate
+	}
 	return m
 }
 
