@@ -96,13 +96,32 @@ func (w *Writer) runSnaps(ctx context.Context) {
 			if !ok {
 				return
 			}
-			w.log.Info().
+			ev := w.log.Info().
 				Float64("usdrubf_vwap", snap.USDRUBF.VWAP).
 				Float64("eurrubf_vwap", snap.EURRUBF.VWAP).
-				Float64("cnyrubf_vwap", snap.CNYRUBF.VWAP).
-				Float64("usdtrub_price", snap.USDTRUBPrice).
-				Time("ts", snap.Timestamp).
-				Msg("funding snapshot")
+				Float64("cnyrubf_vwap", snap.CNYRUBF.VWAP)
+			if snap.USDRUBF.OfficialRate != nil {
+				ev = ev.Float64("usd_official", *snap.USDRUBF.OfficialRate)
+			}
+			if snap.USDRUBF.CBFunding != nil {
+				ev = ev.Float64("usd_cb_funding", *snap.USDRUBF.CBFunding)
+			}
+			if snap.USDRUBF.PredictedFunding != nil {
+				ev = ev.Float64("usd_predicted", *snap.USDRUBF.PredictedFunding)
+			}
+			if snap.USDRUBF.PredictedCBRate != nil {
+				ev = ev.Float64("usd_predicted_cb_rate", *snap.USDRUBF.PredictedCBRate)
+			}
+			if snap.EURRUBF.OfficialRate != nil {
+				ev = ev.Float64("eur_official", *snap.EURRUBF.OfficialRate)
+			}
+			if snap.EURRUBF.CBFunding != nil {
+				ev = ev.Float64("eur_cb_funding", *snap.EURRUBF.CBFunding)
+			}
+			if snap.EURRUBF.PredictedFunding != nil {
+				ev = ev.Float64("eur_predicted", *snap.EURRUBF.PredictedFunding)
+			}
+			ev.Time("ts", snap.Timestamp).Msg("funding snapshot")
 			latest = &snap
 		case <-writeTimer.C:
 			if latest == nil {

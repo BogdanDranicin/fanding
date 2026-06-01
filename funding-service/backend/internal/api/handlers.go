@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 
+	"github.com/funding-service/backend/internal/source/moexiss"
 	"github.com/funding-service/backend/internal/storage"
 )
 
@@ -27,19 +29,35 @@ var instruments = []instrumentMeta{
 }
 
 // NewRouter builds and returns the chi router for the HTTP API.
-func NewRouter(store *storage.Store, botUsername string, log zerolog.Logger) http.Handler {
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	r.Use(corsMiddleware(allowedOrigin))
 	r.Use(zerologMiddleware(log))
+	r.Use(maxBodyMiddleware(1 << 10)) // 1 KB limit
+
+	userLimiter := newIPLimiter()
+
+	globalAllSpecs.startWarmup()
 
 	r.Get("/api/v1/instruments", handleInstruments)
+	r.Get("/api/v1/specs", handleSpecs(getSpecs))
+	r.Get("/api/v1/all-specs", handleAllSpecs)
+	r.Get("/api/v1/prices", handlePrices)
+	r.Get("/api/v1/cbr-race", handleCBRRace)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
 	r.Get("/api/v1/cb-publications", handleCBPublications(store))
-	r.Post("/api/v1/users", handleCreateUser(store))
+	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute)).
+		Post("/api/v1/users", handleCreateUser(store))
 	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
 
 	return r
+}
+
+func handleSpecs(getSpecs func() map[string]moexiss.InstrumentSpec) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, getSpecs())
+	}
 }
 
 func handleInstruments(w http.ResponseWriter, _ *http.Request) {
@@ -105,7 +123,12 @@ func handleTelegramLink(store *storage.Store, botUsername string) http.HandlerFu
 			http.Error(w, "invalid id", http.StatusBadRequest)
 			return
 		}
-		token, linked, err := store.UserByID(r.Context(), id)
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "token required", http.StatusUnauthorized)
+			return
+		}
+		linked, err := store.UserByIDAndToken(r.Context(), id, token)
 		if err != nil {
 			http.Error(w, "user not found", http.StatusNotFound)
 			return
@@ -123,17 +146,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func corsMiddleware(allowedOrigin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			if allowedOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func zerologMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
@@ -145,6 +173,15 @@ func zerologMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
 				Str("path", r.URL.Path).
 				Str("remote", r.RemoteAddr).
 				Msg("http request")
+		})
+	}
+}
+
+func maxBodyMiddleware(limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
 		})
 	}
 }

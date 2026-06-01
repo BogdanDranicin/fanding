@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
@@ -17,9 +18,18 @@ import (
 var migrationsFS embed.FS
 
 func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgxpool.New: %w", err)
+		return nil, fmt.Errorf("pgxpool.ParseConfig: %w", err)
+	}
+	cfg.MaxConns = 10
+	cfg.MinConns = 2
+	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConnLifetime = time.Hour
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool.NewWithConfig: %w", err)
 	}
 	if err = pool.Ping(ctx); err != nil {
 		pool.Close()

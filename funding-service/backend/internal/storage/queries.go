@@ -103,15 +103,16 @@ func (s *Store) CreateUser(ctx context.Context) (UserRecord, error) {
 	return UserRecord{ID: id, LinkToken: token}, nil
 }
 
-// UserByID returns a user's link_token and whether Telegram is linked.
-func (s *Store) UserByID(ctx context.Context, id int64) (linkToken string, linked bool, err error) {
+// UserByIDAndToken verifies ownership: returns linked status only if id+token match.
+// Returns pgx.ErrNoRows (wrapped) if the user is not found or the token is wrong.
+func (s *Store) UserByIDAndToken(ctx context.Context, id int64, token string) (linked bool, err error) {
 	var chatID *int64
 	err = s.pool.QueryRow(ctx,
-		`SELECT link_token, telegram_chat_id FROM users WHERE id = $1`,
-		id,
-	).Scan(&linkToken, &chatID)
+		`SELECT telegram_chat_id FROM users WHERE id = $1 AND link_token = $2`,
+		id, token,
+	).Scan(&chatID)
 	if err != nil {
-		return "", false, err
+		return false, err
 	}
-	return linkToken, chatID != nil, nil
+	return chatID != nil, nil
 }

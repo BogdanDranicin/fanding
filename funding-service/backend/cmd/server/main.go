@@ -76,16 +76,20 @@ func main() {
 		source.SymbolUSDRUBF:        moexSrc,
 		source.SymbolEURRUBF:        moexSrc,
 		source.SymbolCNYRUBF:        moexSrc,
+		source.SymbolUSDRubTOM:      moexSrc,
 		source.SymbolUSDRubOfficial: cbrSrc,
 		source.SymbolEURRubOfficial: cbrSrc,
 	}
 	mux := multiplex.New(routing)
 
 	// USDTRUB (crypto) has no source yet; omitted until a crypto feed is added.
+	// USDRUB_TOM is the spot "tomorrow" leg whose 10:00–15:30 MSK WAPRICE predicts the CBR fixing.
+	// EUR/RUB_TOM doesn't trade on MOEX — EUR predicted CB rate uses EUR/USD × USD/RUB cross.
 	symbols := []string{
 		source.SymbolUSDRUBF,
 		source.SymbolEURRUBF,
 		source.SymbolCNYRUBF,
+		source.SymbolUSDRubTOM,
 		source.SymbolUSDRubOfficial,
 		source.SymbolEURRubOfficial,
 	}
@@ -101,7 +105,13 @@ func main() {
 
 	hub := appws.NewHub(log.Logger)
 
-	apiRouter := api.NewRouter(store, cfg.TelegramBotName, log.Logger)
+	apiRouter := api.NewRouter(
+		store,
+		cfg.TelegramBotName,
+		cfg.AllowedOrigin,
+		log.Logger,
+		moexSrc.GetSpecs,
+	)
 
 	router := http.NewServeMux()
 
@@ -112,16 +122,26 @@ func main() {
 	router.Handle("/api/", apiRouter)
 
 	router.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // TODO: restrict origins in production
-		})
+		wsOpts := &websocket.AcceptOptions{}
+		if cfg.AllowedOrigin != "*" && cfg.AllowedOrigin != "" {
+			wsOpts.OriginPatterns = []string{cfg.AllowedOrigin}
+		} else {
+			wsOpts.InsecureSkipVerify = true
+			log.Warn().Str("ALLOWED_ORIGIN", cfg.AllowedOrigin).
+				Msg("WS origin check disabled — set ALLOWED_ORIGIN=<frontend-url> in production")
+		}
+		conn, err := websocket.Accept(w, r, wsOpts)
 		if err != nil {
 			log.Warn().Err(err).Str("remote", r.RemoteAddr).Msg("ws accept failed")
 			return
 		}
 
 		c := appws.NewClient(conn, hub, r.RemoteAddr, log.Logger)
-		hub.Register(c)
+		if !hub.Register(c) {
+			conn.Close(websocket.StatusTryAgainLater, "server at capacity")
+			log.Warn().Str("remote", r.RemoteAddr).Msg("ws rejected: server at capacity")
+			return
+		}
 		log.Info().Str("remote", r.RemoteAddr).Int("clients", hub.Len()).Msg("ws client connected")
 
 		connCtx, connCancel := context.WithCancel(ctx)
@@ -144,8 +164,12 @@ func main() {
 	})
 
 	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	const wsBroadcastInterval = 250 * time.Millisecond
@@ -196,7 +220,7 @@ func main() {
 		} else {
 			go bot.Run(ctx)
 			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
-			go disp.Run(ctx, dispPubCh)
+			go disp.Run(ctx, eng.SettlementCh(), dispPubCh)
 		}
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")

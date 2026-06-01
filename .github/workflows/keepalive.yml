@@ -1,0 +1,51 @@
+name: keepalive-cbr-window
+
+# Назначение: не давать бесплатному сервису Render «засыпать» в окне, когда ЦБ
+# публикует курсы, чтобы горутина опроса (internal/source/cbr) работала и ловила
+# публикацию за секунды, а не за минуты после холодного старта.
+#
+# Окно (UTC): 12:00–16:55 = 15:00–19:55 МСК, пн–пт. Покрывает:
+#   • фиксацию прогнозного фандинга ~15:30 МСК (dispatcher → settlCh)
+#   • публикацию курсов ЦБ ~16:30–18:05+ МСК (с запасом до 19:55)
+# Прогрев начинается в 15:00 МСК — на ~30 мин раньше первого события, чтобы
+# первый (холодный) пинг успел поднять контейнер до того, как он понадобится.
+#
+# ВАЖНО про надёжность: расписание GitHub Actions выполняется НЕ секунда-в-секунду
+# (под нагрузкой запуск может задержаться на 5–15+ мин). Если порог сна Render
+# (15 мин без входящего трафика) окажется между двумя задержанными запусками —
+# сервис всё же уснёт. Если это станет проблемой, используйте cron-job.org
+# (см. README/комментарий в render.yaml) — он пингует точнее и не тратит минуты Actions.
+#
+# Требуется repo variable KEEPALIVE_URL = публичный URL healthcheck,
+# например https://funding-backend.onrender.com/healthz
+# (Settings → Secrets and variables → Actions → Variables → New repository variable)
+
+on:
+  schedule:
+    - cron: '*/5 12-16 * * 1-5'
+  workflow_dispatch: {} # ручной прогрев при необходимости
+
+# Не копить очередь параллельных пингов, если предыдущий ещё идёт.
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping healthcheck to keep Render service warm
+        env:
+          URL: ${{ vars.KEEPALIVE_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::error::repo variable KEEPALIVE_URL не задана — пинг пропущен"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 45 "$URL" || echo "000")
+          echo "$(date -u +%H:%M:%SZ) UTC  ping $URL -> HTTP $code"
+          # 200 — сервис жив; иное (в т.ч. 000/таймаут при холодном старте) фиксируем,
+          # но не валим job: сам факт запроса уже будит контейнер.
+          if [ "$code" = "200" ]; then exit 0; fi
+          echo "::warning::healthcheck вернул $code (возможен холодный старт — следующий пинг должен застать сервис тёплым)"

@@ -1,1 +1,3 @@
--- no extensions required (plain PostgreSQL)
+-- Schema is managed by golang-migrate.
+-- Run the backend service once to apply all migrations automatically.
+-- See: backend/internal/storage/migrations/

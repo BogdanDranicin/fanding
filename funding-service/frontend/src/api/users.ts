@@ -13,8 +13,8 @@ export interface TelegramLinkResponse {
 }
 
 export async function ensureUser(): Promise<UserRecord> {
-  const storedId = localStorage.getItem(USER_ID_KEY);
-  const storedToken = localStorage.getItem(USER_TOKEN_KEY);
+  const storedId = sessionStorage.getItem(USER_ID_KEY);
+  const storedToken = sessionStorage.getItem(USER_TOKEN_KEY);
 
   if (storedId && storedToken) {
     return { id: parseInt(storedId, 10), token: storedToken };
@@ -24,13 +24,14 @@ export async function ensureUser(): Promise<UserRecord> {
   if (!res.ok) throw new Error('Failed to create user');
 
   const data: UserRecord = await res.json();
-  localStorage.setItem(USER_ID_KEY, String(data.id));
-  localStorage.setItem(USER_TOKEN_KEY, data.token);
+  sessionStorage.setItem(USER_ID_KEY, String(data.id));
+  sessionStorage.setItem(USER_TOKEN_KEY, data.token);
   return data;
 }
 
-export async function getTelegramLink(userId: number): Promise<TelegramLinkResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/users/${userId}/telegram-link`);
+export async function getTelegramLink(userId: number, token: string): Promise<TelegramLinkResponse> {
+  const params = new URLSearchParams({ token });
+  const res = await fetch(`${API_BASE}/api/v1/users/${userId}/telegram-link?${params}`);
   if (!res.ok) throw new Error('Failed to get telegram link');
   return res.json();
 }

@@ -1,13 +1,22 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFundingStore } from './store/fundingStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { FundingTable } from './components/FundingTable';
-import { USDTPriceCard } from './components/USDTPriceCard';
 import { SettingsPage } from './components/SettingsPage';
+import { PositionsPage } from './components/PositionsPage';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
   ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
+type Page = 'main' | 'positions' | 'settings';
+
+const VALID_PAGES: Page[] = ['main', 'positions', 'settings'];
+
+function pageFromPath(): Page {
+  const p = window.location.pathname.slice(1) as Page;
+  return VALID_PAGES.includes(p) ? p : 'main';
+}
 
 function StatusDot() {
   const status = useFundingStore((s) => s.wsStatus);
@@ -16,34 +25,62 @@ function StatusDot() {
 
 export default function App() {
   useWebSocket(WS_URL);
-  const [page, setPage] = useState<'main' | 'settings'>('main');
+  const [page, setPage] = useState<Page>(pageFromPath);
 
   const current = useFundingStore((s) => s.current);
   const previous = useFundingStore((s) => s.previous);
+
+  useEffect(() => {
+    const handler = () => setPage(pageFromPath());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  const navigate = (p: Page) => {
+    const path = p === 'main' ? '/' : `/${p}`;
+    window.history.pushState({}, '', path);
+    setPage(p);
+  };
 
   return (
     <div className="app">
       <header className="app-header">
         <h1 className="app-title">Funding Rates</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button className="nav-link" onClick={() => setPage(page === 'settings' ? 'main' : 'settings')}>
-            {page === 'settings' ? 'Таблица' : 'Настройки'}
+          <button
+            className="nav-link"
+            style={{ fontWeight: page === 'main' ? 600 : undefined }}
+            onClick={() => navigate('main')}
+          >
+            Таблица
+          </button>
+          <button
+            className="nav-link"
+            style={{ fontWeight: page === 'positions' ? 600 : undefined }}
+            onClick={() => navigate('positions')}
+          >
+            Позиции
+          </button>
+          <button
+            className="nav-link"
+            style={{ fontWeight: page === 'settings' ? 600 : undefined }}
+            onClick={() => navigate('settings')}
+          >
+            Настройки
           </button>
           <StatusDot />
         </div>
       </header>
 
       <main className="app-main">
-        {page === 'settings' ? (
-          <SettingsPage onBack={() => setPage('main')} />
-        ) : (
-          <>
-            <USDTPriceCard
-              price={current?.usdtrub_price ?? null}
-              prevPrice={previous?.usdtrub_price ?? null}
-            />
-            <FundingTable current={current} previous={previous} />
-          </>
+        {page === 'settings' && (
+          <SettingsPage onBack={() => navigate('main')} />
+        )}
+        {page === 'positions' && (
+          <PositionsPage onGoToSettings={() => navigate('settings')} />
+        )}
+        {page === 'main' && (
+          <FundingTable current={current} previous={previous} />
         )}
       </main>
     </div>
