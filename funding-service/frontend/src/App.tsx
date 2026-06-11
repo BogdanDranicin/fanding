@@ -3,15 +3,16 @@ import { useFundingStore } from './store/fundingStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { FundingTable } from './components/FundingTable';
 import { SettingsPage } from './components/SettingsPage';
-import { PositionsPage } from './components/PositionsPage';
+import { CalculatorPage } from './components/CalculatorPage';
+import { RacePage } from './components/RacePage';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
   ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
-type Page = 'main' | 'positions' | 'settings';
+type Page = 'main' | 'settings' | 'calculator' | 'race';
 
-const VALID_PAGES: Page[] = ['main', 'positions', 'settings'];
+const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race'];
 
 function pageFromPath(): Page {
   const p = window.location.pathname.slice(1) as Page;
@@ -56,10 +57,17 @@ export default function App() {
           </button>
           <button
             className="nav-link"
-            style={{ fontWeight: page === 'positions' ? 600 : undefined }}
-            onClick={() => navigate('positions')}
+            style={{ fontWeight: page === 'calculator' ? 600 : undefined }}
+            onClick={() => navigate('calculator')}
           >
-            Позиции
+            Калькулятор
+          </button>
+          <button
+            className="nav-link"
+            style={{ fontWeight: page === 'race' ? 600 : undefined }}
+            onClick={() => navigate('race')}
+          >
+            Скорость
           </button>
           <button
             className="nav-link"
@@ -76,9 +84,8 @@ export default function App() {
         {page === 'settings' && (
           <SettingsPage onBack={() => navigate('main')} />
         )}
-        {page === 'positions' && (
-          <PositionsPage onGoToSettings={() => navigate('settings')} />
-        )}
+        {page === 'calculator' && <CalculatorPage />}
+        {page === 'race' && <RacePage />}
         {page === 'main' && (
           <FundingTable current={current} previous={previous} />
         )}

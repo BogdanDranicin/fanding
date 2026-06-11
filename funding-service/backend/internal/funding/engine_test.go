@@ -104,6 +104,32 @@ func TestEngine_PredictedCBRateFromSpotTOMWindow(t *testing.T) {
 	}
 }
 
+// Методика ЦБ с 08.06.2026: EUR/RUB(ЦБ) = USD/RUB(ЦБ) × EUR/USD(ЕЦБ) по состоянию на 15:30 МСК.
+// Прогнозный курс EUR должен использовать EUR/USD, ЗАМОРОЖЕННЫЙ на 15:30, а не живой —
+// тик EUR/USD после 15:30 не должен менять прогноз.
+func TestEngine_EURPredictedCBRateFixesEURUSDAt1530(t *testing.T) {
+	e := funding.NewEngine()
+	msk := time.FixedZone("MSK", 3*60*60)
+	at := func(h, m int) time.Time { return time.Date(2026, 6, 8, h, m, 0, 0, msk) }
+
+	// USD predicted CB rate из спот TOM (в окне 10:00–15:30) = 80.0.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 80.0, 0, at(14, 0)))
+	// EUR/USD до 15:30 — это нога фиксинга. Значение на 15:29 должно быть взято в расчёт.
+	e.Ingest(forexTick(source.SymbolEURUSD, 1.10, at(15, 29)))
+	// Тик EUR/USD после 15:30 НЕ должен сдвигать прогнозный курс EUR ЦБ.
+	e.Ingest(forexTick(source.SymbolEURUSD, 1.20, at(16, 0)))
+
+	snap := e.Snapshot()
+	if snap.EURRUBF.PredictedCBRate == nil {
+		t.Fatal("EURRUBF.PredictedCBRate must be non-nil")
+	}
+	// EUR/RUB(ЦБ) = 80.0 × 1.10 = 88.0 (а не 96.0 с живым 1.20).
+	const want = 88.0
+	if diff := *snap.EURRUBF.PredictedCBRate - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("EUR PredictedCBRate: want %.6f (EUR/USD заморожен на 15:30), got %.6f", want, *snap.EURRUBF.PredictedCBRate)
+	}
+}
+
 func TestEngine_PredictedFundingFromSpotTOM(t *testing.T) {
 	e := funding.NewEngine()
 	msk := time.FixedZone("MSK", 3*60*60)
@@ -142,17 +168,52 @@ func TestEngine_PredictedFundingNilWithoutSpotTOM(t *testing.T) {
 	}
 }
 
-func TestEngine_SpotTOMOutsideWindowIgnored(t *testing.T) {
+func TestEngine_SpotTOMWindowFreezePreferredOverLive(t *testing.T) {
 	e := funding.NewEngine()
 	msk := time.FixedZone("MSK", 3*60*60)
 
-	// 09:30 is before 10:00; 16:00 is after 15:30 — both outside the CBR window, must be ignored.
-	e.Ingest(tomTick(source.SymbolUSDRubTOM, 71.0, 100, time.Date(2026, 5, 29, 9, 30, 0, 0, msk)))
+	// In-window tick (the fixing predictor) followed by a post-15:30 tick. The frozen
+	// in-window value must be preferred; the later live tick must NOT contaminate it.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 71.0, 100, time.Date(2026, 5, 29, 12, 0, 0, 0, msk)))
 	e.Ingest(tomTick(source.SymbolUSDRubTOM, 99.0, 200, time.Date(2026, 5, 29, 16, 0, 0, 0, msk)))
 
 	snap := e.Snapshot()
-	if snap.USDRUBF.PredictedCBRate != nil {
-		t.Errorf("PredictedCBRate must be nil when all spot ticks fall outside 10:00–15:30 MSK, got %v", *snap.USDRUBF.PredictedCBRate)
+	if snap.USDRUBF.PredictedCBRate == nil || *snap.USDRUBF.PredictedCBRate != 71.0 {
+		t.Errorf("PredictedCBRate must prefer the frozen 10:00–15:30 value 71.0, got %v", snap.USDRUBF.PredictedCBRate)
+	}
+}
+
+func TestEngine_SpotTOMLiveFallbackWhenNoWindowData(t *testing.T) {
+	e := funding.NewEngine()
+	msk := time.FixedZone("MSK", 3*60*60)
+
+	// Late start: only post-15:30 ticks arrive (no 10:00–15:30 fixing captured). The
+	// predicted row must fall back to the latest live WAPRICE instead of being empty.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 98.0, 100, time.Date(2026, 5, 29, 16, 0, 0, 0, msk)))
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 99.0, 200, time.Date(2026, 5, 29, 17, 0, 0, 0, msk)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.PredictedCBRate == nil || *snap.USDRUBF.PredictedCBRate != 99.0 {
+		t.Errorf("PredictedCBRate must fall back to latest live WAPRICE 99.0 on a late start, got %v", snap.USDRUBF.PredictedCBRate)
+	}
+}
+
+func TestEngine_CBFundingPrefersSwapRate(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+
+	// Settlement + today's CBR publication: the reconstruction path would normally apply.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 81.0, settle))
+
+	// Once MOEX publishes SWAPRATE at the evening clearing, CBFunding must equal it
+	// (the authoritative funding MOEX actually charges), not our early reconstruction.
+	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.12345, settle.Add(time.Hour)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil || *snap.USDRUBF.CBFunding != 0.12345 {
+		t.Errorf("CBFunding must equal MOEX SWAPRATE 0.12345 when published, got %v", snap.USDRUBF.CBFunding)
 	}
 }
 

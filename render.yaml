@@ -16,6 +16,10 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      # Cloudflare Pages URL фронтенда, напр. https://funding.pages.dev —
+      # фиксирует origin для WebSocket и CORS. До деплоя фронта можно оставить пустым (=*).
+      - key: ALLOWED_ORIGIN
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_BOT_USERNAME
