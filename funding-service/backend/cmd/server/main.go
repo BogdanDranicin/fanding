@@ -243,14 +243,26 @@ func main() {
 		// Run the whole bot lifecycle in the background so a slow or dead proxy
 		// never delays the HTTP server or data collection.
 		go func() {
-			bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
-			if err != nil {
-				log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
+			const retryEvery = 30 * time.Second
+			for {
+				bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
+				if err != nil {
+					// Proxies to api.telegram.org can be flaky (rotating IPs, transient
+					// Bad Gateway). Keep retrying so the bot connects on its own the
+					// moment a proxy can reach Telegram, without a manual restart.
+					log.Warn().Err(err).Dur("retry_in", retryEvery).Msg("telegram bot init failed — retrying")
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(retryEvery):
+						continue
+					}
+				}
+				go bot.Run(ctx)
+				disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
+				disp.Run(ctx, eng.SettlementCh(), dispPubCh) // blocks until ctx is cancelled
 				return
 			}
-			go bot.Run(ctx)
-			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
-			disp.Run(ctx, eng.SettlementCh(), dispPubCh)
 		}()
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")
