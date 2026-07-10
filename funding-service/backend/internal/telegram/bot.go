@@ -138,9 +138,23 @@ func (b *Bot) handle(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+
+	// A chat subscribes once (telegram_chat_id is UNIQUE). If it is already linked,
+	// confirm that instead of failing the re-link with a confusing "token not found".
+	var linked bool
+	if err := b.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE telegram_chat_id = $1)`, chatID,
+	).Scan(&linked); err != nil {
+		b.log.Warn().Err(err).Msg("telegram start: linked check failed")
+	} else if linked {
+		b.send(chatID, "Вы уже подписаны на уведомления ✓")
+		return
+	}
+
 	token := strings.TrimSpace(msg.CommandArguments())
 	if token == "" {
-		b.send(msg.Chat.ID, "Зайдите на сайт и нажмите «Привязать Telegram», чтобы получить ссылку для регистрации.")
+		b.send(chatID, "Зайдите на сайт и нажмите «Привязать Telegram», чтобы получить ссылку для регистрации.")
 		return
 	}
 
@@ -148,16 +162,16 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 		`UPDATE users
 		 SET telegram_chat_id = $1, telegram_username = $2
 		 WHERE link_token = $3 AND telegram_chat_id IS NULL`,
-		msg.Chat.ID, msg.From.UserName, token,
+		chatID, msg.From.UserName, token,
 	)
 	if err != nil {
 		b.log.Warn().Err(err).Msg("telegram start: db error")
-		b.send(msg.Chat.ID, "Внутренняя ошибка. Попробуйте позже.")
+		b.send(chatID, "Внутренняя ошибка. Попробуйте позже.")
 		return
 	}
 
 	if tag.RowsAffected() == 0 {
-		b.send(msg.Chat.ID, "Токен не найден или уже использован. Получите новую ссылку на сайте.")
+		b.send(chatID, "Токен не найден или уже использован. Получите новую ссылку на сайте.")
 		return
 	}
 
