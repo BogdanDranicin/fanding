@@ -18,6 +18,11 @@ type Config struct {
 	AllowedOrigin    string `envconfig:"ALLOWED_ORIGIN"        default:"*"`
 	TelegramToken    string `envconfig:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotName  string `envconfig:"TELEGRAM_BOT_USERNAME"`
+	// TelegramProxyURLs is an optional comma-separated list of proxies used ONLY for
+	// the Telegram bot (api.telegram.org is unreachable from some networks, e.g. RU).
+	// Each entry is user:pass@host:port or a full scheme URL; the bot tries them in
+	// order until one authorises. Empty = connect directly.
+	TelegramProxyURLs []string `envconfig:"TELEGRAM_PROXY_URL"`
 	TwelveDataAPIKey string `envconfig:"TWELVEDATA_API_KEY"`
 	MOEXPollMs       int    `envconfig:"MOEX_POLL_INTERVAL_MS" default:"250"`
 	Port             int    `envconfig:"BACKEND_PORT"          default:"8080"`

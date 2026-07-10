@@ -238,7 +238,7 @@ func main() {
 	}()
 
 	if cfg.TelegramToken != "" {
-		bot, err := tgbot.New(cfg.TelegramToken, pool, log.Logger)
+		bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
 		if err != nil {
 			log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
 		} else {
