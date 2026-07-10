@@ -53,19 +53,33 @@ type Source struct {
 	started  bool
 	lastDate string // written only from the single pollLoop goroutine
 
-	// Last-publication diagnostics for the audit journal, guarded by mu.
-	pubDate      string // CBR rate date "DD.MM.YYYY" of the last detected publication
-	pubWinner    string // channel that won the race on that publication
-	pubLatencyMs int64  // that channel's fetch latency, ms
+	// pubInfo holds the last detected publication for the audit journal, guarded by mu.
+	pubInfo PublicationInfo
 }
 
-// LastPublicationInfo returns diagnostics about the most recently detected CBR
-// publication: the rate's effective date ("DD.MM.YYYY"), the channel that won the
-// race, and that channel's latency in ms. Zero values before the first publication.
-func (s *Source) LastPublicationInfo() (date, winner string, latencyMs int64) {
+// PublicationInfo describes the most recently detected CBR publication: the
+// rate's effective date ("DD.MM.YYYY"), the published rates taken from the
+// winning channel's own response, the channel that won the race and its fetch
+// latency. Carrying the rates here (rather than reading them back from the
+// funding engine) avoids a race: the KindNewOfficialRate ticks reach the engine
+// asynchronously, so at signal time the engine may still hold the previous rate.
+type PublicationInfo struct {
+	Date      string
+	USD       float64
+	EUR       float64
+	CNY       float64
+	Winner    string
+	LatencyMs int64
+}
+
+// LastPublicationInfo returns the most recently detected publication.
+// Zero value before the first publication. It is written before
+// OnNewPublication is signalled, so a consumer woken by that channel
+// always observes at least the publication that woke it.
+func (s *Source) LastPublicationInfo() PublicationInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pubDate, s.pubWinner, s.pubLatencyMs
+	return s.pubInfo
 }
 
 // New creates a production Source that races the CBR origin channels.
@@ -205,10 +219,15 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 
 			if isNew {
 				s.mu.Lock()
-				s.pubDate = res.Date
-				s.pubWinner = info.winner
+				s.pubInfo = PublicationInfo{
+					Date:   res.Date,
+					USD:    res.USD,
+					EUR:    res.EUR,
+					CNY:    res.CNY,
+					Winner: info.winner,
+				}
 				if l, ok := info.latencies[info.winner]; ok {
-					s.pubLatencyMs = l.Milliseconds()
+					s.pubInfo.LatencyMs = l.Milliseconds()
 				}
 				s.mu.Unlock()
 				select {
