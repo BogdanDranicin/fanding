@@ -5,14 +5,15 @@ import { FundingTable } from './components/FundingTable';
 import { SettingsPage } from './components/SettingsPage';
 import { CalculatorPage } from './components/CalculatorPage';
 import { RacePage } from './components/RacePage';
+import { JournalPage } from './components/JournalPage';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
   ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
-type Page = 'main' | 'settings' | 'calculator' | 'race';
+type Page = 'main' | 'settings' | 'calculator' | 'race' | 'journal';
 
-const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race'];
+const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race', 'journal'];
 
 function pageFromPath(): Page {
   const p = window.location.pathname.slice(1) as Page;
@@ -71,6 +72,13 @@ export default function App() {
           </button>
           <button
             className="nav-link"
+            style={{ fontWeight: page === 'journal' ? 600 : undefined }}
+            onClick={() => navigate('journal')}
+          >
+            Журнал
+          </button>
+          <button
+            className="nav-link"
             style={{ fontWeight: page === 'settings' ? 600 : undefined }}
             onClick={() => navigate('settings')}
           >
@@ -86,6 +94,7 @@ export default function App() {
         )}
         {page === 'calculator' && <CalculatorPage />}
         {page === 'race' && <RacePage />}
+        {page === 'journal' && <JournalPage />}
         {page === 'main' && (
           <FundingTable current={current} previous={previous} />
         )}

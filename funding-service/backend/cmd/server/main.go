@@ -21,6 +21,7 @@ import (
 	"github.com/funding-service/backend/internal/api"
 	"github.com/funding-service/backend/internal/config"
 	"github.com/funding-service/backend/internal/funding"
+	"github.com/funding-service/backend/internal/journal"
 	"github.com/funding-service/backend/internal/metrics"
 	"github.com/funding-service/backend/internal/source"
 	"github.com/funding-service/backend/internal/source/cbr"
@@ -206,9 +207,21 @@ func main() {
 		}
 	}()
 
-	// Fan-out cbrSrc.OnNewPublication: always count metric; forward to dispatcher if bot is enabled.
+	// Persist a daily audit row for every CBR publication (journal page).
+	journalPubCh := make(chan time.Time, 1)
+	recorder := journal.New(store, eng.Snapshot, cbrSrc.LastPublicationInfo, log.Logger)
+	go recorder.Run(ctx, journalPubCh)
+
+	// Fan-out cbrSrc.OnNewPublication: always count metric and journal it;
+	// forward to the Telegram dispatcher too if the bot is enabled.
 	dispPubCh := make(chan time.Time, 1)
 	go func() {
+		fwd := func(ch chan time.Time, t time.Time) {
+			select {
+			case ch <- t:
+			default:
+			}
+		}
 		for {
 			select {
 			case t, ok := <-cbrSrc.OnNewPublication:
@@ -216,10 +229,8 @@ func main() {
 					return
 				}
 				metrics.CBPublications.Inc()
-				select {
-				case dispPubCh <- t:
-				default:
-				}
+				fwd(journalPubCh, t)
+				fwd(dispPubCh, t)
 			case <-ctx.Done():
 				return
 			}

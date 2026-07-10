@@ -822,6 +822,12 @@ details[open] > .accordion-summary::before {
 
 .race-table tbody tr:last-child td { border-bottom: none; }
 
+/* Journal is wide; keep every cell on one line and let the wrapper scroll. */
+.journal-table { min-width: 1100px; }
+.journal-table th,
+.journal-table td { white-space: nowrap; }
+.journal-table td.race-value { font-variant-numeric: tabular-nums; }
+
 .race-row-winner td { background: rgba(34,197,94,0.07); }
 
 .race-src-label {

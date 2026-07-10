@@ -37,6 +37,25 @@ export interface InstrumentInfo {
   min_step: number;
 }
 
+// CBPublication is one audit row from the /api/v1/cb-publications journal.
+export interface CBPublication {
+  date: string;                          // ISO date (UTC midnight of the MSK publication day)
+  detected_at: string | null;           // ISO timestamp — exact moment we first saw the new rate
+  updated_at: string | null;
+  usd_rate: number | null;
+  eur_rate: number | null;
+  cny_rate: number | null;
+  cb_funding_usd: number | null;
+  cb_funding_eur: number | null;
+  cny_funding: number | null;
+  predicted_funding_usd: number | null;
+  predicted_funding_eur: number | null;
+  predicted_cb_rate_usd: number | null;
+  predicted_cb_rate_eur: number | null;
+  winner_channel: string | null;
+  winner_latency_ms: number | null;
+}
+
 export type WSStatus = 'connecting' | 'connected' | 'disconnected';
 
 export interface WSMessage {

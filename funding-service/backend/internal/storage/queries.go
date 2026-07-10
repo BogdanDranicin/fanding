@@ -45,18 +45,34 @@ func (s *Store) RecentSnapshots(ctx context.Context, limit int) ([]SnapshotRow, 
 	return out, rows.Err()
 }
 
-// CBPublicationRow is one row from cb_publications.
+// CBPublicationRow is one audit row from cb_publications, returned by the
+// /api/v1/cb-publications journal endpoint. Nullable columns are pointers.
 type CBPublicationRow struct {
-	Date       time.Time
-	USDRate    *float64
-	EURRate    *float64
-	DetectedAt *time.Time
+	Date                time.Time  `json:"date"`
+	DetectedAt          *time.Time `json:"detected_at"`
+	UpdatedAt           *time.Time `json:"updated_at"`
+	USDRate             *float64   `json:"usd_rate"`
+	EURRate             *float64   `json:"eur_rate"`
+	CNYRate             *float64   `json:"cny_rate"`
+	CBFundingUSD        *float64   `json:"cb_funding_usd"`
+	CBFundingEUR        *float64   `json:"cb_funding_eur"`
+	CNYFunding          *float64   `json:"cny_funding"`
+	PredictedFundingUSD *float64   `json:"predicted_funding_usd"`
+	PredictedFundingEUR *float64   `json:"predicted_funding_eur"`
+	PredictedCBRateUSD  *float64   `json:"predicted_cb_rate_usd"`
+	PredictedCBRateEUR  *float64   `json:"predicted_cb_rate_eur"`
+	WinnerChannel       *string    `json:"winner_channel"`
+	WinnerLatencyMs     *int64     `json:"winner_latency_ms"`
 }
 
-// RecentCBPublications returns publications from the last N days.
+// RecentCBPublications returns publications from the last N days, newest first.
 func (s *Store) RecentCBPublications(ctx context.Context, days int) ([]CBPublicationRow, error) {
 	const q = `
-		SELECT date, usd_rate, eur_rate, detected_at
+		SELECT date, detected_at, updated_at, usd_rate, eur_rate, cny_rate,
+		       cb_funding_usd, cb_funding_eur, cny_funding,
+		       predicted_funding_usd, predicted_funding_eur,
+		       predicted_cb_rate_usd, predicted_cb_rate_eur,
+		       winner_channel, winner_latency_ms
 		FROM cb_publications
 		WHERE date >= current_date - ($1::int || ' days')::interval
 		ORDER BY date DESC`
@@ -70,7 +86,12 @@ func (s *Store) RecentCBPublications(ctx context.Context, days int) ([]CBPublica
 	var out []CBPublicationRow
 	for rows.Next() {
 		var r CBPublicationRow
-		if err := rows.Scan(&r.Date, &r.USDRate, &r.EURRate, &r.DetectedAt); err != nil {
+		if err := rows.Scan(&r.Date, &r.DetectedAt, &r.UpdatedAt,
+			&r.USDRate, &r.EURRate, &r.CNYRate,
+			&r.CBFundingUSD, &r.CBFundingEUR, &r.CNYFunding,
+			&r.PredictedFundingUSD, &r.PredictedFundingEUR,
+			&r.PredictedCBRateUSD, &r.PredictedCBRateEUR,
+			&r.WinnerChannel, &r.WinnerLatencyMs); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
