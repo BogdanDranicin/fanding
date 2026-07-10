@@ -66,7 +66,8 @@ func TestRunner_TicksIngested(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	// Push a tick with known price before Run.
+	// Push two ticks before Run: Volume is cumulative VOLTODAY, so the rolling VWAP
+	// needs a second tick (100→110) to have an attributable increment of 10 @82 → VWAP=82.
 	now := time.Now()
 	src.ch <- source.Tick{
 		Symbol:    source.SymbolUSDRUBF,
@@ -74,6 +75,14 @@ func TestRunner_TicksIngested(t *testing.T) {
 		Volume:    100,
 		Kind:      source.KindLastPrice,
 		Timestamp: now,
+		Source:    "moex-iss",
+	}
+	src.ch <- source.Tick{
+		Symbol:    source.SymbolUSDRUBF,
+		Price:     82.0,
+		Volume:    110,
+		Kind:      source.KindLastPrice,
+		Timestamp: now.Add(time.Millisecond),
 		Source:    "moex-iss",
 	}
 

@@ -80,6 +80,7 @@ type Engine struct {
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
 	settlDate        string                     // MSK date for which settlement was recorded
+	vwapLastVol      map[string]float64         // last VOLTODAY per symbol, to weight the rolling VWAP by ΔVOLTODAY
 	lastPrice        map[string]float64
 	swapRate         map[string]float64
 	forexRates       map[string]float64
@@ -108,6 +109,7 @@ func NewEngine() *Engine {
 		spotTOMWAP:       make(map[string]float64),
 		spotTOMWAPLive:   make(map[string]float64),
 		settlVWAP:        make(map[string]*float64),
+		vwapLastVol:      make(map[string]float64),
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
 		forexRates:       make(map[string]float64),
@@ -144,7 +146,18 @@ func (e *Engine) Ingest(tick source.Tick) {
 	case source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF:
 		switch tick.Kind {
 		case source.KindLastPrice:
-			e.vwaps[tick.Symbol].Add(tick.Price, tick.Volume, tick.Timestamp)
+			// Weight the rolling VWAP by volume TRADED per update — the increment in
+			// VOLTODAY (a running daily total) — not VOLTODAY itself. Feeding raw
+			// VOLTODAY weights every tick by the whole day's cumulative volume, which
+			// hugely overweights later prices and reseeds oddly on restart. Mirrors the
+			// session accumulator. A non-positive delta (day rollover: VOLTODAY resets)
+			// is skipped; the new baseline is stored for the next tick.
+			if last, ok := e.vwapLastVol[tick.Symbol]; ok {
+				if dv := tick.Volume - last; dv > 0 {
+					e.vwaps[tick.Symbol].Add(tick.Price, dv, tick.Timestamp)
+				}
+			}
+			e.vwapLastVol[tick.Symbol] = tick.Volume
 			e.lastPrice[tick.Symbol] = tick.Price
 			e.ingestSessionTick(tick)
 		case source.KindBid, source.KindAsk:

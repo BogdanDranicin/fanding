@@ -241,8 +241,9 @@ func TestEngine_ForexFundingNilUntilForexTick(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
-	// USDRUBF MOEX tick — VWAP known, but no USDCNH or CNYRUBF yet
+	// USDRUBF MOEX ticks (cumulative VOLTODAY 100→110) — VWAP known, but no USDCNH/CNYRUBF yet
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, now))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 110, now.Add(time.Millisecond)))
 	snap := e.Snapshot()
 	if snap.USDRUBF.ForexFunding != nil {
 		t.Error("ForexFunding must be nil until both USDCNH and CNYRUBF are ingested")
@@ -327,14 +328,49 @@ func TestEngine_VWAPUpdatedByMOEXTicks(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
-	// price=80 vol=1, price=90 vol=3 → VWAP = (80 + 270) / 4 = 87.5
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 80.0, 1, now))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 3, now.Add(time.Millisecond)))
+	// Volume is cumulative VOLTODAY; the rolling VWAP is weighted by the increment per
+	// tick. The first tick only sets the baseline (no attributable volume yet), then
+	// VOLTODAY 100→101 = 1 traded @80 and 101→104 = 3 traded @90 → (80 + 270)/4 = 87.5.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 79.0, 100, now))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 80.0, 101, now.Add(time.Millisecond)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 104, now.Add(2*time.Millisecond)))
 
 	snap := e.Snapshot()
 	const want = 87.5
 	if snap.USDRUBF.VWAP != want {
 		t.Errorf("VWAP: want %.4f, got %.4f", want, snap.USDRUBF.VWAP)
+	}
+}
+
+func TestEngine_RollingVWAPUsesVoltodayDeltas(t *testing.T) {
+	e := funding.NewEngine()
+	now := time.Now()
+
+	// A single tick sets only the VOLTODAY baseline — no attributable volume yet, so the
+	// rolling VWAP is not available (matches a fresh window right after a restart).
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 100.0, 5000, now))
+	if v := e.Snapshot().USDRUBF.VWAP; v != 0 {
+		t.Errorf("VWAP after a single baseline tick: want 0, got %v", v)
+	}
+
+	// VOLTODAY 5000→5010 = 10 traded @101 → VWAP=101 (weighted by the delta 10, not 5010).
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 101.0, 5010, now.Add(time.Second)))
+	if v := e.Snapshot().USDRUBF.VWAP; v != 101.0 {
+		t.Errorf("VWAP weighted by delta: want 101.0, got %v", v)
+	}
+
+	// VOLTODAY reset (new trading day): a smaller value than before must not add a
+	// negative weight — the drop is skipped and only the new baseline is stored.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 200.0, 5, now.Add(2*time.Second)))
+	if v := e.Snapshot().USDRUBF.VWAP; v != 101.0 {
+		t.Errorf("VWAP must ignore a VOLTODAY reset (negative delta): want 101.0, got %v", v)
+	}
+
+	// Deltas resume from the reset baseline: 5→15 = 10 traded @200. The window still
+	// holds the earlier 10@101 → VWAP = (101*10 + 200*10)/20 = 150.5.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 200.0, 15, now.Add(3*time.Second)))
+	if v := e.Snapshot().USDRUBF.VWAP; v != 150.5 {
+		t.Errorf("VWAP after reset baseline + delta: want 150.5, got %v", v)
 	}
 }
 
@@ -364,8 +400,11 @@ func TestEngine_ForexFundingValue(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
-	// ForexFunding(USDRUBF) = VWAP - USDCNH*CNYRUBF_last = 82 - 8*10 = 2.0
+	// ForexFunding(USDRUBF) = VWAP - USDCNH*CNYRUBF_last = 82 - 8*10 = 2.0.
+	// Two USDRUBF ticks (cumulative VOLTODAY 100→110) give the rolling VWAP an
+	// attributable increment: 10 traded @82 → VWAP=82.
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, now))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 110, now.Add(time.Millisecond)))
 	e.Ingest(forexTick(source.SymbolUSDCNH, 8.0, now))
 	e.Ingest(moexTick(source.SymbolCNYRUBF, 10.0, 100, now))
 
@@ -426,8 +465,11 @@ func TestEngine_CNYRUBFMOEXFunding(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
+	// Volume is cumulative VOLTODAY; the VWAP weights the increments. Baseline @11.5(100),
+	// then 100 traded @11.5 (→200) and 50 traded @11.8 (→250).
 	e.Ingest(moexTick(source.SymbolCNYRUBF, 11.5, 100, now))
-	e.Ingest(moexTick(source.SymbolCNYRUBF, 11.8, 50, now.Add(time.Millisecond)))
+	e.Ingest(moexTick(source.SymbolCNYRUBF, 11.5, 200, now.Add(time.Millisecond)))
+	e.Ingest(moexTick(source.SymbolCNYRUBF, 11.8, 250, now.Add(2*time.Millisecond)))
 
 	snap := e.Snapshot()
 	// VWAP = (11.5*100 + 11.8*50) / 150 = 1740 / 150 = 11.6
