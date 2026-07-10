@@ -6,6 +6,7 @@ export interface InstrumentFunding {
   cb_funding?: number;
   official_rate?: number;
   predicted_funding?: number;
+  predicted_cb_rate?: number;
 }
 
 export interface FundingSnapshot {
@@ -16,29 +17,30 @@ export interface FundingSnapshot {
   usdtrub_price: number;
 }
 
+export interface InstrumentSpec {
+  symbol: string;
+  initial_margin: number;
+  lot_size: number;
+  step_price: number;
+  min_step: number;
+}
+
+export type SpecsMap = Record<string, InstrumentSpec>;
+
+export interface InstrumentInfo {
+  symbol: string;
+  short_name: string;
+  market_type: 'future' | 'stock';
+  initial_margin: number;
+  lot_size: number;
+  step_price: number;
+  min_step: number;
+}
+
 export type WSStatus = 'connecting' | 'connected' | 'disconnected';
 
 export interface WSMessage {
   type: 'snapshot' | 'publication' | 'ping';
   ts: number;
   payload: unknown;
-}
-
-export interface Position {
-  symbol: string;
-  exchange: string;
-  side: 'buy' | 'sell';
-  pos: number;
-  entry_price: number;
-  current_price?: number;
-  unrealized_profit?: number;
-  unrealized_profit_pct?: number;
-  date: string;
-  time: string;
-  asset: string;
-}
-
-export interface BrokerConnectionStatus {
-  configured: boolean;
-  expires_at?: string;
 }

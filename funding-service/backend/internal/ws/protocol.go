@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -55,6 +56,20 @@ func EncodeSnapshot(s funding.FundingSnapshot) ([]byte, error) {
 		},
 	}
 	return msgpack.Marshal(msg)
+}
+
+// SnapshotJSON serialises a FundingSnapshot as JSON with the same field layout
+// as the WebSocket frame. Used by the GET /api/v1/snapshot diagnostic so cbrwatch
+// can read the live predicted_cb_rate and official_rate over plain HTTP.
+func SnapshotJSON(s funding.FundingSnapshot) ([]byte, error) {
+	payload := map[string]any{
+		"ts":            s.Timestamp.UnixMilli(),
+		"USDRUBF":       instrPayload(s.USDRUBF),
+		"EURRUBF":       instrPayload(s.EURRUBF),
+		"CNYRUBF":       instrPayload(s.CNYRUBF),
+		"usdtrub_price": s.USDTRUBPrice,
+	}
+	return json.Marshal(payload)
 }
 
 // EncodePublication serialises a CBR publication event.

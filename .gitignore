@@ -1,0 +1,13 @@
+# Runtime data / logs (cbrwatch jsonl + summary) — not source
+funding-service/logs/
+
+# Claude Code session skill cache
+.superpowers/
+
+# Local env
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db

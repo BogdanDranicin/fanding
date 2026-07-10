@@ -119,6 +119,19 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	router.Handle("GET /metrics", promhttp.Handler())
+
+	// Live snapshot as JSON for the cbrwatch latency tracker (more specific than
+	// "/api/" so it takes precedence over the chi router).
+	router.HandleFunc("GET /api/v1/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		data, err := appws.SnapshotJSON(eng.Snapshot())
+		if err != nil {
+			http.Error(w, "encode error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	})
+
 	router.Handle("/api/", apiRouter)
 
 	router.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {

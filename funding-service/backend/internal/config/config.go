@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/kelseyhightower/envconfig"
 )
@@ -27,6 +28,13 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, err
+	}
+	// PaaS hosts (Render, Railway, Fly) inject the listen port via $PORT.
+	// Prefer it over BACKEND_PORT so the same image runs unchanged in prod.
+	if p := os.Getenv("PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			cfg.Port = n
+		}
 	}
 	if cfg.PostgresPassword == "" && cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("POSTGRES_PASSWORD or DATABASE_URL must be set")

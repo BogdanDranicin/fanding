@@ -60,8 +60,8 @@ func TestAdaptiveInterval_FastWindow(t *testing.T) {
 		t.Run(fmt.Sprintf("%02d:%02d", tc.h, tc.m), func(t *testing.T) {
 			ts := time.Date(2026, 5, 19, tc.h, tc.m, 0, 0, msk)
 			got := cbr.AdaptiveInterval(ts)
-			if tc.fast && got != 3*time.Second {
-				t.Errorf("want 3s, got %v", got)
+			if tc.fast && got != 1*time.Second {
+				t.Errorf("want 1s, got %v", got)
 			}
 			if !tc.fast && got != 5*time.Minute {
 				t.Errorf("want 5min, got %v", got)

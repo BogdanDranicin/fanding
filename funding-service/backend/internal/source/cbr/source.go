@@ -2,19 +2,13 @@ package cbr
 
 import (
 	"context"
-	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
-	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/transform"
 
 	"github.com/funding-service/backend/internal/metrics"
 	"github.com/funding-service/backend/internal/source"
@@ -25,21 +19,30 @@ const (
 	mskOffset  = 3 * 60 * 60 // UTC+3
 )
 
-// knownCodes maps CBR CharCode values to internal source symbol constants.
-var knownCodes = map[string]string{
-	"USD": source.SymbolUSDRubOfficial,
-	"EUR": source.SymbolEURRubOfficial,
+// fetchInfo carries per-poll diagnostics for the observability log: which channel
+// won the race (newest publication date) and how long each channel took.
+type fetchInfo struct {
+	winner    string
+	latencies map[string]time.Duration
 }
 
 // Source implements source.MarketDataSource for the CBR official FX rate.
-// It uses an adaptive poll interval: 3 s during the 16:00–19:00 Moscow publication
-// window, 5 minutes outside it. OnNewPublication receives a signal whenever a new
-// daily publication is detected (for downstream Telegram alerts).
+//
+// In production (New) it RACES several CBR origin channels (official XML + SOAP)
+// in parallel on every poll and emits the one whose publication date is newest,
+// so a fresh rate is delivered as soon as the FASTEST channel reflects it rather
+// than waiting for the slow, heavily-cached XML_daily endpoint. It uses an
+// adaptive poll interval: 1 s during the 16:00–19:00 Moscow publication window,
+// 5 minutes outside it. OnNewPublication is signalled on each new daily publication.
 type Source struct {
 	url        string
 	logger     zerolog.Logger
 	httpClient *http.Client
 	intervalFn func() time.Duration
+
+	// channels is the racing set (production). When empty, the source fetches the
+	// single url instead (used by NewWithURL for deterministic tests).
+	channels []Channel
 
 	// OnNewPublication is signalled when a date change is detected in the CBR response.
 	// It has a buffer of 1 so a slow consumer does not block polling.
@@ -51,12 +54,16 @@ type Source struct {
 	lastDate string // written only from the single pollLoop goroutine
 }
 
-// New creates a Source against the live CBR endpoint with adaptive polling.
+// New creates a production Source that races the CBR origin channels.
 func New(logger zerolog.Logger) *Source {
-	return newSource(defaultURL, MoscowAdaptiveInterval, logger)
+	s := newSource(defaultURL, MoscowAdaptiveInterval, logger)
+	s.httpClient = DirectClient()
+	s.channels = FastChannels()
+	return s
 }
 
-// NewWithURL creates a Source against a custom URL and interval function (for tests).
+// NewWithURL creates a single-endpoint Source against a custom URL and interval
+// function (for tests). It does not race channels.
 func NewWithURL(url string, intervalFn func() time.Duration, logger zerolog.Logger) *Source {
 	return newSource(url, intervalFn, logger)
 }
@@ -118,10 +125,10 @@ func (s *Source) Close() error {
 
 // pollLoop fetches immediately on startup, then sleeps for intervalFn() between requests.
 // intervalFn is re-evaluated each iteration, so the interval can switch between 5 min and
-// 200 ms without code changes. On transient errors (network not yet ready at container start)
+// 1 s without code changes. On transient errors (network not yet ready at container start)
 // it retries every retryInterval up to maxRetries times before falling back to intervalFn.
 func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- source.Tick) {
-	const retryInterval = 3 * time.Second
+	const retryInterval = 1 * time.Second
 	const maxRetries = 5
 
 	log := s.logger.With().Str("source", "cbr").Logger()
@@ -131,7 +138,7 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 		iv := s.intervalFn()
 
 		fetchStart := time.Now()
-		vc, err := s.fetchRates(ctx)
+		res, info, err := s.fetch(ctx)
 		fetchDur := time.Since(fetchStart)
 		metrics.CBRFetchDuration.Observe(fetchDur.Seconds())
 
@@ -157,25 +164,26 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 		}
 
 		failures = 0
-		if vc.Date == s.lastDate {
-			log.Debug().Str("date", vc.Date).Msg("no new publication")
+		if res.Date == s.lastDate {
+			log.Debug().Str("date", res.Date).Msg("no new publication")
 		} else {
 			// isNew=true если дата в ответе ЦБ позже сегодня (публикация уже состоялась,
 			// в т.ч. при рестарте после 16:30 когда lastDate ещё пустой).
-			isNew := s.lastDate != "" || isFutureDate(vc.Date)
-			s.lastDate = vc.Date
-			s.emitTicks(vc, symbols, ch, isNew)
+			isNew := s.lastDate != "" || isFutureDate(res.Date)
+			s.lastDate = res.Date
+			s.emitTicks(res, symbols, ch, isNew)
 
 			// Новую публикацию логируем на Warn, чтобы событие было видно в проде
-			// (LOG_LEVEL=warn). Добавляем диагностику задержки: латентность HTTP-запроса,
-			// действующий интервал опроса и время МСК — этого не хватало для разбора
-			// «почему курсы пришли позже остальных».
+			// (LOG_LEVEL=warn). Диагностика задержки: канал-победитель гонки, латентность
+			// каждого канала, действующий интервал опроса и время МСК.
 			ev := log.Info()
 			if isNew {
 				ev = log.Warn()
 			}
-			ev.Str("date", vc.Date).
+			ev.Str("date", res.Date).
 				Bool("is_update", isNew).
+				Str("winner", info.winner).
+				Interface("channel_latency_ms", latencyMillis(info.latencies)).
 				Dur("fetch_latency", fetchDur).
 				Dur("poll_interval", iv).
 				Str("msk_time", time.Now().In(time.FixedZone("MSK", mskOffset)).Format("15:04:05")).
@@ -197,10 +205,92 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 	}
 }
 
-func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick, isNew bool) {
-	wantedSet := make(map[string]bool, len(symbols))
+// fetch returns the freshest rates. In race mode it queries every channel in
+// parallel and returns the result with the newest publication date; in single
+// mode it fetches the configured url.
+func (s *Source) fetch(ctx context.Context) (ChannelResult, fetchInfo, error) {
+	if len(s.channels) == 0 {
+		return s.fetchSingle(ctx)
+	}
+	return s.fetchRace(ctx)
+}
+
+func (s *Source) fetchRace(ctx context.Context) (ChannelResult, fetchInfo, error) {
+	type outcome struct {
+		id  string
+		res ChannelResult
+		dur time.Duration
+		err error
+	}
+	results := make([]outcome, len(s.channels))
+	var wg sync.WaitGroup
+	for i, ch := range s.channels {
+		wg.Add(1)
+		go func(i int, ch Channel) {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			start := time.Now()
+			res, err := ch.Fetch(cctx, s.httpClient)
+			results[i] = outcome{ch.ID, res, time.Since(start), err}
+		}(i, ch)
+	}
+	wg.Wait()
+
+	info := fetchInfo{latencies: make(map[string]time.Duration, len(results))}
+	var best ChannelResult
+	var bestDate time.Time
+	found := false
+	var firstErr error
+	for _, o := range results {
+		info.latencies[o.id] = o.dur
+		if o.err != nil {
+			if firstErr == nil {
+				firstErr = o.err
+			}
+			continue
+		}
+		d := parseRateDate(o.res.Date)
+		if !found || d.After(bestDate) {
+			found, bestDate, best, info.winner = true, d, o.res, o.id
+		}
+	}
+	if !found {
+		return ChannelResult{}, info, firstErr
+	}
+	return best, info, nil
+}
+
+func (s *Source) fetchSingle(ctx context.Context) (ChannelResult, fetchInfo, error) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	start := time.Now()
+
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, s.url, nil)
+	if err != nil {
+		return ChannelResult{}, fetchInfo{}, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; funding-service/1.0)")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return ChannelResult{}, fetchInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ChannelResult{}, fetchInfo{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	res, err := decodeValCurs(resp.Body)
+	info := fetchInfo{
+		winner:    "cbr_official_xml",
+		latencies: map[string]time.Duration{"cbr_official_xml": time.Since(start)},
+	}
+	return res, info, err
+}
+
+func (s *Source) emitTicks(res ChannelResult, symbols []string, ch chan<- source.Tick, isNew bool) {
+	wanted := make(map[string]bool, len(symbols))
 	for _, sym := range symbols {
-		wantedSet[sym] = true
+		wanted[sym] = true
 	}
 
 	kind := source.KindOfficialRate
@@ -208,24 +298,13 @@ func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick,
 		kind = source.KindNewOfficialRate
 	}
 
-	for _, v := range vc.Valutes {
-		internalSym, ok := knownCodes[v.CharCode]
-		if !ok || !wantedSet[internalSym] {
-			continue
+	emit := func(sym string, price float64) {
+		if price <= 0 || !wanted[sym] {
+			return
 		}
-
-		priceStr := strings.ReplaceAll(v.Value, ",", ".")
-		price, err := strconv.ParseFloat(strings.TrimSpace(priceStr), 64)
-		if err != nil || price == 0 {
-			continue
-		}
-		if v.Nominal > 1 {
-			price /= float64(v.Nominal)
-		}
-
 		select {
 		case ch <- source.Tick{
-			Symbol:    internalSym,
+			Symbol:    sym,
 			Price:     price,
 			Kind:      kind,
 			Timestamp: time.Now(),
@@ -234,63 +313,35 @@ func (s *Source) emitTicks(vc *valCurs, symbols []string, ch chan<- source.Tick,
 		default:
 		}
 	}
+
+	emit(source.SymbolUSDRubOfficial, res.USD)
+	emit(source.SymbolEURRubOfficial, res.EUR)
 }
 
-func (s *Source) fetchRates(ctx context.Context) (*valCurs, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+// latencyMillis converts a per-channel duration map to milliseconds for logging.
+func latencyMillis(in map[string]time.Duration) map[string]int64 {
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v.Milliseconds()
+	}
+	return out
+}
+
+// parseRateDate parses a CBR "DD.MM.YYYY" date; on failure returns the zero time
+// so an unparseable date never wins the race against a valid one.
+func parseRateDate(s string) time.Time {
+	t, err := time.Parse("02.01.2006", s)
 	if err != nil {
-		return nil, err
+		return time.Time{}
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; funding-service/1.0)")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-
-	return parseXML(resp.Body)
-}
-
-// parseXML decodes a CBR XML response, transparently handling windows-1251 encoding
-// via the xml.Decoder CharsetReader hook.
-func parseXML(r io.Reader) (*valCurs, error) {
-	dec := xml.NewDecoder(r)
-	dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
-		if strings.EqualFold(charset, "windows-1251") {
-			return transform.NewReader(input, charmap.Windows1251.NewDecoder()), nil
-		}
-		return input, nil
-	}
-	var vc valCurs
-	if err := dec.Decode(&vc); err != nil {
-		return nil, fmt.Errorf("decode xml: %w", err)
-	}
-	return &vc, nil
-}
-
-// valCurs is the root element of the CBR XML response.
-type valCurs struct {
-	XMLName xml.Name `xml:"ValCurs"`
-	Date    string   `xml:"Date,attr"`
-	Valutes []valute `xml:"Valute"`
-}
-
-type valute struct {
-	CharCode string `xml:"CharCode"`
-	Nominal  int    `xml:"Nominal"`
-	Value    string `xml:"Value"`
+	return t
 }
 
 // isFutureDate reports whether the CBR date string ("DD.MM.YYYY") is strictly after today MSK.
 // A future date means CBR has already published fresh rates for the next business day.
 func isFutureDate(cbrDate string) bool {
-	t, err := time.Parse("02.01.2006", cbrDate)
-	if err != nil {
+	t := parseRateDate(cbrDate)
+	if t.IsZero() {
 		return false
 	}
 	now := time.Now().In(time.FixedZone("MSK", mskOffset))
@@ -299,7 +350,7 @@ func isFutureDate(cbrDate string) bool {
 }
 
 // MoscowAdaptiveInterval is the production interval function.
-// It returns 3 s during 16:00–19:00 Moscow time (CBR publication window), 5 minutes otherwise.
+// It returns 1 s during 16:00–19:00 Moscow time (CBR publication window), 5 minutes otherwise.
 func MoscowAdaptiveInterval() time.Duration {
 	return AdaptiveInterval(time.Now().In(time.FixedZone("MSK", mskOffset)))
 }
@@ -309,11 +360,11 @@ func MoscowAdaptiveInterval() time.Duration {
 func AdaptiveInterval(t time.Time) time.Duration {
 	h, _, _ := t.Clock()
 	// CBR publishes next-day rates between ~16:30 and 18:00 MSK.
-	// Poll every 3 s in the extended window 16:00–19:00 so the CB funding
-	// appears within seconds of the publication rather than up to 30 s later.
-	// The window is wider than the typical publication time to catch late releases.
+	// Poll every 1 s in the extended window 16:00–19:00 so a new rate is delivered
+	// within ~1 s of whichever channel publishes first. The window is wider than the
+	// typical publication time to catch late releases.
 	if h >= 16 && h < 19 {
-		return 3 * time.Second
+		return 1 * time.Second
 	}
 	return 5 * time.Minute
 }

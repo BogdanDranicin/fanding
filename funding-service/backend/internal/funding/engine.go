@@ -76,12 +76,15 @@ func (a *sessionAcc) vwap() (float64, bool) {
 type Engine struct {
 	vwaps        map[string]*VWAPCalculator // 6-hour rolling VWAP for display
 	sessionAccs  map[string]*sessionAcc     // cumulative session VWAP (reset at MSK midnight)
-	spotTOMWAP   map[string]float64         // WAPRICE from MOEX ISS for spot TOM → predicted CBR rate (frozen after 15:30)
+	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
+	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
 	settlDate        string                     // MSK date for which settlement was recorded
 	lastPrice        map[string]float64
 	swapRate         map[string]float64
 	forexRates       map[string]float64
+	eurUSDFix        float64 // EUR/USD «по состоянию на 15:30 МСК» — фиксинг ЕЦБ для расчёта курса EUR ЦБ (методика с 08.06.2026)
+	eurUSDFixDate    string  // MSK-дата, за которую накоплен eurUSDFix (для суточного сброса)
 	officialRate        map[string]float64
 	officialRateDate    map[string]string  // MSK date when officialRate was last published
 	officialRateAtSettl map[string]float64 // курс ЦБ, зафиксированный при settlement (15:30)
@@ -103,6 +106,7 @@ func NewEngine() *Engine {
 		vwaps:            vwaps,
 		sessionAccs:      make(map[string]*sessionAcc),
 		spotTOMWAP:       make(map[string]float64),
+		spotTOMWAPLive:   make(map[string]float64),
 		settlVWAP:        make(map[string]*float64),
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
@@ -165,14 +169,22 @@ func (e *Engine) Ingest(tick source.Tick) {
 
 	case source.SymbolUSDRubTOM:
 		// WAPRICE is the MOEX ISS session VWAP from market open (10:00 MSK), matching the
-		// CBR official-rate methodology. Only store it inside the CBR window so the value
-		// freezes at the closing VWAP once trading beyond 15:30 would otherwise skew it.
-		if tick.Kind == source.KindWaprice && inCBRWindow(tick.Timestamp) {
-			e.spotTOMWAP[tick.Symbol] = tick.Price
+		// CBR official-rate methodology. The 10:00–15:30 value (spotTOMWAP) is the best
+		// fixing predictor — frozen at the window close so post-15:30 trades don't skew it.
+		// We also keep the latest WAPRICE (spotTOMWAPLive) regardless of time so the
+		// predicted row falls back to a live value instead of being empty on a late start.
+		if tick.Kind == source.KindWaprice {
+			e.spotTOMWAPLive[tick.Symbol] = tick.Price
+			if inCBRWindow(tick.Timestamp) {
+				e.spotTOMWAP[tick.Symbol] = tick.Price
+			}
 		}
 
 	case source.SymbolEURUSD, source.SymbolUSDCNH:
 		e.forexRates[tick.Symbol] = tick.Price
+		if tick.Symbol == source.SymbolEURUSD {
+			e.freezeEURUSDFixing(tick)
+		}
 
 	case source.SymbolUSDRubOfficial, source.SymbolEURRubOfficial:
 		e.officialRate[tick.Symbol] = tick.Price
@@ -260,6 +272,25 @@ func (e *Engine) freezeOfficialRateAtSettl(sym string) {
 	}
 }
 
+// freezeEURUSDFixing держит EUR/USD «по состоянию на 15:30 МСК» — курс ЕЦБ, который ЦБ РФ
+// с 08.06.2026 использует для расчёта официального курса: EUR/RUB = USD/RUB(ЦБ) × EUR/USD@15:30.
+// Значение обновляется каждым тиком EUR/USD до 15:30 МСК; в 15:30 обновления прекращаются, поэтому
+// поле фиксирует курс ровно на этот момент (последний тик перед 15:30). Сбрасывается при смене
+// торгового дня МСК. До 15:30 поле равно последнему живому курсу — прогноз EUR сходится к
+// фактическому фиксингу ЦБ к моменту клиринга.
+func (e *Engine) freezeEURUSDFixing(tick source.Tick) {
+	mskTime := tick.Timestamp.In(msk)
+	mskDate := mskTime.Format("2006-01-02")
+	if e.eurUSDFixDate != mskDate {
+		e.eurUSDFixDate = mskDate
+		e.eurUSDFix = 0
+	}
+	h, m, _ := mskTime.Clock()
+	if h < 15 || (h == 15 && m < 30) {
+		e.eurUSDFix = tick.Price
+	}
+}
+
 // Snapshot computes and returns current funding values for all instruments.
 func (e *Engine) Snapshot() FundingSnapshot {
 	e.mu.Lock()
@@ -276,12 +307,24 @@ func (e *Engine) Snapshot() FundingSnapshot {
 	usdRubSpot := usdcnh * cnyRub
 	eurRubSpot := eurusd * usdcnh * cnyRub
 
-	// Predicted CB rates: USD from spot TOM WAPRICE; EUR via cross-rate (EUR/RUB_TOM doesn't trade).
-	// EUR/USD proxy: CBR official rates ratio (EUR/RUB ÷ USD/RUB) — available without a forex API.
-	// Falls back to forexRates EUR/USD if available (e.g. TwelveData feed is wired up).
+	// Predicted CB rates. USD: VWAP спот TOM за 10:00–15:30 МСК (методика ЦБ для USD/RUB).
+	// EUR: с 08.06.2026 ЦБ считает курс как USD/RUB(ЦБ) × EUR/USD(ЕЦБ) по состоянию на 15:30 МСК,
+	// поэтому наш прогноз — это произведение тех же ног: usdPredictedCBRate × EUR/USD@15:30.
+	// EUR/RUB_TOM на бирже не торгуется, отдельной USD-ноги для EUR нет — используется общая USD.
+	// Prefer the frozen 10:00–15:30 fixing predictor; fall back to the latest live
+	// WAPRICE so the predicted row is populated even when the service started after 15:30.
 	usdPredictedCBRate := e.spotTOMWAP[source.SymbolUSDRubTOM]
-	eurUSD := eurusd // from forex source (may be zero if no feed is configured)
+	if usdPredictedCBRate == 0 {
+		usdPredictedCBRate = e.spotTOMWAPLive[source.SymbolUSDRubTOM]
+	}
+	// EUR/USD, зафиксированный на 15:30 МСК (см. freezeEURUSDFixing). До 15:30 равен живому курсу.
+	eurUSD := e.eurUSDFix
 	if eurUSD == 0 {
+		// Фиксинг ещё не накоплен сегодня (старт сервиса после 15:30 или нет тиков) — живой курс.
+		eurUSD = eurusd
+	}
+	if eurUSD == 0 {
+		// Форекс-фид недоступен вовсе — оцениваем EUR/USD из отношения официальных курсов ЦБ.
 		usdCBR := e.officialRate[source.SymbolUSDRubOfficial]
 		eurCBR := e.officialRate[source.SymbolEURRubOfficial]
 		if usdCBR > 0 && eurCBR > 0 {
@@ -337,11 +380,14 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	settlPtr := e.settlVWAP[sym]
 	settlDone := settlPtr != nil
 
-	// CBFunding: доступен только когда состоялись И клиринг (15:30), И публикация ЦБ сегодня.
-	// Используем officialRate (курс, опубликованный ЦБ в данный торговый день и вступающий
-	// в силу на следующий календарный день) — именно это значение фигурирует в формуле MOEX:
+	// CBFunding: предпочитаем авторитетный SWAPRATE, который MOEX публикует на вечернем
+	// клиринге — это и есть фандинг, который MOEX реально начисляет (равен тому, что
+	// показывает эталонный терминал). Пока SWAPRATE не опубликован (= 0), используем нашу
+	// раннюю реконструкцию из свежего курса ЦБ как опережающую оценку:
 	//   D = VWAP(10:00–15:30) − курс ЦБ, установленный сегодня.
-	if settlDone && cbPublishedToday {
+	if rate, ok := e.swapRate[sym]; ok && rate != 0 {
+		inf.CBFunding = ptr(rate)
+	} else if settlDone && cbPublishedToday {
 		if newRate, ok := e.officialRate[officialSym]; ok && newRate > 0 {
 			d := *settlPtr - newRate
 			l1 := 0.001 * newRate

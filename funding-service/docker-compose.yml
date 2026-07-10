@@ -35,10 +35,14 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
       MOEX_POLL_INTERVAL_MS: ${MOEX_POLL_INTERVAL_MS:-250}
       BACKEND_PORT: ${BACKEND_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+      HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,7 +52,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "80:80"
+      - "3000:80"
     depends_on:
       - backend
     networks:
