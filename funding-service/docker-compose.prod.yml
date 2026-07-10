@@ -24,6 +24,10 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    # Публикуем только на localhost: наружу сервис отдаёт системный nginx,
+    # который проксирует /api и /ws на 127.0.0.1:8080 (см. конфиг nginx сервера).
+    ports:
+      - "127.0.0.1:8080:8080"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -44,8 +48,10 @@ services:
   frontend:
     build: ./frontend
     restart: unless-stopped
+    # Системный nginx (HTTPS, Let's Encrypt) проксирует "/" на 127.0.0.1:3000.
+    # Публикуем контейнер на 3000, чтобы не конфликтовать с хостовым nginx на :80.
     ports:
-      - "80:80"
+      - "127.0.0.1:3000:80"
     depends_on:
       - backend
     networks:
