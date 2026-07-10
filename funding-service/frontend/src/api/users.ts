@@ -32,6 +32,9 @@ export async function ensureUser(): Promise<UserRecord> {
 export async function getTelegramLink(userId: number, token: string): Promise<TelegramLinkResponse> {
   const params = new URLSearchParams({ token });
   const res = await fetch(`${API_BASE}/api/v1/users/${userId}/telegram-link?${params}`);
+  // 503 = сервер без TELEGRAM_BOT_USERNAME: не ошибка запроса, а «бот не настроен» —
+  // пустой url включает соответствующую ветку в SettingsPage.
+  if (res.status === 503) return { url: '', linked: false };
   if (!res.ok) throw new Error('Failed to get telegram link');
   return res.json();
 }
