@@ -238,14 +238,20 @@ func main() {
 	}()
 
 	if cfg.TelegramToken != "" {
-		bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
-		if err != nil {
-			log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
-		} else {
+		// Bot init can block for a while on proxy dials (api.telegram.org is
+		// unreachable from some networks, so each proxy is tried with a timeout).
+		// Run the whole bot lifecycle in the background so a slow or dead proxy
+		// never delays the HTTP server or data collection.
+		go func() {
+			bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
+			if err != nil {
+				log.Warn().Err(err).Msg("telegram bot init failed — running without bot")
+				return
+			}
 			go bot.Run(ctx)
 			disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
-			go disp.Run(ctx, eng.SettlementCh(), dispPubCh)
-		}
+			disp.Run(ctx, eng.SettlementCh(), dispPubCh)
+		}()
 	} else {
 		log.Info().Msg("TELEGRAM_BOT_TOKEN not set — bot disabled")
 	}
