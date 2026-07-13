@@ -88,10 +88,13 @@ func (a *tradeAcc) vwap() (float64, bool) {
 	return a.sumPV / a.sumV, true
 }
 
-// tradeFeedStaleAfter bounds how far the trade feed may lag behind marketdata
-// before the engine falls back to the ΔVOLTODAY approximation. Compared against
-// tick timestamps (not wall clock) so a closed market does not flip the choice.
-const tradeFeedStaleAfter = 10 * time.Minute
+// tradeFeedMinCompleteness is the fraction of marketdata VOLTODAY that the
+// captured trade volume must cover for the trade feed to be considered
+// authoritative. Below this the trades endpoint is lagging behind real volume
+// (dead/slow while the future keeps trading) and the engine falls back to the
+// ΔVOLTODAY approximation. The slack absorbs off-market deals (excluded from our
+// sum but sometimes counted in VOLTODAY) and minor poll-timing skew.
+const tradeFeedMinCompleteness = 0.90
 
 // Engine ingests Ticks from any source and computes FundingSnapshots on demand.
 // All fields are protected by mu; VWAPCalculators have their own internal mutexes.
@@ -99,7 +102,6 @@ type Engine struct {
 	vwaps        map[string]*VWAPCalculator // 6-hour rolling VWAP for display (ΔVOLTODAY approximation, fallback)
 	tradeVWAPs   map[string]*VWAPCalculator // 6-hour rolling VWAP from real deals (KindTrade, preferred)
 	tradeAccs    map[string]*tradeAcc       // session VWAP from real deals (reset on MSK date change)
-	lastTradeAt  map[string]time.Time       // timestamp of the newest ingested trade per symbol
 	lastPriceAt  map[string]time.Time       // timestamp of the newest KindLastPrice tick per symbol
 	sessionAccs  map[string]*sessionAcc     // cumulative session VWAP (reset at MSK midnight)
 	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
@@ -135,7 +137,6 @@ func NewEngine() *Engine {
 		vwaps:            vwaps,
 		tradeVWAPs:       tradeVWAPs,
 		tradeAccs:        make(map[string]*tradeAcc),
-		lastTradeAt:      make(map[string]time.Time),
 		lastPriceAt:      make(map[string]time.Time),
 		sessionAccs:      make(map[string]*sessionAcc),
 		spotTOMWAP:       make(map[string]float64),
@@ -319,9 +320,6 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 	acc.sumPV += tick.Price * tick.Volume
 	acc.sumV += tick.Volume
 	e.tradeVWAPs[sym].Add(tick.Price, tick.Volume, tick.Timestamp)
-	if tick.Timestamp.After(e.lastTradeAt[sym]) {
-		e.lastTradeAt[sym] = tick.Timestamp
-	}
 }
 
 // maybeFreezeSettl freezes today's settlement VWAP at 15:30 MSK, once per symbol
@@ -367,21 +365,30 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	e.tryFireSettlSignal(mskDate)
 }
 
-// tradeFeedFresh reports whether the trade feed keeps up with marketdata for sym.
-// Freshness is judged by tick timestamps relative to each other — not wall clock —
-// so a closed market (both feeds silent) keeps the trade feed preferred, while a
-// dead trades endpoint (marketdata moving on alone) demotes it to the fallback.
-// Must be called while holding e.mu.
+// tradeFeedFresh reports whether the trade feed has captured essentially all of
+// the session volume marketdata reports for sym — the signal that the exact
+// trade VWAP is authoritative. It is volume-based, NOT time-based: an illiquid
+// instrument (EURRUBF) can go 10–20 min between deals during normal trading, and
+// judging freshness by the age of the last deal wrongly demoted it to the empty
+// ΔVOLTODAY fallback, zeroing its VWAP. A genuine shortfall (dead/slow trades
+// endpoint while the future keeps trading) still trips the fallback because our
+// captured volume then lags the growing VOLTODAY. Must be called while holding e.mu.
 func (e *Engine) tradeFeedFresh(sym string) bool {
-	lastTrade, ok := e.lastTradeAt[sym]
-	if !ok {
+	acc := e.tradeAccs[sym]
+	if acc == nil || acc.sumV <= 0 {
 		return false
 	}
-	lastPrice, ok := e.lastPriceAt[sym]
-	if !ok {
+	// Ignore a leftover accumulator from a previous day (no trades ingested yet
+	// today). Uses the last price tick's date — a tick timestamp, not wall clock.
+	if lp, ok := e.lastPriceAt[sym]; ok && acc.date != lp.In(msk).Format("2006-01-02") {
+		return false
+	}
+	volToday, ok := e.vwapLastVol[sym]
+	if !ok || volToday <= 0 {
+		// No marketdata volume to compare against yet — trust the trades we have.
 		return true
 	}
-	return !lastTrade.Before(lastPrice.Add(-tradeFeedStaleAfter))
+	return acc.sumV >= volToday*tradeFeedMinCompleteness
 }
 
 // displayVWAP returns the rolling 6-hour VWAP for display: exact trade-based

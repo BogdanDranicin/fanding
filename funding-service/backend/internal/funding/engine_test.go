@@ -100,10 +100,11 @@ func TestEngine_TradeTicksFeedExactVWAP(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
-	// ΔVOLTODAY approximation sees a different price (90) — the exact trade
-	// feed must win while it is fresh.
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 100, now.Add(-2*time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 200, now.Add(-1*time.Minute)))
+	// ΔVOLTODAY approximation sees a different price (90). Marketdata VOLTODAY
+	// grows 20→40; the two real deals below sum to exactly that volume, so the
+	// trade feed is complete and its exact VWAP must beat the approximation.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 20, now.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 40, now.Add(-1*time.Minute)))
 
 	// Real deals: 80×10 and 82×30 → VWAP = (800+2460)/40 = 81.5 exactly.
 	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, now.Add(-90*time.Second)))
@@ -120,9 +121,10 @@ func TestEngine_TradeVWAPStaleFallsBackToApprox(t *testing.T) {
 	e := funding.NewEngine()
 	now := time.Now()
 
-	// Trades stopped 30 minutes ago…
+	// We captured only 10 lots of trades…
 	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, now.Add(-30*time.Minute)))
-	// …while marketdata keeps moving (trade feed died) → fall back to ΔVOLTODAY.
+	// …but marketdata VOLTODAY has since grown to 200 (trade feed died / is lagging
+	// far behind real volume) → fall back to the ΔVOLTODAY approximation.
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 100, now.Add(-1*time.Minute)))
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 200, now))
 
@@ -130,6 +132,30 @@ func TestEngine_TradeVWAPStaleFallsBackToApprox(t *testing.T) {
 	const want = 90.0
 	if diff := snap.USDRUBF.VWAP - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("VWAP: want fallback %.4f (approx), got %.6f", want, snap.USDRUBF.VWAP)
+	}
+}
+
+func TestEngine_TradeVWAPFreshDespiteOldLastDeal(t *testing.T) {
+	// Regression: illiquid instrument (EURRUBF) whose last deal is 12 min old but
+	// whose trades already cover the full session volume (Σqty == VOLTODAY). The
+	// old wall-clock staleness (>10 min) demoted it to the ΔVOLTODAY fallback, which
+	// is empty right after a restart → the displayed VWAP dropped to 0. Freshness is
+	// now volume-based, so the exact trade VWAP must still be shown.
+	e := funding.NewEngine()
+	now := time.Now()
+
+	// Two deals, 40 lots total @ VWAP (80×10+82×30)/40 = 81.5. Last one 12 min ago.
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 80.0, 10, now.Add(-15*time.Minute)))
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 82.0, 30, now.Add(-12*time.Minute)))
+	// A single fresh marketdata tick whose VOLTODAY equals the volume we captured
+	// (40): nothing has traded since, so the feed is complete. This lone tick adds
+	// nothing to the ΔVOLTODAY approximation (no delta), mimicking a fresh restart.
+	e.Ingest(moexTick(source.SymbolEURRUBF, 90.0, 40, now))
+
+	snap := e.Snapshot()
+	const want = 81.5
+	if diff := snap.EURRUBF.VWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("VWAP: want exact %.4f from complete trade feed, got %.6f (0 = stale-zeroing bug)", want, snap.EURRUBF.VWAP)
 	}
 }
 
