@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/funding-service/backend/internal/funding"
 	"github.com/funding-service/backend/internal/source"
 )
@@ -109,6 +111,50 @@ check:
 	if got.USDRUBF.VWAP != 82.0 {
 		t.Errorf("VWAP: want 82.0, got %v", got.USDRUBF.VWAP)
 	}
+}
+
+func TestRunner_TradeTicksNotForwardedToObserver(t *testing.T) {
+	// KindTrade ticks feed the engine's VWAP but must NOT reach the observer
+	// (DB tick history): a session backfill emits tens of thousands at once.
+	// Non-trade ticks must still be forwarded.
+	src := newControlledSource()
+	eng := funding.NewEngine()
+	out := make(chan funding.FundingSnapshot, 32)
+	runner := funding.NewRunner(src, eng, []string{source.SymbolUSDRUBF}, 20*time.Millisecond, out)
+
+	obs := make(chan source.Tick, 16)
+	runner.SetTickObserver(obs, zerolog.Nop())
+
+	now := time.Now()
+	src.ch <- source.Tick{Symbol: source.SymbolUSDRUBF, Price: 82.0, Volume: 5, Kind: source.KindTrade, Timestamp: now, Source: "moex-iss"}
+	src.ch <- source.Tick{Symbol: source.SymbolUSDRUBF, Price: 82.0, Volume: 100, Kind: source.KindLastPrice, Timestamp: now.Add(time.Millisecond), Source: "moex-iss"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	select {
+	case got := <-obs:
+		if got.Kind == source.KindTrade {
+			t.Fatalf("trade tick leaked to observer: %+v", got)
+		}
+		if got.Kind != source.KindLastPrice {
+			t.Errorf("unexpected observer tick kind: %v", got.Kind)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected the non-trade tick on the observer channel")
+	}
+
+	// No further tick (the trade one) should be waiting.
+	select {
+	case extra := <-obs:
+		t.Fatalf("unexpected second observer tick: %+v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	<-done
 }
 
 func TestRunner_ContextCancelStopsRun(t *testing.T) {

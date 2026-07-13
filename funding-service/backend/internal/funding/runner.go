@@ -56,6 +56,12 @@ func (r *Runner) sendToObs(tick source.Tick) {
 	if r.tickObs == nil {
 		return
 	}
+	// KindTrade ticks are internal VWAP inputs only: a session backfill emits
+	// tens of thousands at once, which would swamp the observer (DB tick history)
+	// and pollute it with per-deal rows. The engine has already ingested them.
+	if tick.Kind == source.KindTrade {
+		return
+	}
 	select {
 	case r.tickObs <- tick:
 	default:
