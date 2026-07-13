@@ -53,6 +53,13 @@ type Source struct {
 	started  bool
 	lastDate string // written only from the single pollLoop goroutine
 
+	// lastUSD/EUR/CNY hold the previously emitted official rates so a publication is
+	// declared only when the VALUES change — not merely when a channel's date label
+	// advances. CBR's SOAP endpoint (GetCursOnDate) echoes today's date even while the
+	// current rate is still in force, so a date-only change is not a real publication.
+	// Written only from the single pollLoop goroutine, like lastDate.
+	lastUSD, lastEUR, lastCNY float64
+
 	// pubInfo holds the last detected publication for the audit journal, guarded by mu.
 	pubInfo PublicationInfo
 }
@@ -202,17 +209,22 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 			//                    в рабочем режиме — смена даты. По нему тик помечается
 			//                    KindNewOfficialRate, чтобы движок пересчитал фандинг.
 			//
-			//   livePublication — мы СВОИМИ ГЛАЗАМИ увидели смену даты, уже работая
-			//                    (lastDate != ""). Только это настоящее «событие
-			//                    публикации»: его время осмысленно. Его и шлём в журнал
-			//                    и Telegram. Холодный старт (после 16:30 или в выходной)
-			//                    публикацией НЕ считается — время было бы временем
-			//                    рестарта, а не публикации. Именно это раньше засоряло
-			//                    журнал фантомными строками в полночь и по выходным.
+			//   livePublication — настоящее «событие публикации» для журнала и Telegram.
+			//                    Требуем ДВА условия: (1) мы работаем не с холодного
+			//                    старта (lastDate != "" — иначе время было бы временем
+			//                    рестарта → фантомы в полночь/выходные); (2) курсы
+			//                    ДЕЙСТВИТЕЛЬНО изменились. Только смены даты недостаточно:
+			//                    SOAP-канал ЦБ (GetCursOnDate) отдаёт сегодняшнюю дату,
+			//                    пока действует прежний курс, и гонка «побеждает по самой
+			//                    свежей дате» ловила этот эхо-сдвиг как публикацию с теми
+			//                    же курсами (баг: строка в журнале «курсы пришли», хотя
+			//                    они не менялись).
 			wasCold := s.lastDate == ""
+			ratesChanged := res.USD != s.lastUSD || res.EUR != s.lastEUR || res.CNY != s.lastCNY
 			rateIsFresh := !wasCold || isFutureDate(res.Date)
-			livePublication := !wasCold
+			livePublication := !wasCold && ratesChanged
 			s.lastDate = res.Date
+			s.lastUSD, s.lastEUR, s.lastCNY = res.USD, res.EUR, res.CNY
 			s.emitTicks(res, symbols, ch, rateIsFresh)
 
 			// Реальную публикацию логируем на Warn, чтобы событие было видно в проде
@@ -225,6 +237,7 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 			ev.Str("date", res.Date).
 				Bool("is_update", livePublication).
 				Bool("cold_start", wasCold).
+				Bool("rates_changed", ratesChanged).
 				Str("winner", info.winner).
 				Interface("channel_latency_ms", latencyMillis(info.latencies)).
 				Dur("fetch_latency", fetchDur).

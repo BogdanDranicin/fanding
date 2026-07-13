@@ -23,11 +23,19 @@ func fastInterval() time.Duration { return 20 * time.Millisecond }
 
 const xmlTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <ValCurs Date=%q name="Foreign Currency Market">
-<Valute ID="R01235"><CharCode>USD</CharCode><Nominal>1</Nominal><Value>82,5000</Value></Valute>
-<Valute ID="R01239"><CharCode>EUR</CharCode><Nominal>1</Nominal><Value>90,3000</Value></Valute>
+<Valute ID="R01235"><CharCode>USD</CharCode><Nominal>1</Nominal><Value>%s</Value></Valute>
+<Valute ID="R01239"><CharCode>EUR</CharCode><Nominal>1</Nominal><Value>%s</Value></Valute>
 </ValCurs>`
 
-func validXML(date string) string { return fmt.Sprintf(xmlTemplate, date) }
+// validXML builds a response with the default rates (82.50 / 90.30).
+func validXML(date string) string { return validXMLRates(date, "82,5000", "90,3000") }
+
+// validXMLRates builds a response with explicit USD/EUR values (comma decimals),
+// so tests can model a real publication (date AND rates change) versus a mere
+// date-label echo (date changes, rates stay the same).
+func validXMLRates(date, usd, eur string) string {
+	return fmt.Sprintf(xmlTemplate, date, usd, eur)
+}
 
 func newTestSource(srv *httptest.Server) *cbr.Source {
 	return cbr.NewWithURL(srv.URL, fastInterval, zerolog.Nop())
@@ -173,12 +181,13 @@ func TestSource_OnNewPublication_FiredOnDateChange(t *testing.T) {
 	var callCount int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&callCount, 1)
-		date := "19.05.2026"
+		// A real publication: both the date AND the rates change on the second call.
+		body := validXML("19.05.2026")
 		if n >= 2 {
-			date = "20.05.2026" // date changes on second call
+			body = validXMLRates("20.05.2026", "83,0000", "91,0000")
 		}
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprint(w, validXML(date))
+		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -205,6 +214,47 @@ func TestSource_OnNewPublication_FiredOnDateChange(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("OnNewPublication not signalled within timeout")
+	}
+}
+
+// TestSource_OnNewPublication_NotFiredOnDateEchoSameRates — регрессия на баг, из-за
+// которого журнал писал «курсы пришли», хотя они не менялись. SOAP-канал ЦБ отдаёт
+// сегодняшнюю дату, пока действует прежний курс; гонка «по самой свежей дате» ловила
+// этот эхо-сдвиг даты как публикацию. Теперь публикация — только при смене САМИХ курсов.
+func TestSource_OnNewPublication_NotFiredOnDateEchoSameRates(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		// Date advances but the rates stay identical (the SOAP date-echo).
+		date := "19.05.2026"
+		if n >= 2 {
+			date = "20.05.2026"
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, validXMLRates(date, "82,5000", "90,3000"))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+		t.Error("OnNewPublication не должен срабатывать на смене даты без смены курсов")
+	case <-ctx.Done():
+		// корректно — публикации нет
 	}
 }
 
@@ -290,12 +340,12 @@ func TestSource_LogsDetectionAtWarn(t *testing.T) {
 	var callCount int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&callCount, 1)
-		date := "19.05.2026"
+		body := validXML("19.05.2026")
 		if n >= 2 {
-			date = "20.05.2026" // дата меняется → новая публикация
+			body = validXMLRates("20.05.2026", "83,0000", "91,0000") // дата и курсы меняются → публикация
 		}
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprint(w, validXML(date))
+		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
