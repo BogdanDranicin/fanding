@@ -110,28 +110,18 @@ async function fetchPrices(): Promise<Record<string, number>> {
   return fetchPricesDirect();
 }
 
-// fetchSwapRates pulls the MOEX funding rate (SWAPRATE, in price points) for every
-// perpetual future straight from ISS marketdata. Quarterly futures carry a null
-// SWAPRATE and are skipped; perpetuals (GAZPF, SBERF, CNYRUBF, …) carry a number.
+// fetchSwapRates pulls the MOEX funding rate (SWAPRATE) per perpetual future from
+// OUR backend (/api/v1/swap-rates), not directly from ISS: the site CSP allows
+// connect-src 'self' only, so a browser call to iss.moex.com is blocked. The
+// backend returns SECID→SWAPRATE, quarterly futures (null SWAPRATE) already dropped.
 // Funding per lot in ₽ = SWAPRATE × lot_size (validated: the backend's moex_funding
 // for CNYRUBF equals its SWAPRATE exactly, so this matches the existing currency path).
 async function fetchSwapRates(): Promise<Record<string, number>> {
-  const base = 'https://iss.moex.com/iss';
   try {
-    const r = await fetch(`${base}/engines/futures/markets/forts/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,SWAPRATE`);
-    const raw = (await r.json()) as { marketdata: { columns: string[]; data: unknown[][] } };
-    const idx: Record<string, number> = {};
-    raw.marketdata.columns.forEach((c, i) => { idx[c] = i; });
-    const out: Record<string, number> = {};
-    for (const row of raw.marketdata.data) {
-      const sym = row[idx['SECID']] as string;
-      const sr = row[idx['SWAPRATE']];
-      if (sym && typeof sr === 'number') out[sym] = sr;
-    }
-    return out;
-  } catch {
-    return {};
-  }
+    const r = await fetch(`${API_BASE}/api/v1/swap-rates`);
+    if (r.ok) return (await r.json()) as Record<string, number>;
+  } catch { /* ignore — funding just won't show for perpetuals */ }
+  return {};
 }
 
 // ─── sub-components ──────────────────────────────────────────────────────────

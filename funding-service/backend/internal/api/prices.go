@@ -127,3 +127,86 @@ func handlePrices(w http.ResponseWriter, r *http.Request) {
 	data, _ = globalPrices.get()
 	writeJSON(w, http.StatusOK, data)
 }
+
+// ─── perpetual funding rates (MOEX SWAPRATE) ─────────────────────────────────
+//
+// Served from the backend (not fetched in the browser) because the site's CSP
+// only allows connect-src 'self' — a direct browser call to iss.moex.com is
+// blocked. Same 60 s TTL and fallback-to-stale behaviour as prices.
+
+var globalSwapRates = &pricesCache{}
+
+func (c *pricesCache) refreshSwapRates(ctx context.Context) error {
+	rates, err := fetchMoexSwapRates(ctx,
+		"https://iss.moex.com/iss/engines/futures/markets/forts/securities.json"+
+			"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,SWAPRATE",
+	)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.data = rates
+	c.fetchedAt = time.Now()
+	c.mu.Unlock()
+	return nil
+}
+
+// fetchMoexSwapRates returns SECID→SWAPRATE for every perpetual future. Rows whose
+// SWAPRATE is null (quarterly futures — no funding) are skipped; a genuine 0 is kept.
+func fetchMoexSwapRates(ctx context.Context, url string) (map[string]float64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := globalAllSpecs.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var raw moexMDResp
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+
+	idx := make(map[string]int, len(raw.Marketdata.Columns))
+	for i, col := range raw.Marketdata.Columns {
+		idx[col] = i
+	}
+
+	result := make(map[string]float64, len(raw.Marketdata.Data))
+	for _, row := range raw.Marketdata.Data {
+		sym, _ := strAt(row, idx, "SECID")
+		if sym == "" {
+			continue
+		}
+		if v, ok := floatAtOK(row, idx, "SWAPRATE"); ok {
+			result[sym] = v
+		}
+	}
+	return result, nil
+}
+
+func handleSwapRates(w http.ResponseWriter, r *http.Request) {
+	data, fresh := globalSwapRates.get()
+	if fresh {
+		writeJSON(w, http.StatusOK, data)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fetchTimeout)
+	defer cancel()
+	if err := globalSwapRates.refreshSwapRates(ctx); err != nil {
+		if data != nil {
+			writeJSON(w, http.StatusOK, data)
+			return
+		}
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "swap rates unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	data, _ = globalSwapRates.get()
+	writeJSON(w, http.StatusOK, data)
+}

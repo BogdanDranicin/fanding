@@ -44,6 +44,7 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	r.Get("/api/v1/specs", handleSpecs(getSpecs))
 	r.Get("/api/v1/all-specs", handleAllSpecs)
 	r.Get("/api/v1/prices", handlePrices)
+	r.Get("/api/v1/swap-rates", handleSwapRates)
 	r.Get("/api/v1/cbr-race", handleCBRRace)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
 	r.Get("/api/v1/cb-publications", handleCBPublications(store))

@@ -209,3 +209,15 @@ func floatAt(row []any, idx map[string]int, col string) float64 {
 	v, _ := row[i].(float64)
 	return v
 }
+
+// floatAtOK is like floatAt but reports whether the cell actually held a number.
+// Needed to tell a real 0 from a JSON null: e.g. SWAPRATE is null for quarterly
+// futures (no funding) but 0.0 for a perpetual whose funding is momentarily zero.
+func floatAtOK(row []any, idx map[string]int, col string) (float64, bool) {
+	i, ok := idx[col]
+	if !ok || i >= len(row) {
+		return 0, false
+	}
+	v, ok := row[i].(float64)
+	return v, ok
+}
