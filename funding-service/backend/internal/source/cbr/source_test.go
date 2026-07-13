@@ -238,6 +238,51 @@ func TestSource_OnNewPublication_NotFiredOnFirstPoll(t *testing.T) {
 	}
 }
 
+// TestSource_OnNewPublication_NotFiredOnColdStartFutureDate — регрессия на баг,
+// из-за которого журнал засорялся фантомными публикациями. На холодном старте
+// (рестарт/редеплой) ЦБ почти всегда отдаёт курс уже на СЛЕДУЮЩИЙ рабочий день
+// (будущая дата). Раньше это ошибочно поднимало OnNewPublication со временем
+// рестарта, и в журнал попадала «публикация» в полночь или в выходной. Теперь
+// первый опрос публикацией не считается никогда, но курс всё равно доставляется
+// движку как новый официальный (KindNewOfficialRate) для пересчёта фандинга.
+func TestSource_OnNewPublication_NotFiredOnColdStartFutureDate(t *testing.T) {
+	future := time.Now().AddDate(0, 0, 2).Format("02.01.2006")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, validXML(future))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Курс доставлен как новый официальный, несмотря на холодный старт.
+	select {
+	case tick := <-ch:
+		if tick.Kind != source.KindNewOfficialRate {
+			t.Errorf("холодный старт с будущей датой: ожидался KindNewOfficialRate, получен %v", tick.Kind)
+		}
+	case <-ctx.Done():
+		t.Fatal("тик не доставлен")
+	}
+
+	// Но публикация НЕ сигналится — мы не видели смену даты вживую.
+	select {
+	case <-s.OnNewPublication:
+		t.Error("OnNewPublication не должен срабатывать на холодном старте (даже при будущей дате)")
+	case <-ctx.Done():
+		// корректно — фантомной публикации нет
+	}
+}
+
 // TestSource_LogsDetectionAtWarn проверяет, что обнаружение новой публикации курсов
 // логируется на уровне Warn — иначе при проде с LOG_LEVEL=warn событие не видно,
 // и нельзя диагностировать задержку «публикация→детект».

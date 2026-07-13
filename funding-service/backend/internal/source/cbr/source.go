@@ -195,21 +195,36 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 		if res.Date == s.lastDate {
 			log.Debug().Str("date", res.Date).Msg("no new publication")
 		} else {
-			// isNew=true если дата в ответе ЦБ позже сегодня (публикация уже состоялась,
-			// в т.ч. при рестарте после 16:30 когда lastDate ещё пустой).
-			isNew := s.lastDate != "" || isFutureDate(res.Date)
+			// Различаем ДВА разных события, которые раньше смешивались в одном флаге:
+			//
+			//   rateIsFresh    — курс в ответе новее того, что знал движок. На холодном
+			//                    старте это дата ЦБ из будущего (публикация уже прошла),
+			//                    в рабочем режиме — смена даты. По нему тик помечается
+			//                    KindNewOfficialRate, чтобы движок пересчитал фандинг.
+			//
+			//   livePublication — мы СВОИМИ ГЛАЗАМИ увидели смену даты, уже работая
+			//                    (lastDate != ""). Только это настоящее «событие
+			//                    публикации»: его время осмысленно. Его и шлём в журнал
+			//                    и Telegram. Холодный старт (после 16:30 или в выходной)
+			//                    публикацией НЕ считается — время было бы временем
+			//                    рестарта, а не публикации. Именно это раньше засоряло
+			//                    журнал фантомными строками в полночь и по выходным.
+			wasCold := s.lastDate == ""
+			rateIsFresh := !wasCold || isFutureDate(res.Date)
+			livePublication := !wasCold
 			s.lastDate = res.Date
-			s.emitTicks(res, symbols, ch, isNew)
+			s.emitTicks(res, symbols, ch, rateIsFresh)
 
-			// Новую публикацию логируем на Warn, чтобы событие было видно в проде
+			// Реальную публикацию логируем на Warn, чтобы событие было видно в проде
 			// (LOG_LEVEL=warn). Диагностика задержки: канал-победитель гонки, латентность
 			// каждого канала, действующий интервал опроса и время МСК.
 			ev := log.Info()
-			if isNew {
+			if livePublication {
 				ev = log.Warn()
 			}
 			ev.Str("date", res.Date).
-				Bool("is_update", isNew).
+				Bool("is_update", livePublication).
+				Bool("cold_start", wasCold).
 				Str("winner", info.winner).
 				Interface("channel_latency_ms", latencyMillis(info.latencies)).
 				Dur("fetch_latency", fetchDur).
@@ -217,7 +232,7 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 				Str("msk_time", time.Now().In(time.FixedZone("MSK", mskOffset)).Format("15:04:05")).
 				Msg("cbr rates emitted")
 
-			if isNew {
+			if livePublication {
 				s.mu.Lock()
 				s.pubInfo = PublicationInfo{
 					Date:   res.Date,
