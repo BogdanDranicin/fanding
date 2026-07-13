@@ -44,48 +44,31 @@ export default function App() {
     setPage(p);
   };
 
+  const links: { page: Page; label: string }[] = [
+    { page: 'main', label: 'Таблица' },
+    { page: 'calculator', label: 'Калькулятор' },
+    { page: 'race', label: 'Скорость' },
+    { page: 'journal', label: 'Журнал' },
+    { page: 'settings', label: 'Настройки' },
+  ];
+
   return (
     <div className="app">
       <header className="app-header">
         <h1 className="app-title">Funding Rates</h1>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            className="nav-link"
-            style={{ fontWeight: page === 'main' ? 600 : undefined }}
-            onClick={() => navigate('main')}
-          >
-            Таблица
-          </button>
-          <button
-            className="nav-link"
-            style={{ fontWeight: page === 'calculator' ? 600 : undefined }}
-            onClick={() => navigate('calculator')}
-          >
-            Калькулятор
-          </button>
-          <button
-            className="nav-link"
-            style={{ fontWeight: page === 'race' ? 600 : undefined }}
-            onClick={() => navigate('race')}
-          >
-            Скорость
-          </button>
-          <button
-            className="nav-link"
-            style={{ fontWeight: page === 'journal' ? 600 : undefined }}
-            onClick={() => navigate('journal')}
-          >
-            Журнал
-          </button>
-          <button
-            className="nav-link"
-            style={{ fontWeight: page === 'settings' ? 600 : undefined }}
-            onClick={() => navigate('settings')}
-          >
-            Настройки
-          </button>
+        <nav className="app-nav">
+          {links.map(({ page: p, label }) => (
+            <button
+              key={p}
+              className={`nav-link${page === p ? ' nav-link-active' : ''}`}
+              aria-current={page === p ? 'page' : undefined}
+              onClick={() => navigate(p)}
+            >
+              {label}
+            </button>
+          ))}
           <StatusDot />
-        </div>
+        </nav>
       </header>
 
       <main className="app-main">

@@ -9,6 +9,7 @@ const fmtFund = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 6, maxim
 const fmtDay = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'UTC', day: '2-digit', month: '2-digit', year: 'numeric',
 });
+const fmtWeekday = new Intl.DateTimeFormat('ru-RU', { timeZone: 'UTC', weekday: 'short' });
 const fmtClock = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
@@ -22,9 +23,12 @@ function fund(v: number | null): string {
 function day(iso: string): string {
   try { return fmtDay.format(new Date(iso)); } catch { return iso; }
 }
+function weekday(iso: string): string {
+  try { return fmtWeekday.format(new Date(iso)); } catch { return ''; }
+}
 function clock(iso: string | null): string {
   if (!iso) return '—';
-  try { return `${fmtClock.format(new Date(iso))} МСК`; } catch { return iso; }
+  try { return fmtClock.format(new Date(iso)); } catch { return iso; }
 }
 // predErr — предсказанный курс минус фактический, в копейках и процентах.
 function predErr(pred: number | null, actual: number | null): string {
@@ -32,6 +36,68 @@ function predErr(pred: number | null, actual: number | null): string {
   const d = pred - actual;
   const pct = actual !== 0 ? (d / actual) * 100 : 0;
   return `${d >= 0 ? '+' : ''}${fmtRate.format(d)} (${pct >= 0 ? '+' : ''}${pct.toFixed(3)}%)`;
+}
+
+// Detail — одна строка «метка / значение» в раскрывающейся части карточки.
+function Detail({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
+  return (
+    <div className="jrn-detail">
+      <span className="jrn-detail-label">{label}</span>
+      <span className={`jrn-detail-value${muted ? ' muted' : ''}`}>{value}</span>
+    </div>
+  );
+}
+
+// JournalCard — одна публикация. Самое важное (дата, когда курс пришёл, курсы)
+// видно сразу; фандинг, прогноз и диагностика канала раскрываются по клику.
+function JournalCard({ r }: { r: CBPublication }) {
+  const detected = clock(r.detected_at);
+  const published = r.detected_at != null;
+  return (
+    <details className="jrn-card">
+      <summary className="jrn-summary">
+        <div className="jrn-date">
+          <span className="jrn-weekday">{weekday(r.date)}</span>
+          <span className="jrn-daymon">{day(r.date)}</span>
+        </div>
+
+        <div className={`jrn-time${published ? '' : ' jrn-time-pending'}`}>
+          <span className="jrn-time-caption">{published ? 'получено' : 'только прогноз'}</span>
+          <span className="jrn-time-val">{published ? `${detected} МСК` : 'курс не пришёл'}</span>
+        </div>
+
+        <div className="jrn-rates">
+          <span className="jrn-rate"><i>USD</i>{rate(r.usd_rate)}</span>
+          <span className="jrn-rate"><i>EUR</i>{rate(r.eur_rate)}</span>
+          <span className="jrn-rate"><i>CNY</i>{rate(r.cny_rate)}</span>
+        </div>
+
+        <span className="jrn-chevron" aria-hidden="true">▸</span>
+      </summary>
+
+      <div className="jrn-details">
+        <div className="jrn-detail-group">
+          <div className="jrn-detail-title">Фандинг по факту</div>
+          <Detail label="USD" value={fund(r.cb_funding_usd)} muted={r.cb_funding_usd == null} />
+          <Detail label="EUR" value={fund(r.cb_funding_eur)} muted={r.cb_funding_eur == null} />
+          <Detail label="CNY" value={fund(r.cny_funding)} muted={r.cny_funding == null} />
+        </div>
+
+        <div className="jrn-detail-group">
+          <div className="jrn-detail-title">Прогноз до публикации</div>
+          <Detail label="Фандинг USD" value={fund(r.predicted_funding_usd)} muted={r.predicted_funding_usd == null} />
+          <Detail label="Фандинг EUR" value={fund(r.predicted_funding_eur)} muted={r.predicted_funding_eur == null} />
+          <Detail label="Курс USD → ошибка" value={predErr(r.predicted_cb_rate_usd, r.usd_rate)} muted={r.predicted_cb_rate_usd == null} />
+        </div>
+
+        <div className="jrn-detail-group">
+          <div className="jrn-detail-title">Гонка каналов ЦБ</div>
+          <Detail label="Первый канал" value={r.winner_channel ?? '—'} muted={r.winner_channel == null} />
+          <Detail label="Задержка" value={r.winner_latency_ms != null ? `${r.winner_latency_ms} мс` : '—'} muted={r.winner_latency_ms == null} />
+        </div>
+      </div>
+    </details>
+  );
 }
 
 export function JournalPage() {
@@ -74,7 +140,7 @@ export function JournalPage() {
       <p className="race-subtitle">
         Аудит каждой публикации: во сколько (до секунды по МСК) наш сервис получил новый курс,
         какие курсы пришли, какой фандинг по ним рассчитан, каким был прогноз до публикации и
-        какой канал ЦБ оказался первым. Данные накапливаются день за днём.
+        какой канал ЦБ оказался первым. Нажмите на карточку, чтобы раскрыть подробности.
       </p>
 
       {error && <p className="race-error">Ошибка загрузки: {error}</p>}
@@ -86,45 +152,8 @@ export function JournalPage() {
       )}
 
       {rows.length > 0 && (
-        <div className="race-table-wrap">
-          <table className="race-table journal-table">
-            <thead>
-              <tr>
-                <th>Дата</th>
-                <th>Опубликовано у нас</th>
-                <th>USD/RUB</th>
-                <th>EUR/RUB</th>
-                <th>CNY/RUB</th>
-                <th>Фандинг USD</th>
-                <th>Фандинг EUR</th>
-                <th>Фандинг CNY</th>
-                <th>Прогноз ф. USD</th>
-                <th>Прогноз ф. EUR</th>
-                <th>Прогноз курса USD → ошибка</th>
-                <th>Первый канал</th>
-                <th>Задержка</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.date}>
-                  <td>{day(r.date)}</td>
-                  <td className="race-timestamp">{clock(r.detected_at)}</td>
-                  <td className="race-value">{rate(r.usd_rate)}</td>
-                  <td className="race-value">{rate(r.eur_rate)}</td>
-                  <td className="race-value">{rate(r.cny_rate)}</td>
-                  <td className="race-value">{fund(r.cb_funding_usd)}</td>
-                  <td className="race-value">{fund(r.cb_funding_eur)}</td>
-                  <td className="race-value">{fund(r.cny_funding)}</td>
-                  <td className="race-value">{fund(r.predicted_funding_usd)}</td>
-                  <td className="race-value">{fund(r.predicted_funding_eur)}</td>
-                  <td className="race-value">{predErr(r.predicted_cb_rate_usd, r.usd_rate)}</td>
-                  <td className="race-src-label">{r.winner_channel ?? '—'}</td>
-                  <td className="race-time">{r.winner_latency_ms != null ? `${r.winner_latency_ms} мс` : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="jrn-list">
+          {rows.map((r) => <JournalCard key={r.date} r={r} />)}
         </div>
       )}
     </div>
