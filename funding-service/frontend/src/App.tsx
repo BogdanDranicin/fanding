@@ -28,6 +28,7 @@ function StatusDot() {
 export default function App() {
   useWebSocket(WS_URL);
   const [page, setPage] = useState<Page>(pageFromPath);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const current = useFundingStore((s) => s.current);
   const previous = useFundingStore((s) => s.previous);
@@ -42,6 +43,7 @@ export default function App() {
     const path = p === 'main' ? '/' : `/${p}`;
     window.history.pushState({}, '', path);
     setPage(p);
+    setMenuOpen(false); // close the mobile burger menu after picking a page
   };
 
   const links: { page: Page; label: string }[] = [
@@ -56,7 +58,20 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1 className="app-title">Funding Rates</h1>
-        <nav className="app-nav">
+
+        <div className="app-header-controls">
+          <StatusDot />
+          <button
+            className="nav-burger"
+            aria-label="Меню"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            {menuOpen ? '✕' : '☰'}
+          </button>
+        </div>
+
+        <nav className={`app-nav${menuOpen ? ' app-nav-open' : ''}`}>
           {links.map(({ page: p, label }) => (
             <button
               key={p}
@@ -67,7 +82,6 @@ export default function App() {
               {label}
             </button>
           ))}
-          <StatusDot />
         </nav>
       </header>
 

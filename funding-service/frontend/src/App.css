@@ -23,6 +23,7 @@
   letter-spacing: 0.04em;
   color: var(--text-primary);
   white-space: nowrap;
+  margin-right: auto; /* pushes nav + controls to the right */
 }
 
 .app-nav {
@@ -30,6 +31,24 @@
   align-items: center;
   gap: 12px 16px;
   flex-wrap: wrap;
+}
+
+.app-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Burger toggle — hidden on desktop, shown on mobile via media query. */
+.nav-burger {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 22px;
+  line-height: 1;
+  padding: 2px 6px;
 }
 
 .app-main {
@@ -1162,19 +1181,34 @@ details[open] > .accordion-summary::before {
 @media (max-width: 640px) {
   .app-header {
     padding: 10px 12px;
-    align-items: baseline;
-    row-gap: 8px;
+    align-items: center;
+    row-gap: 0;
   }
   .app-main   { padding: 12px 8px; }
 
-  /* Nav drops to its own full-width row and wraps; never overflows the header. */
+  /* Mobile: links collapse behind the burger; only title + dot + burger show. */
+  .nav-burger { display: block; }
+
   .app-nav {
-    width: 100%;
-    gap: 10px 14px;
+    display: none;
+    flex-basis: 100%;
+    order: 10; /* when open, drops onto its own row below the title */
   }
-  .nav-link { font-size: 14px; }
-  /* Push the status dot to the far end of the nav row. */
-  .app-nav .status-dot { margin-left: auto; align-self: center; }
+  .app-nav-open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding-top: 8px;
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .app-nav-open .nav-link {
+    padding: 12px 4px;
+    font-size: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  .app-nav-open .nav-link:last-child { border-bottom: none; }
 
   .calc-page  { gap: 12px; }
 
