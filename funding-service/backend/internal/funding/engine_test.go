@@ -82,6 +82,117 @@ func tomTick(sym string, price, voltoday float64, ts time.Time) source.Tick {
 	}
 }
 
+// tradeTick builds a KindTrade tick: one executed deal with its own volume.
+func tradeTick(sym string, price, qty float64, ts time.Time) source.Tick {
+	return source.Tick{
+		Symbol:    sym,
+		Price:     price,
+		Volume:    qty,
+		Kind:      source.KindTrade,
+		Timestamp: ts,
+		Source:    "moex-iss",
+	}
+}
+
+// --- exact VWAP from real deals (KindTrade) ---
+
+func TestEngine_TradeTicksFeedExactVWAP(t *testing.T) {
+	e := funding.NewEngine()
+	now := time.Now()
+
+	// ΔVOLTODAY approximation sees a different price (90) — the exact trade
+	// feed must win while it is fresh.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 100, now.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 200, now.Add(-1*time.Minute)))
+
+	// Real deals: 80×10 and 82×30 → VWAP = (800+2460)/40 = 81.5 exactly.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, now.Add(-90*time.Second)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, now.Add(-30*time.Second)))
+
+	snap := e.Snapshot()
+	const want = 81.5
+	if diff := snap.USDRUBF.VWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("VWAP: want exact %.4f from trades, got %.6f", want, snap.USDRUBF.VWAP)
+	}
+}
+
+func TestEngine_TradeVWAPStaleFallsBackToApprox(t *testing.T) {
+	e := funding.NewEngine()
+	now := time.Now()
+
+	// Trades stopped 30 minutes ago…
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, now.Add(-30*time.Minute)))
+	// …while marketdata keeps moving (trade feed died) → fall back to ΔVOLTODAY.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 100, now.Add(-1*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 90.0, 200, now))
+
+	snap := e.Snapshot()
+	const want = 90.0
+	if diff := snap.USDRUBF.VWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("VWAP: want fallback %.4f (approx), got %.6f", want, snap.USDRUBF.VWAP)
+	}
+}
+
+func TestEngine_PredictedFundingUsesTradeSessionVWAP(t *testing.T) {
+	// No KindLastPrice at all (sessionAcc empty) — the trade-based session
+	// accumulator alone must drive PredictedFunding.
+	e := funding.NewEngine()
+	msk := time.FixedZone("MSK", 3*60*60)
+	at := func(h, m int) time.Time { return time.Date(2026, 7, 8, h, m, 0, 0, msk) }
+
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 80.0, 0, at(11, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, at(10, 30)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, at(11, 0)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.PredictedFunding == nil {
+		t.Fatal("PredictedFunding must be non-nil from trade session VWAP")
+	}
+	// sessVWAP=81.5, predRate=80 → d=1.5, capped at l2 = 0.0015×80 = 0.12.
+	const want = 0.12
+	if diff := *snap.USDRUBF.PredictedFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("PredictedFunding: want %.4f, got %.6f", want, *snap.USDRUBF.PredictedFunding)
+	}
+}
+
+func TestEngine_SettlementFreezeFromTradeBackfill(t *testing.T) {
+	// Restart scenario: no KindLastPrice before 15:30 (sessionAcc can't freeze),
+	// but the trade backfill covers the session from open. The freeze must use
+	// the trade VWAP as of 15:30 — the 15:31 deal must NOT leak into it.
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// Backfilled session deals: VWAP(10:00–15:30) = (80×10 + 82×30)/40 = 81.5.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, at(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, at(12, 0)))
+	// First post-15:30 deal triggers the freeze but stays out of the snapshot.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.0, 5, at(15, 31)))
+
+	select {
+	case <-e.SettlementCh():
+	default:
+		t.Fatal("settlement signal must fire from trade backfill")
+	}
+
+	// CBR publishes today's rate 81.44: d = 81.5 − 81.44 = 0.06, inside the
+	// deadband l1 = 0.0814 → CBFunding must be exactly 0. If the 15:31 deal
+	// leaked in (VWAP 81.67), d = 0.227 > l1 would give a non-zero funding.
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 81.44, at(16, 35)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil after settlement freeze + CBR publication")
+	}
+	if diff := *snap.USDRUBF.CBFunding; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want 0 (deadband), got %.6f — settlement VWAP frozen wrong", diff)
+	}
+}
+
 // --- predicted CBR rate from spot TOM (CBR methodology: VWAP over 10:00–15:30 MSK) ---
 
 func TestEngine_PredictedCBRateFromSpotTOMWindow(t *testing.T) {

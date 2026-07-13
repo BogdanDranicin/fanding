@@ -127,6 +127,78 @@ func TestSource_SpotTOMUsesSecidAndInternalSymbol(t *testing.T) {
 	}
 }
 
+func TestSource_TradesEmittedAsKindTrade(t *testing.T) {
+	// The trades poller must: backfill from tradeno=0, advance the cursor,
+	// filter off-market deals, and emit consecutive same-price trades without
+	// deduplication (each deal carries real volume).
+	var cursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(r.URL.Path, "/trades.json") {
+			fmt.Fprint(w, issResponse("USDRUBF", 81.91, 81.90, 81.95))
+			return
+		}
+		cursor := r.URL.Query().Get("tradeno")
+		cursors = append(cursors, cursor)
+		switch cursor {
+		case "0":
+			fmt.Fprint(w, `{"trades": {"columns": ["TRADENO","PRICE","QUANTITY","TRADEDATE","TRADETIME","SYSTIME","OFFMARKETDEAL"], "data": [
+				[201, 81.90, 5, "2026-07-10", "10:30:00", "2026-07-10 10:30:00", 0],
+				[202, 81.90, 3, "2026-07-10", "10:30:01", "2026-07-10 10:30:01", 0],
+				[203, 99.99, 100, "2026-07-10", "10:30:02", "2026-07-10 10:30:02", 1]
+			]}}`)
+		case "203":
+			fmt.Fprint(w, `{"trades": {"columns": ["TRADENO","PRICE","QUANTITY","TRADEDATE","TRADETIME","SYSTIME","OFFMARKETDEAL"], "data": [
+				[204, 82.00, 7, "2026-07-10", "10:30:05", "2026-07-10 10:30:05", 0]
+			]}}`)
+		default:
+			fmt.Fprint(w, `{"trades": {"columns": ["TRADENO","PRICE","QUANTITY","TRADEDATE","TRADETIME","SYSTIME","OFFMARKETDEAL"], "data": []}}`)
+		}
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv.URL)
+	s.SetTradePollInterval(20 * time.Millisecond)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRUBF})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	var trades []source.Tick
+	for tick := range ch {
+		if tick.Kind != source.KindTrade {
+			continue
+		}
+		trades = append(trades, tick)
+		if len(trades) >= 3 {
+			break
+		}
+	}
+
+	if len(trades) != 3 {
+		t.Fatalf("want 3 KindTrade ticks (off-market filtered), got %d", len(trades))
+	}
+	// Two same-price trades must BOTH be present — no value dedup for deals.
+	if trades[0].Price != 81.90 || trades[0].Volume != 5 {
+		t.Errorf("trade[0]: want 81.90×5, got %v×%v", trades[0].Price, trades[0].Volume)
+	}
+	if trades[1].Price != 81.90 || trades[1].Volume != 3 {
+		t.Errorf("trade[1]: want 81.90×3, got %v×%v", trades[1].Price, trades[1].Volume)
+	}
+	// Off-market deal (203) skipped, but the cursor still advanced past it.
+	if trades[2].Price != 82.00 || trades[2].Volume != 7 {
+		t.Errorf("trade[2]: want 82.00×7, got %v×%v", trades[2].Price, trades[2].Volume)
+	}
+	if len(cursors) < 2 || cursors[0] != "0" || cursors[1] != "203" {
+		t.Errorf("cursor sequence: want [0 203 ...], got %v", cursors)
+	}
+}
+
 func TestSource_Deduplication(t *testing.T) {
 	// Server always returns the same prices — after the first poll,
 	// no further ticks should be emitted.

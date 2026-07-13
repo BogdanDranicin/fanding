@@ -71,10 +71,36 @@ func (a *sessionAcc) vwap() (float64, bool) {
 	return a.sumPV / a.sumV, true
 }
 
+// tradeAcc accumulates the session VWAP from individual executed deals
+// (KindTrade ticks). Unlike sessionAcc it needs no delta arithmetic: each
+// tick already carries the volume of exactly one trade.
+type tradeAcc struct {
+	sumPV          float64 // Σ(price × quantity)
+	sumV           float64 // Σ(quantity)
+	date           string  // MSK date "YYYY-MM-DD" of the current accumulation
+	startedPre1530 bool    // first trade of the day was before 15:30 MSK (backfill covers the session start)
+}
+
+func (a *tradeAcc) vwap() (float64, bool) {
+	if a.sumV <= 0 {
+		return 0, false
+	}
+	return a.sumPV / a.sumV, true
+}
+
+// tradeFeedStaleAfter bounds how far the trade feed may lag behind marketdata
+// before the engine falls back to the ΔVOLTODAY approximation. Compared against
+// tick timestamps (not wall clock) so a closed market does not flip the choice.
+const tradeFeedStaleAfter = 10 * time.Minute
+
 // Engine ingests Ticks from any source and computes FundingSnapshots on demand.
 // All fields are protected by mu; VWAPCalculators have their own internal mutexes.
 type Engine struct {
-	vwaps        map[string]*VWAPCalculator // 6-hour rolling VWAP for display
+	vwaps        map[string]*VWAPCalculator // 6-hour rolling VWAP for display (ΔVOLTODAY approximation, fallback)
+	tradeVWAPs   map[string]*VWAPCalculator // 6-hour rolling VWAP from real deals (KindTrade, preferred)
+	tradeAccs    map[string]*tradeAcc       // session VWAP from real deals (reset on MSK date change)
+	lastTradeAt  map[string]time.Time       // timestamp of the newest ingested trade per symbol
+	lastPriceAt  map[string]time.Time       // timestamp of the newest KindLastPrice tick per symbol
 	sessionAccs  map[string]*sessionAcc     // cumulative session VWAP (reset at MSK midnight)
 	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
@@ -100,11 +126,17 @@ type Engine struct {
 func NewEngine() *Engine {
 	futures := []string{source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF}
 	vwaps := make(map[string]*VWAPCalculator, len(futures))
+	tradeVWAPs := make(map[string]*VWAPCalculator, len(futures))
 	for _, sym := range futures {
 		vwaps[sym] = NewVWAP(6 * time.Hour)
+		tradeVWAPs[sym] = NewVWAP(6 * time.Hour)
 	}
 	return &Engine{
 		vwaps:            vwaps,
+		tradeVWAPs:       tradeVWAPs,
+		tradeAccs:        make(map[string]*tradeAcc),
+		lastTradeAt:      make(map[string]time.Time),
+		lastPriceAt:      make(map[string]time.Time),
 		sessionAccs:      make(map[string]*sessionAcc),
 		spotTOMWAP:       make(map[string]float64),
 		spotTOMWAPLive:   make(map[string]float64),
@@ -159,7 +191,12 @@ func (e *Engine) Ingest(tick source.Tick) {
 			}
 			e.vwapLastVol[tick.Symbol] = tick.Volume
 			e.lastPrice[tick.Symbol] = tick.Price
+			if tick.Timestamp.After(e.lastPriceAt[tick.Symbol]) {
+				e.lastPriceAt[tick.Symbol] = tick.Timestamp
+			}
 			e.ingestSessionTick(tick)
+		case source.KindTrade:
+			e.ingestTradeTick(tick)
 		case source.KindBid, source.KindAsk:
 			e.lastPrice[tick.Symbol] = tick.Price
 		case source.KindSwapRate:
@@ -249,19 +286,131 @@ func (e *Engine) ingestSessionTick(tick source.Tick) {
 	}
 
 	// Set the settlement sentinel at 15:30 MSK if not yet done for today.
-	// Only valid when the accumulator was started before 15:30 (not a mid-day restart).
-	// KindSettlePrice ticks from MOEX ISS can override this at any time.
-	if e.settlVWAP[sym] == nil && acc.startedPre1530 {
+	e.maybeFreezeSettl(sym, mskTime)
+}
+
+// ingestTradeTick feeds one executed deal (KindTrade) into the exact rolling
+// VWAP and the trade-based session accumulator. Trades arrive in TRADENO order,
+// including a session backfill after a restart, so by the time the first
+// post-15:30 trade shows up the accumulator holds exactly the pre-settlement
+// session VWAP — the freeze check runs BEFORE the trade is added.
+func (e *Engine) ingestTradeTick(tick source.Tick) {
+	if tick.Price <= 0 || tick.Volume <= 0 || tick.Timestamp.IsZero() {
+		return
+	}
+	sym := tick.Symbol
+	mskTime := tick.Timestamp.In(msk)
+	mskDate := mskTime.Format("2006-01-02")
+
+	acc := e.tradeAccs[sym]
+	if acc == nil || acc.date != mskDate {
 		h, m, _ := mskTime.Clock()
-		if h > 15 || (h == 15 && m >= 30) {
+		acc = &tradeAcc{
+			date:           mskDate,
+			startedPre1530: h < 15 || (h == 15 && m < 30),
+		}
+		e.tradeAccs[sym] = acc
+	}
+
+	// Freeze the settlement VWAP before adding this trade: a post-15:30 trade
+	// must not leak into the 15:30 session snapshot.
+	e.maybeFreezeSettl(sym, mskTime)
+
+	acc.sumPV += tick.Price * tick.Volume
+	acc.sumV += tick.Volume
+	e.tradeVWAPs[sym].Add(tick.Price, tick.Volume, tick.Timestamp)
+	if tick.Timestamp.After(e.lastTradeAt[sym]) {
+		e.lastTradeAt[sym] = tick.Timestamp
+	}
+}
+
+// maybeFreezeSettl freezes today's settlement VWAP at 15:30 MSK, once per symbol
+// per day. The trade-based accumulator is preferred (exact, and it survives a
+// mid-day restart thanks to the backfill); the ΔVOLTODAY accumulator is the
+// fallback and also wins when the trade feed went stale mid-session (its own
+// coverage would then be truncated). KindSettlePrice ticks can override later.
+// Must be called while holding e.mu.
+func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
+	if e.settlVWAP[sym] != nil {
+		return
+	}
+	h, m, _ := mskTime.Clock()
+	if h < 15 || (h == 15 && m < 30) {
+		return
+	}
+	mskDate := mskTime.Format("2006-01-02")
+
+	var tradeV float64
+	tradeOK := false
+	if tacc := e.tradeAccs[sym]; tacc != nil && tacc.date == mskDate && tacc.startedPre1530 {
+		tradeV, tradeOK = tacc.vwap()
+	}
+	var sessV float64
+	sessOK := false
+	if acc := e.sessionAccs[sym]; acc != nil && acc.date == mskDate && acc.startedPre1530 {
+		sessV, sessOK = acc.vwap()
+	}
+
+	var v float64
+	switch {
+	case tradeOK && (e.tradeFeedFresh(sym) || !sessOK):
+		v = tradeV
+	case sessOK:
+		v = sessV
+	default:
+		return
+	}
+
+	e.settlVWAP[sym] = ptr(v)
+	e.settlDate = mskDate
+	e.freezeOfficialRateAtSettl(sym)
+	e.tryFireSettlSignal(mskDate)
+}
+
+// tradeFeedFresh reports whether the trade feed keeps up with marketdata for sym.
+// Freshness is judged by tick timestamps relative to each other — not wall clock —
+// so a closed market (both feeds silent) keeps the trade feed preferred, while a
+// dead trades endpoint (marketdata moving on alone) demotes it to the fallback.
+// Must be called while holding e.mu.
+func (e *Engine) tradeFeedFresh(sym string) bool {
+	lastTrade, ok := e.lastTradeAt[sym]
+	if !ok {
+		return false
+	}
+	lastPrice, ok := e.lastPriceAt[sym]
+	if !ok {
+		return true
+	}
+	return !lastTrade.Before(lastPrice.Add(-tradeFeedStaleAfter))
+}
+
+// displayVWAP returns the rolling 6-hour VWAP for display: exact trade-based
+// when the trade feed is fresh and has data in the window, otherwise the
+// ΔVOLTODAY approximation. Must be called while holding e.mu.
+func (e *Engine) displayVWAP(sym string, now time.Time) (float64, bool) {
+	if e.tradeFeedFresh(sym) {
+		if v, ok := e.tradeVWAPs[sym].Value(now); ok {
+			return v, true
+		}
+	}
+	return e.vwaps[sym].Value(now)
+}
+
+// bestSessionVWAP returns the current session VWAP for sym, preferring the
+// trade-based accumulator when the trade feed is fresh. Must be called while
+// holding e.mu.
+func (e *Engine) bestSessionVWAP(sym string) (float64, bool) {
+	if e.tradeFeedFresh(sym) {
+		if acc := e.tradeAccs[sym]; acc != nil {
 			if v, ok := acc.vwap(); ok {
-				e.settlVWAP[sym] = ptr(v)
-				e.settlDate = mskDate
-				e.freezeOfficialRateAtSettl(sym)
-				e.tryFireSettlSignal(mskDate)
+				return v, true
 			}
 		}
 	}
+	if acc := e.sessionAccs[sym]; acc != nil {
+		return acc.vwap()
+	}
+	return 0, false
 }
 
 // freezeOfficialRateAtSettl сохраняет текущий курс ЦБ для sym на момент settlement.
@@ -362,8 +511,9 @@ func (e *Engine) Snapshot() FundingSnapshot {
 // spotRate and predictedCBRate are pre-computed by the caller; zero means unavailable.
 // predictedCBRate for USD comes from USDRUB_TOM WAPRICE; for EUR via EUR/USD × USD cross.
 func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate float64, now time.Time) InstrumentFunding {
-	// Rolling VWAP (6-hour window) for live display and PredictedFunding.
-	vwap, hasVWAP := e.vwaps[sym].Value(now)
+	// Rolling VWAP (6-hour window) for live display and ForexFunding:
+	// exact trade-based feed preferred, ΔVOLTODAY approximation as fallback.
+	vwap, hasVWAP := e.displayVWAP(sym, now)
 	last := e.lastPrice[sym]
 
 	inf := InstrumentFunding{
@@ -421,14 +571,12 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	// Deadband/cap are scaled by the predicted rate (K1=0.1%, K2=0.15%), matching the MOEX formula.
 	// Hidden once CBFunding takes over (settlement done + CBR published today).
 	if inf.PredictedCBRate != nil && !(settlDone && cbPublishedToday) {
-		if acc := e.sessionAccs[sym]; acc != nil {
-			if sessVWAP, ok := acc.vwap(); ok {
-				predRate := *inf.PredictedCBRate
-				d := sessVWAP - predRate
-				l1 := 0.001 * predRate
-				l2 := 0.0015 * predRate
-				inf.PredictedFunding = ptr(clampFunding(d, l1, l2))
-			}
+		if sessVWAP, ok := e.bestSessionVWAP(sym); ok {
+			predRate := *inf.PredictedCBRate
+			d := sessVWAP - predRate
+			l1 := 0.001 * predRate
+			l2 := 0.0015 * predRate
+			inf.PredictedFunding = ptr(clampFunding(d, l1, l2))
 		}
 	}
 
@@ -438,7 +586,7 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 // buildCNYFunding produces InstrumentFunding for CNY/RUB futures.
 // MOEXFunding comes from MOEX ISS swap_rate; no ForexFunding or CBFunding for CNYRUBF.
 func (e *Engine) buildCNYFunding(now time.Time) InstrumentFunding {
-	vwap, _ := e.vwaps[source.SymbolCNYRUBF].Value(now)
+	vwap, _ := e.displayVWAP(source.SymbolCNYRUBF, now)
 	last := e.lastPrice[source.SymbolCNYRUBF]
 
 	inf := InstrumentFunding{

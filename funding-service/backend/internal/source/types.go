@@ -15,6 +15,7 @@ const (
 	KindSwapRate
 	KindSettlePrice // official MOEX settlement price published after 15:30 MSK
 	KindWaprice     // session VWAP published by MOEX ISS (WAPRICE field)
+	KindTrade       // single executed deal from MOEX ISS trades.json (Volume = QUANTITY of that trade)
 )
 
 // Symbol constants for all tracked instruments.
