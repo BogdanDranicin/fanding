@@ -51,8 +51,24 @@ function Detail({ label, value, muted }: { label: string; value: string; muted?:
 // JournalCard — одна публикация. Самое важное (дата, когда курс пришёл, курсы)
 // видно сразу; фандинг, прогноз и диагностика канала раскрываются по клику.
 function JournalCard({ r }: { r: CBPublication }) {
-  const detected = clock(r.detected_at);
   const published = r.detected_at != null;
+  const hasRate = r.usd_rate != null || r.eur_rate != null || r.cny_rate != null;
+  // Три состояния времени публикации:
+  //  • есть detected_at → знаем момент до секунды;
+  //  • курс есть, но времени нет (напр. после чистки фантомных строк) → «время неизвестно»;
+  //  • ни курса, ни времени → строка ещё только с прогнозом.
+  let caption: string;
+  let timeVal: string;
+  if (published) {
+    caption = 'получено';
+    timeVal = `${clock(r.detected_at)} МСК`;
+  } else if (hasRate) {
+    caption = 'получено';
+    timeVal = 'время неизвестно';
+  } else {
+    caption = 'только прогноз';
+    timeVal = 'курс ещё не пришёл';
+  }
   return (
     <details className="jrn-card">
       <summary className="jrn-summary">
@@ -62,8 +78,8 @@ function JournalCard({ r }: { r: CBPublication }) {
         </div>
 
         <div className={`jrn-time${published ? '' : ' jrn-time-pending'}`}>
-          <span className="jrn-time-caption">{published ? 'получено' : 'только прогноз'}</span>
-          <span className="jrn-time-val">{published ? `${detected} МСК` : 'курс не пришёл'}</span>
+          <span className="jrn-time-caption">{caption}</span>
+          <span className="jrn-time-val">{timeVal}</span>
         </div>
 
         <div className="jrn-rates">
