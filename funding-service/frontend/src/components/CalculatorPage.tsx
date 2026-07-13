@@ -110,6 +110,30 @@ async function fetchPrices(): Promise<Record<string, number>> {
   return fetchPricesDirect();
 }
 
+// fetchSwapRates pulls the MOEX funding rate (SWAPRATE, in price points) for every
+// perpetual future straight from ISS marketdata. Quarterly futures carry a null
+// SWAPRATE and are skipped; perpetuals (GAZPF, SBERF, CNYRUBF, …) carry a number.
+// Funding per lot in ₽ = SWAPRATE × lot_size (validated: the backend's moex_funding
+// for CNYRUBF equals its SWAPRATE exactly, so this matches the existing currency path).
+async function fetchSwapRates(): Promise<Record<string, number>> {
+  const base = 'https://iss.moex.com/iss';
+  try {
+    const r = await fetch(`${base}/engines/futures/markets/forts/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,SWAPRATE`);
+    const raw = (await r.json()) as { marketdata: { columns: string[]; data: unknown[][] } };
+    const idx: Record<string, number> = {};
+    raw.marketdata.columns.forEach((c, i) => { idx[c] = i; });
+    const out: Record<string, number> = {};
+    for (const row of raw.marketdata.data) {
+      const sym = row[idx['SECID']] as string;
+      const sr = row[idx['SWAPRATE']];
+      if (sym && typeof sr === 'number') out[sym] = sr;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 // ─── sub-components ──────────────────────────────────────────────────────────
 
 interface ActiveRowProps {
@@ -243,6 +267,7 @@ export function CalculatorPage() {
   const [favorites,   setFavorites]   = useState<Set<string>>(loadFavorites);
   const [userPrices,  setUserPrices]  = useState<Record<string, string>>(loadUserPrices);
   const [moexPrices,  setMoexPrices]  = useState<Record<string, number>>({});
+  const [swapRates,   setSwapRates]   = useState<Record<string, number>>({});
   const [instruments, setInstruments] = useState<InstrumentInfo[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [loadError,   setLoadError]   = useState(false);
@@ -278,11 +303,12 @@ export function CalculatorPage() {
     return () => { cancelled = true; };
   }, []);
 
-  // ── auto-fetch market prices (refresh every 60s) ─────────────────────────
+  // ── auto-fetch market prices + funding rates (refresh every 60s) ─────────
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
       fetchPrices().then((p) => { if (!cancelled) setMoexPrices(p); }).catch(() => {});
+      fetchSwapRates().then((s) => { if (!cancelled) setSwapRates(s); }).catch(() => {});
     };
     refresh();
     const id = setInterval(refresh, 60_000);
@@ -387,6 +413,7 @@ export function CalculatorPage() {
   }, 0);
 
   const fundingBySymbol: Record<string, number> = {};
+  // Live backend funding (real-time over WS) for the currency perpetuals.
   if (current) {
     for (const sym of LIVE_FUNDING_SYMS) {
       const rate = current[sym as LiveSym]?.moex_funding;
@@ -395,6 +422,14 @@ export function CalculatorPage() {
         fundingBySymbol[sym] = rate * inst.lot_size;
       }
     }
+  }
+  // MOEX SWAPRATE funding for every other perpetual future (equity perpetuals like
+  // GAZPF, SBERF, …). Same formula and sign as the currency path above. The WS value
+  // wins when present because it is fresher than the 60 s ISS poll.
+  for (const [sym, sr] of Object.entries(swapRates)) {
+    if (sym in fundingBySymbol) continue;
+    const inst = bySymbol[sym];
+    if (inst?.lot_size) fundingBySymbol[sym] = sr * inst.lot_size;
   }
 
   const totalFunding = activeSymbols.reduce((sum, sym) => {

@@ -1,11 +1,18 @@
 :root {
-  --bg-primary: #0d0e12;
-  --bg-secondary: #16171d;
-  --text-primary: #f3f4f6;
-  --text-muted: #6b7280;
-  --accent-up: #22c55e;
-  --accent-down: #ef4444;
-  --border: #2e303a;
+  --bg-primary: #0a0b10;
+  --bg-secondary: #161922;
+  --bg-elevated: #1e222d;
+  --text-primary: #f5f7fc;
+  --text-muted: #9aa4bb;
+  --text-dim: #6b7280;
+  --accent-up: #2ee66e;
+  --accent-up-soft: rgba(46, 230, 110, 0.16);
+  --accent-down: #ff5464;
+  --accent-down-soft: rgba(255, 84, 100, 0.16);
+  --accent: #5b8cff;
+  --accent-soft: rgba(91, 140, 255, 0.16);
+  --border: #2b303d;
+  --border-strong: #3a4051;
 
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
