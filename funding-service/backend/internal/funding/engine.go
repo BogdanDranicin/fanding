@@ -111,7 +111,6 @@ type Engine struct {
 	vwapLastVol      map[string]float64         // last VOLTODAY per symbol, to weight the rolling VWAP by ΔVOLTODAY
 	lastPrice        map[string]float64
 	swapRate         map[string]float64
-	swapRateChangedAt map[string]time.Time // when SWAPRATE last CHANGED value (not first observation) — distinguishes tonight's clearing publication from yesterday's value ISS returns all day
 	forexRates       map[string]float64
 	eurUSDFix        float64 // EUR/USD «по состоянию на 15:30 МСК» — фиксинг ЕЦБ для расчёта курса EUR ЦБ (методика с 08.06.2026)
 	eurUSDFixDate    string  // MSK-дата, за которую накоплен eurUSDFix (для суточного сброса)
@@ -146,7 +145,6 @@ func NewEngine() *Engine {
 		vwapLastVol:      make(map[string]float64),
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
-		swapRateChangedAt: make(map[string]time.Time),
 		forexRates:       make(map[string]float64),
 		officialRate:        make(map[string]float64),
 		officialRateDate:    make(map[string]string),
@@ -203,28 +201,15 @@ func (e *Engine) Ingest(tick source.Tick) {
 		case source.KindBid, source.KindAsk:
 			e.lastPrice[tick.Symbol] = tick.Price
 		case source.KindSwapRate:
-			// Stamp the change time only when a previously KNOWN value differs.
-			// The first observation after a restart is NOT a change: it may be
-			// yesterday's SWAPRATE that ISS keeps returning all day, and treating
-			// it as fresh would suppress the CBFunding reconstruction below.
-			if prev, ok := e.swapRate[tick.Symbol]; ok && prev != tick.Price {
-				e.swapRateChangedAt[tick.Symbol] = tick.Timestamp
-			}
 			e.swapRate[tick.Symbol] = tick.Price
 		case source.KindSettlePrice:
-			// MOEX ISS returns SETTLEPRICE all day — before 15:30 it's yesterday's value.
-			// Only accept it after 15:30 MSK when it reflects the current day's settlement.
-			// Freeze once: after a service restart MOEX returns the current price as SETTLEPRICE,
-			// not the official 15:30 clearing price, so we must not overwrite an already-set value.
-			mskTime := tick.Timestamp.In(msk)
-			h, m, _ := mskTime.Clock()
-			if h > 15 || (h == 15 && m >= 30) {
-				if e.settlVWAP[tick.Symbol] == nil {
-					e.settlVWAP[tick.Symbol] = ptr(tick.Price)
-					e.freezeOfficialRateAtSettl(tick.Symbol)
-					e.tryFireSettlSignal(mskTime.Format("2006-01-02"))
-				}
-			}
+			// IGNORED as a settlement source. ISS puts the CURRENT price into
+			// SETTLEPRICE after a restart (observed live 14.07: SETTLEPRICE 78.01 vs
+			// LAST 78.06 while the true 15:30 VWAP was 77.17), and this tick races
+			// ahead of the trades backfill, poisoning settlVWAP with an evening price.
+			// The settlement VWAP is frozen at 15:30 exclusively by maybeFreezeSettl
+			// from the trade/session accumulators — the trades backfill makes that
+			// work even when the service (re)starts after 15:30.
 		}
 
 	case source.SymbolUSDRubTOM:
@@ -559,33 +544,19 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	settlPtr := e.settlVWAP[sym]
 	settlDone := settlPtr != nil
 
-	// CBFunding: предпочитаем авторитетный SWAPRATE, который MOEX публикует на вечернем
-	// клиринге — это и есть фандинг, который MOEX реально начисляет (равен тому, что
-	// показывает эталонный терминал). Но SWAPRATE никогда не равен 0 в течение дня:
-	// ISS весь день отдаёт ВЧЕРАШНЕЕ значение и обновляет его только на вечернем клиринге
-	// (~19:00 МСК). Поэтому SWAPRATE побеждает, только если его значение СМЕНИЛОСЬ после
-	// сегодняшних 15:30 (= публикация сегодняшнего клиринга). Иначе, когда settlement
-	// зафиксирован и ЦБ уже опубликовал курс, показываем раннюю реконструкцию:
-	//   D = VWAP(10:00–15:30) − курс ЦБ, установленный сегодня.
-	// Протухший SWAPRATE остаётся последним фолбэком (до 15:30 / до публикации ЦБ).
-	swapRate, hasSwapRate := e.swapRate[sym]
-	hasSwapRate = hasSwapRate && swapRate != 0
-	reconstructed := (*float64)(nil)
+	// CBFunding — НАШ расчёт от официального курса ЦБ, появляется ТОЛЬКО после его
+	// публикации (до этого строка пустая — семантика поля):
+	//   D = clamp(settleVWAP(15:30) − курс ЦБ, установленный сегодня)
+	// SWAPRATE сюда не подмешивается никогда: что начисляет MOEX, показывает отдельное
+	// поле MOEXFunding. Раздельные источники позволяют сверять наш расчёт с биржевым
+	// (14.07: реконструкция −0.1162 против официального SWAPRATE −0.11493).
 	if settlDone && cbPublishedToday {
 		if newRate, ok := e.officialRate[officialSym]; ok && newRate > 0 {
 			d := *settlPtr - newRate
 			l1 := 0.001 * newRate
 			l2 := 0.0015 * newRate
-			reconstructed = ptr(clampFunding(d, l1, l2))
+			inf.CBFunding = ptr(clampFunding(d, l1, l2))
 		}
-	}
-	switch {
-	case hasSwapRate && e.swapRateFreshToday(sym, now):
-		inf.CBFunding = ptr(swapRate)
-	case reconstructed != nil:
-		inf.CBFunding = reconstructed
-	case hasSwapRate:
-		inf.CBFunding = ptr(swapRate)
 	}
 
 	// OfficialRate is the most recent CBR publication, shown in the UI for reference.
@@ -620,19 +591,6 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	}
 
 	return inf
-}
-
-// swapRateFreshToday reports whether the SWAPRATE value for sym changed at or after
-// today's 15:30 MSK — i.e. it is tonight's clearing publication, not yesterday's
-// value that ISS keeps returning all day. Must be called while holding e.mu.
-func (e *Engine) swapRateFreshToday(sym string, now time.Time) bool {
-	changedAt, ok := e.swapRateChangedAt[sym]
-	if !ok {
-		return false
-	}
-	nowMSK := now.In(msk)
-	settle := time.Date(nowMSK.Year(), nowMSK.Month(), nowMSK.Day(), 15, 30, 0, 0, msk)
-	return !changedAt.In(msk).Before(settle)
 }
 
 // buildCNYFunding produces InstrumentFunding for CNY/RUB futures.

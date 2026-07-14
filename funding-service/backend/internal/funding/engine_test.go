@@ -335,26 +335,32 @@ func TestEngine_SpotTOMLiveFallbackWhenNoWindowData(t *testing.T) {
 	}
 }
 
-func TestEngine_CBFundingPrefersSwapRate(t *testing.T) {
+// CBFunding — всегда НАШ расчёт от курса ЦБ. SWAPRATE (что начисляет MOEX) живёт
+// в отдельном поле MOEXFunding и НЕ подменяет CBFunding даже после вечернего
+// клиринга: раздельные источники позволяют сверять наш расчёт с биржевым.
+func TestEngine_CBFundingIsReconstructionNotSwapRate(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 
-	// Yesterday's SWAPRATE is present all day long (ISS returns it until the clearing).
-	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.011, settle.Add(-2*time.Hour)))
-
-	// Settlement + today's CBR publication: the reconstruction path would normally apply.
+	// Settlement + today's CBR publication → reconstruction is available:
+	// d = 82.0 − 81.0 = 1.0 > l1 → capped at l2 = 0.0015 × 81.0 = 0.1215.
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
 	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 81.0, settle))
 
-	// Once MOEX publishes SWAPRATE at the evening clearing (the value CHANGES after
-	// 15:30), CBFunding must equal it (the authoritative funding MOEX actually
-	// charges), not our early reconstruction.
+	// MOEX publishes SWAPRATE at the evening clearing — MOEXFunding, not CBFunding.
 	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.12345, settle.Add(3*time.Hour+30*time.Minute)))
 
 	snap := e.Snapshot()
-	if snap.USDRUBF.CBFunding == nil || *snap.USDRUBF.CBFunding != 0.12345 {
-		t.Errorf("CBFunding must equal MOEX SWAPRATE 0.12345 when published, got %v", snap.USDRUBF.CBFunding)
+	if snap.USDRUBF.MOEXFunding == nil || *snap.USDRUBF.MOEXFunding != 0.12345 {
+		t.Errorf("MOEXFunding must equal published SWAPRATE 0.12345, got %v", snap.USDRUBF.MOEXFunding)
+	}
+	const want = 0.1215
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil: settlement + CBR publication happened")
+	}
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want own reconstruction %.4f, got %.6f (SWAPRATE must not leak in)", want, *snap.USDRUBF.CBFunding)
 	}
 }
 
@@ -387,9 +393,9 @@ func TestEngine_CBFundingStaleSwapRateYieldsToReconstruction(t *testing.T) {
 	}
 }
 
-// До публикации ЦБ реконструкции нет — протухший SWAPRATE остаётся полезным
-// фолбэком и должен показываться (поведение «утро/день» не меняется).
-func TestEngine_CBFundingStaleSwapRateFallbackBeforeCBR(t *testing.T) {
+// CBFunding появляется ТОЛЬКО после публикации курса ЦБ. Наличие SWAPRATE
+// (вчерашнего или любого) до публикации не должно наполнять строку.
+func TestEngine_CBFundingNilBeforeCBRDespiteSwapRate(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 
@@ -398,8 +404,11 @@ func TestEngine_CBFundingStaleSwapRateFallbackBeforeCBR(t *testing.T) {
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
 
 	snap := e.Snapshot()
-	if snap.USDRUBF.CBFunding == nil || *snap.USDRUBF.CBFunding != 0.00631 {
-		t.Errorf("CBFunding must fall back to stale SWAPRATE before CBR publication, got %v", snap.USDRUBF.CBFunding)
+	if snap.USDRUBF.CBFunding != nil {
+		t.Errorf("CBFunding must stay nil before CBR publication (SWAPRATE lives in MOEXFunding), got %v", *snap.USDRUBF.CBFunding)
+	}
+	if snap.USDRUBF.MOEXFunding == nil || *snap.USDRUBF.MOEXFunding != 0.00631 {
+		t.Errorf("MOEXFunding must show SWAPRATE 0.00631, got %v", snap.USDRUBF.MOEXFunding)
 	}
 }
 
@@ -763,17 +772,36 @@ func TestEngine_SettlePriceBeforeSettlementIgnored(t *testing.T) {
 	}
 }
 
-func TestEngine_SettlePriceAfterSettlementAccepted(t *testing.T) {
+// SETTLEPRICE не является источником settlement: после рестарта ISS кладёт в него
+// ТЕКУЩУЮ цену (наблюдалось вживую 14.07: SETTLEPRICE 78.01 при LAST 78.06, тогда
+// как честный VWAP@15:30 был 77.17), и этот тик обгоняет бэкфилл сделок, отравляя
+// settlVWAP вечерней ценой. Замораживает settlement только maybeFreezeSettl.
+func TestEngine_SettlePriceDoesNotFreezeSettlement(t *testing.T) {
 	e := funding.NewEngine()
-	after := todaySettle().Add(30 * time.Minute) // 16:00 MSK today, after settlement
+	settle := todaySettle()
+	after := settle.Add(30 * time.Minute)
 
-	// SETTLEPRICE after 15:30 is today's settlement price — must activate CBFunding.
-	e.Ingest(settlePriceTick(source.SymbolUSDRUBF, 82.0, after))
+	// Restart scenario: SETTLEPRICE (current evening price) arrives BEFORE the
+	// trades backfill. It must not freeze settlement.
+	e.Ingest(settlePriceTick(source.SymbolUSDRUBF, 83.5, after))
 	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 82.5, after))
-
 	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding != nil {
+		t.Errorf("CBFunding must stay nil: SETTLEPRICE must not freeze settlement, got %v", *snap.USDRUBF.CBFunding)
+	}
+
+	// The trades backfill then arrives and freezes the TRUE 15:30 VWAP = 82.0:
+	// d = 82.0 − 82.5 = −0.5 → capped at −l2 = −0.0015 × 82.5 = −0.12375.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 10, settle.Add(-4*time.Hour)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.5, 100, after.Add(time.Minute)))
+
+	snap = e.Snapshot()
 	if snap.USDRUBF.CBFunding == nil {
-		t.Error("CBFunding must not be nil when SETTLEPRICE arrives after 15:30 MSK with CBR rate")
+		t.Fatal("CBFunding must be non-nil after trade-backfill freeze + CBR publication")
+	}
+	const want = -0.12375
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.5f (from true 15:30 VWAP, not SETTLEPRICE), got %.6f", want, *snap.USDRUBF.CBFunding)
 	}
 }
 
