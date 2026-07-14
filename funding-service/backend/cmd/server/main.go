@@ -96,6 +96,7 @@ func main() {
 	}
 
 	eng := funding.NewEngine()
+	seedEffectiveRates(ctx, store, eng)
 	snapshots := make(chan funding.FundingSnapshot, 16)
 	runner := funding.NewRunner(mux, eng, symbols, time.Second, snapshots)
 
@@ -292,4 +293,40 @@ func main() {
 
 	cancel()
 	<-runDone
+}
+
+// seedEffectiveRates передаёт движку курсы ЦБ, ДЕЙСТВУЮЩИЕ сегодня, из журнала
+// публикаций: последняя публикация с датой РАНЬШЕ сегодняшней — это курс,
+// вступивший в силу сегодня. Без засева движок после рестарта, случившегося
+// уже после публикации ЦБ, не знает вчерашний курс, а от него MOEX масштабирует
+// границы K1/K2 формулы фандинга (сверено 14.07: SWAPRATE −0.11493 =
+// −0.0015 × 76.6213). Ошибки не фатальны — движок деградирует к новому курсу.
+func seedEffectiveRates(ctx context.Context, store *storage.Store, eng *funding.Engine) {
+	rows, err := store.RecentCBPublications(ctx, 7)
+	if err != nil {
+		log.Warn().Err(err).Msg("effective CBR rates seed: db read failed")
+		return
+	}
+	msk := time.FixedZone("MSK", 3*60*60)
+	today := time.Now().In(msk).Format("2006-01-02")
+	for _, r := range rows { // newest first
+		if r.Date.Format("2006-01-02") >= today {
+			continue // сегодняшняя публикация — курс на завтра, не на сегодня
+		}
+		rates := make(map[string]float64, 2)
+		if r.USDRate != nil {
+			rates[source.SymbolUSDRubOfficial] = *r.USDRate
+		}
+		if r.EURRate != nil {
+			rates[source.SymbolEURRubOfficial] = *r.EURRate
+		}
+		if len(rates) == 0 {
+			return
+		}
+		eng.SeedEffectiveRates(today, rates)
+		log.Info().Str("published", r.Date.Format("2006-01-02")).
+			Interface("rates", rates).Msg("effective CBR rates seeded from journal")
+		return
+	}
+	log.Warn().Msg("effective CBR rates seed: no past publication found in journal")
 }

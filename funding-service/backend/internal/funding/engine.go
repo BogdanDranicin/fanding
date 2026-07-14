@@ -117,6 +117,8 @@ type Engine struct {
 	officialRate        map[string]float64
 	officialRateDate    map[string]string  // MSK date when officialRate was last published
 	officialRateAtSettl map[string]float64 // курс ЦБ, зафиксированный при settlement (15:30)
+	rateEffectiveToday  map[string]float64 // засев из БД: курс ЦБ, ДЕЙСТВУЮЩИЙ сегодня (опубликован вчера); officialSym -> rate
+	rateEffectiveDate   string             // MSK-дата, на которую действителен rateEffectiveToday
 	mu               sync.Mutex
 
 	// settlCh fires once per trading day when the first settlVWAP is frozen (~15:30).
@@ -149,6 +151,7 @@ func NewEngine() *Engine {
 		officialRate:        make(map[string]float64),
 		officialRateDate:    make(map[string]string),
 		officialRateAtSettl: make(map[string]float64),
+		rateEffectiveToday:  make(map[string]float64),
 		settlCh:             make(chan time.Time, 1),
 	}
 }
@@ -414,6 +417,43 @@ func (e *Engine) bestSessionVWAP(sym string) (float64, bool) {
 	return 0, false
 }
 
+// SeedEffectiveRates задаёт официальные курсы ЦБ, ДЕЙСТВУЮЩИЕ на дату dateMSK
+// ("2006-01-02"). Вызывается один раз при старте сервиса (из журнала публикаций БД):
+// после рестарта, случившегося уже ПОСЛЕ публикации ЦБ, движок сам не может узнать
+// вчерашний курс — officialRate уже содержит завтрашний, — а границы формулы
+// фандинга MOEX (K1/K2) масштабируются именно от действующего курса.
+func (e *Engine) SeedEffectiveRates(dateMSK string, rates map[string]float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rateEffectiveDate = dateMSK
+	for sym, rate := range rates {
+		if rate > 0 {
+			e.rateEffectiveToday[sym] = rate
+		}
+	}
+}
+
+// effectiveRate возвращает лучший известный курс ЦБ, ДЕЙСТВУЮЩИЙ сегодня
+// (опубликованный вчера), — базу для границ K1/K2 формулы фандинга MOEX.
+// Приоритет: курс, замороженный на 15:30 до публикации → текущий officialRate,
+// пока сегодняшней публикации не было → засев из БД на сегодня. 0 = неизвестен.
+// Must be called while holding e.mu.
+func (e *Engine) effectiveRate(sym, officialSym string, now time.Time) float64 {
+	if rate := e.officialRateAtSettl[sym]; rate > 0 {
+		return rate
+	}
+	today := now.In(msk).Format("2006-01-02")
+	if e.officialRateDate[officialSym] != today {
+		if rate := e.officialRate[officialSym]; rate > 0 {
+			return rate
+		}
+	}
+	if e.rateEffectiveDate == today {
+		return e.rateEffectiveToday[officialSym]
+	}
+	return 0
+}
+
 // freezeOfficialRateAtSettl сохраняет текущий курс ЦБ для sym на момент settlement.
 // Вызывается только один раз при фиксации settlVWAP, чтобы прогнозный фандинг
 // не менялся при последующей публикации ЦБ.
@@ -552,9 +592,17 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	// (14.07: реконструкция −0.1162 против официального SWAPRATE −0.11493).
 	if settlDone && cbPublishedToday {
 		if newRate, ok := e.officialRate[officialSym]; ok && newRate > 0 {
+			// Отклонение d — от НОВОГО курса (зафиксирован сегодня, действует завтра),
+			// но границы K1/K2 MOEX масштабирует от курса, ДЕЙСТВУЮЩЕГО сегодня.
+			// Сверено с фактом 14.07: SWAPRATE = −0.11493 = −0.0015 × 76.6213
+			// (вчерашний курс), а границы от нового 77.4912 давали бы −0.11624.
+			base := e.effectiveRate(sym, officialSym, now)
+			if base <= 0 {
+				base = newRate // курс на сегодня неизвестен (нет засева) — деградация к новому
+			}
 			d := *settlPtr - newRate
-			l1 := 0.001 * newRate
-			l2 := 0.0015 * newRate
+			l1 := 0.001 * base
+			l2 := 0.0015 * base
 			inf.CBFunding = ptr(clampFunding(d, l1, l2))
 		}
 	}
@@ -583,9 +631,15 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 		}
 		if hasFut {
 			predRate := *inf.PredictedCBRate
+			// Границы — от действующего сегодня курса ЦБ (как в самой формуле MOEX);
+			// прогнозный курс — лишь фолбэк, пока действующий неизвестен.
+			base := e.effectiveRate(sym, officialSym, now)
+			if base <= 0 {
+				base = predRate
+			}
 			d := futVWAP - predRate
-			l1 := 0.001 * predRate
-			l2 := 0.0015 * predRate
+			l1 := 0.001 * base
+			l2 := 0.0015 * base
 			inf.PredictedFunding = ptr(clampFunding(d, l1, l2))
 		}
 	}

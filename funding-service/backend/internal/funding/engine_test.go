@@ -442,6 +442,60 @@ func TestEngine_PredictedFundingFrozenAfterSettlement(t *testing.T) {
 	}
 }
 
+// Регресс на живую сверку 14.07.2026: MOEX масштабирует границы K1/K2 от курса,
+// ДЕЙСТВУЮЩЕГО сегодня (76.6213, опубликован накануне), а отклонение d — от
+// нового (77.4912). Факт: SWAPRATE = −0.11493 = −0.0015 × 76.6213; границы от
+// нового курса давали бы −0.11624.
+func TestEngine_CBFundingLimitsFromEffectiveRate(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+
+	// Обычный день: действующий курс известен движку с утра (обычный опрос ЦБ).
+	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 76.6213, settle.Add(-5*time.Hour)))
+	// Сессия: VWAP = 77.17, заморозка на 15:30.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 100, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 100, settle))
+	// Публикация нового курса 77.4912 (на завтра).
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 77.4912, settle.Add(2*time.Hour)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	// d = 77.17 − 77.4912 = −0.3212 < −l1 → inner = d + l1 = −0.24458,
+	// clamp к −l2 = −0.0015 × 76.6213 = −0.11493195.
+	const want = -0.11493195
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.8f (границы от действующего курса), got %.8f", want, *snap.USDRUBF.CBFunding)
+	}
+}
+
+// Тот же расчёт после рестарта, случившегося ПОСЛЕ публикации ЦБ: действующий
+// курс движку неоткуда узнать из тиков (officialRate уже завтрашний) — его
+// подсевает main из журнала публикаций через SeedEffectiveRates.
+func TestEngine_CBFundingLimitsFromSeededEffectiveRate(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	today := settle.Format("2006-01-02")
+
+	e.SeedEffectiveRates(today, map[string]float64{source.SymbolUSDRubOfficial: 76.6213})
+
+	// Бэкфилл сделок восстанавливает сессию: VWAP@15:30 = 77.17.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 77.17, 10, settle.Add(-4*time.Hour)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.0, 5, settle.Add(time.Minute)))
+	// Публикация уже случилась — холодный старт приносит новый курс с датой сегодня.
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 77.4912, settle.Add(2*time.Hour)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	const want = -0.11493195
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.8f (границы от засеянного действующего курса), got %.8f", want, *snap.USDRUBF.CBFunding)
+	}
+}
+
 // --- nil / non-nil checks ---
 
 func TestEngine_FundingNilBeforeAnyTicks(t *testing.T) {
