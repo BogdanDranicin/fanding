@@ -480,7 +480,7 @@ export function CalculatorPage() {
         </div>
         {maxPosition > 0 && (
           <div className="calc-result">
-            <span className="calc-result-label">Макс. позиция по ГО</span>
+            <span className="calc-result-label">Доступно к переносу (депозит × плечо)</span>
             <span className="calc-result-value">{fmtRub.format(maxPosition)} ₽</span>
           </div>
         )}
@@ -542,10 +542,17 @@ export function CalculatorPage() {
             )}
 
             {maxPosition > 0 && totalValue > 0 && (
+              <div className={`calc-result ${limitOver ? 'calc-result-over' : 'calc-result-ok'}`}>
+                <span className="calc-result-label">Остаток лимита на перенос</span>
+                <span className="calc-result-value">{fmtRub.format(maxPosition - totalValue)} ₽</span>
+              </div>
+            )}
+
+            {maxPosition > 0 && totalValue > 0 && (
               <div className={`calc-verdict ${limitOver ? 'verdict-over' : 'verdict-ok'}`}>
                 {limitOver
                   ? `Превышение лимита на ${fmtInt.format(totalValue - maxPosition)} ₽ — перенос платный`
-                  : `В пределах лимита (остаток ${fmtInt.format(maxPosition - totalValue)} ₽) — перенос бесплатный`}
+                  : 'В пределах лимита — перенос бесплатный'}
               </div>
             )}
 
