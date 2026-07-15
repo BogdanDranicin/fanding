@@ -153,21 +153,6 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	token := strings.TrimSpace(msg.CommandArguments())
-
-	// DEBUG: reveal exactly what the bot receives and which DB it sees. Remove once linking works.
-	var total, matchNull int
-	_ = b.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&total)
-	_ = b.pool.QueryRow(ctx,
-		`SELECT count(*) FROM users WHERE link_token = $1 AND telegram_chat_id IS NULL`, token,
-	).Scan(&matchNull)
-	b.log.Warn().
-		Int64("chat_id", chatID).
-		Str("token", token).
-		Int("token_len", len(token)).
-		Int("users_total", total).
-		Int("token_match_unlinked", matchNull).
-		Msg("DEBUG telegram /start received")
-
 	if token == "" {
 		b.send(chatID, "Зайдите на сайт и нажмите «Привязать Telegram», чтобы получить ссылку для регистрации.")
 		return
