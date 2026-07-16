@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useFundingStore } from './store/fundingStore';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useFundingAlert } from './hooks/useFundingAlert';
+import { initAlertUnlock } from './lib/alertSound';
 import { FundingTable } from './components/FundingTable';
 import { SettingsPage } from './components/SettingsPage';
 import { CalculatorPage } from './components/CalculatorPage';
@@ -27,11 +29,16 @@ function StatusDot() {
 
 export default function App() {
   useWebSocket(WS_URL);
+  useFundingAlert();
   const [page, setPage] = useState<Page>(pageFromPath);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const current = useFundingStore((s) => s.current);
   const previous = useFundingStore((s) => s.previous);
+
+  useEffect(() => {
+    initAlertUnlock();
+  }, []);
 
   useEffect(() => {
     const handler = () => setPage(pageFromPath());

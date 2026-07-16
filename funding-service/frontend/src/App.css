@@ -201,6 +201,55 @@
 .btn-tg:hover { background: #1976D2; }
 .btn-tg:disabled { opacity: 0.5; cursor: default; }
 
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.settings-row-label {
+  min-width: 80px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.settings-row input[type='range'] {
+  flex: 1;
+  max-width: 200px;
+  accent-color: var(--accent);
+}
+
+.settings-row input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+
+.settings-sound-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.btn-plain {
+  padding: 6px 14px;
+  background: var(--bg-primary, transparent);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.btn-plain:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-plain:disabled { opacity: 0.5; cursor: default; }
+
 .settings-nav {
   display: flex;
   align-items: center;
