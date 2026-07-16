@@ -56,6 +56,39 @@ func TestFormatCBRAlert_noRates(t *testing.T) {
 	}
 }
 
+func TestIsSettlementTime(t *testing.T) {
+	cases := []struct {
+		utc  time.Time
+		want bool
+	}{
+		{time.Date(2026, 7, 16, 12, 30, 5, 0, time.UTC), true},   // 15:30:05 МСК — настоящий клиринг
+		{time.Date(2026, 7, 16, 12, 44, 59, 0, time.UTC), true},  // 15:44:59 МСК — край окна
+		{time.Date(2026, 7, 16, 12, 45, 0, 0, time.UTC), false},  // 15:45:00 МСК — уже вне
+		{time.Date(2026, 7, 16, 20, 34, 39, 0, time.UTC), false}, // 23:34:39 МСК — рестарт докера
+		{time.Date(2026, 7, 16, 7, 0, 0, 0, time.UTC), false},    // 10:00 МСК
+	}
+	for _, c := range cases {
+		if got := isSettlementTime(c.utc); got != c.want {
+			t.Errorf("isSettlementTime(%s МСК) = %v, want %v",
+				c.utc.In(time.FixedZone("MSK", 3*60*60)).Format("15:04:05"), got, c.want)
+		}
+	}
+}
+
+func TestFormatRestartNotice(t *testing.T) {
+	ts := time.Date(2026, 7, 16, 20, 34, 39, 0, time.UTC) // 23:34:39 МСК
+	text := formatRestartNotice(ts)
+	if !strings.Contains(text, "Обновление сервиса") {
+		t.Error("missing header")
+	}
+	if !strings.Contains(text, "23:34:39") {
+		t.Error("missing MSK time")
+	}
+	if strings.Contains(text, "зафиксирован") || strings.Contains(text, "Курсы ЦБ") {
+		t.Error("restart notice must not look like a settlement alert")
+	}
+}
+
 func TestFormatSettlAlert_withPredicted(t *testing.T) {
 	snap := funding.FundingSnapshot{
 		USDRUBF: funding.InstrumentFunding{

@@ -43,8 +43,16 @@ func (d *Dispatcher) Run(ctx context.Context, settlCh, pubCh <-chan time.Time) {
 			if !ok {
 				return
 			}
-			snap := d.snapshotFn()
-			text := formatSettlAlert(t, snap)
+			// Настоящая фиксация прогнозного фандинга случается сразу после 15:30 МСК.
+			// Сигнал в любое другое время — рестарт сервиса: движок лишь ВОССТАНОВИЛ
+			// сегодняшний settlement из бэкфилла сделок, слать «зафиксирован» с новым
+			// временем — вводить в заблуждение. Вместо этого — короткое «Обновление».
+			var text string
+			if isSettlementTime(t) {
+				text = formatSettlAlert(t, d.snapshotFn())
+			} else {
+				text = formatRestartNotice(t)
+			}
 			d.broadcast(ctx, text)
 		case t, ok := <-pubCh:
 			if !ok {
@@ -88,6 +96,23 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string) {
 	}
 
 	d.log.Info().Int("recipients", len(chatIDs)).Msg("alert sent")
+}
+
+// isSettlementTime reports whether t falls into the real settlement window
+// (15:30–15:45 МСК): движок стреляет сигналом на первом же тике после 15:30,
+// то есть в течение секунд. Всё вне окна — восстановление после рестарта.
+func isSettlementTime(t time.Time) bool {
+	msk := time.FixedZone("MSK", 3*60*60)
+	h, m, _ := t.In(msk).Clock()
+	return h == 15 && m >= 30 && m < 45
+}
+
+// formatRestartNotice строит служебное сообщение вместо ложного «фандинг
+// зафиксирован», когда settlement лишь восстановлен после перезапуска сервиса.
+func formatRestartNotice(t time.Time) string {
+	msk := time.FixedZone("MSK", 3*60*60)
+	return fmt.Sprintf("🔄 <b>Обновление сервиса</b>\n%s МСК\nСервис перезапущен, расчётные данные восстановлены.",
+		t.In(msk).Format("15:04:05"))
 }
 
 // formatSettlAlert строит сообщение об фиксации прогнозного фандинга (~15:30 МСК).
