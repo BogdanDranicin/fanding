@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/funding-service/backend/internal/funding"
+	"github.com/funding-service/backend/internal/source/cbr"
 )
 
 const sendRateLimit = 40 * time.Millisecond // 25 msg/sec max
@@ -20,20 +22,28 @@ type Dispatcher struct {
 	api        *tgbotapi.BotAPI
 	pool       *pgxpool.Pool
 	snapshotFn func() funding.FundingSnapshot
+	pubInfoFn  func() cbr.PublicationInfo
 	log        zerolog.Logger
 }
 
-// NewDispatcher creates a Dispatcher using the bot's API handle.
-func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.FundingSnapshot, log zerolog.Logger) *Dispatcher {
+// NewDispatcher creates a Dispatcher using the bot's API handle. pubInfoFn is the
+// CBR source's LastPublicationInfo: the published rates are taken from it, NOT from
+// the engine snapshot — the KindNewOfficialRate ticks reach the engine asynchronously,
+// so at signal time the snapshot may still hold yesterday's rates (observed 16.07).
+func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.FundingSnapshot, pubInfoFn func() cbr.PublicationInfo, log zerolog.Logger) *Dispatcher {
 	return &Dispatcher{
 		api:        bot.api,
 		pool:       pool,
 		snapshotFn: snapshotFn,
+		pubInfoFn:  pubInfoFn,
 		log:        log,
 	}
 }
 
-// Run blocks, forwarding each settlement and publication signal to all linked users.
+// Run blocks, forwarding publication signals to all linked users. The settlement
+// signal no longer produces a «прогнозный фандинг зафиксирован» message (решение
+// 17.07 — точные цифры приходят с публикацией ЦБ); вне окна настоящего клиринга
+// он остаётся служебным «Обновлением сервиса» (рестарт).
 func (d *Dispatcher) Run(ctx context.Context, settlCh, pubCh <-chan time.Time) {
 	for {
 		select {
@@ -43,26 +53,47 @@ func (d *Dispatcher) Run(ctx context.Context, settlCh, pubCh <-chan time.Time) {
 			if !ok {
 				return
 			}
-			// Настоящая фиксация прогнозного фандинга случается сразу после 15:30 МСК.
-			// Сигнал в любое другое время — рестарт сервиса: движок лишь ВОССТАНОВИЛ
-			// сегодняшний settlement из бэкфилла сделок, слать «зафиксирован» с новым
-			// временем — вводить в заблуждение. Вместо этого — короткое «Обновление».
-			var text string
-			if isSettlementTime(t) {
-				text = formatSettlAlert(t, d.snapshotFn())
-			} else {
-				text = formatRestartNotice(t)
+			if !isSettlementTime(t) {
+				d.broadcast(ctx, formatRestartNotice(t))
 			}
-			d.broadcast(ctx, text)
 		case t, ok := <-pubCh:
 			if !ok {
 				return
 			}
-			snap := d.snapshotFn()
-			text := formatCBRAlert(t, snap)
+			info := d.pubInfoFn()
+			snap := d.awaitCBFunding(ctx, info)
+			text := formatCBRAlert(t, info, snap)
 			d.broadcast(ctx, text)
 		}
 	}
+}
+
+// awaitCBFunding ждёт, пока движок съест тики новой публикации и пересчитает точный
+// фандинг: сигнал OnNewPublication летит параллельно тикам, и мгновенный снапшот ещё
+// содержит вчерашние курсы (наблюдалось 16.07: сообщение со старыми курсами и без
+// USD/EUR фандингов). Возвращает снапшот, как только курсы в нём совпали с публикацией
+// и CBFunding посчитан, либо последний снапшот по таймауту/отмене.
+func (d *Dispatcher) awaitCBFunding(ctx context.Context, info cbr.PublicationInfo) funding.FundingSnapshot {
+	const timeout = 10 * time.Second
+	const step = 200 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for {
+		snap := d.snapshotFn()
+		usdReady := info.USD <= 0 || (rateEq(snap.USDRUBF.OfficialRate, info.USD) && snap.USDRUBF.CBFunding != nil)
+		eurReady := info.EUR <= 0 || (rateEq(snap.EURRUBF.OfficialRate, info.EUR) && snap.EURRUBF.CBFunding != nil)
+		if (usdReady && eurReady) || time.Now().After(deadline) {
+			return snap
+		}
+		select {
+		case <-ctx.Done():
+			return snap
+		case <-time.After(step):
+		}
+	}
+}
+
+func rateEq(got *float64, want float64) bool {
+	return got != nil && math.Abs(*got-want) < 1e-9
 }
 
 func (d *Dispatcher) broadcast(ctx context.Context, text string) {
@@ -107,87 +138,68 @@ func isSettlementTime(t time.Time) bool {
 	return h == 15 && m >= 30 && m < 45
 }
 
-// formatRestartNotice строит служебное сообщение вместо ложного «фандинг
-// зафиксирован», когда settlement лишь восстановлен после перезапуска сервиса.
+// formatRestartNotice строит служебное сообщение, когда settlement лишь
+// восстановлен после перезапуска сервиса.
 func formatRestartNotice(t time.Time) string {
 	msk := time.FixedZone("MSK", 3*60*60)
 	return fmt.Sprintf("🔄 <b>Обновление сервиса</b>\n%s МСК\nСервис перезапущен, расчётные данные восстановлены.",
 		t.In(msk).Format("15:04:05"))
 }
 
-// formatSettlAlert строит сообщение об фиксации прогнозного фандинга (~15:30 МСК).
-func formatSettlAlert(settlTime time.Time, snap funding.FundingSnapshot) string {
-	msk := time.FixedZone("MSK", 3*60*60)
-	t := settlTime.In(msk)
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "⏱ <b>Прогнозный фандинг зафиксирован</b>\n%s МСК\n", t.Format("15:04:05"))
-
-	usdPred := snap.USDRUBF.PredictedFunding
-	eurPred := snap.EURRUBF.PredictedFunding
-
-	if usdPred != nil || eurPred != nil {
-		sb.WriteString("\n<b>Прогнозные фандинги:</b>\n")
-		if usdPred != nil {
-			fmt.Fprintf(&sb, "USDRUBF: %+.6f\n", *usdPred)
-		}
-		if eurPred != nil {
-			fmt.Fprintf(&sb, "EURRUBF: %+.6f\n", *eurPred)
-		}
+// indicatorEmoji подбирает цветовой индикатор по величине фандинга в процентах
+// от курса ЦБ: 🟢 ≥0.14 · 🟡 0.05…0.14 · ⚪️ ±0.05 · 🟠 −0.14…−0.05 · 🔴 ≤−0.14.
+func indicatorEmoji(pct float64) string {
+	switch {
+	case pct >= 0.14:
+		return "🟢"
+	case pct >= 0.05:
+		return "🟡"
+	case pct > -0.05:
+		return "⚪️"
+	case pct > -0.14:
+		return "🟠"
+	default:
+		return "🔴"
 	}
-
-	usdRate := snap.USDRUBF.OfficialRate
-	eurRate := snap.EURRUBF.OfficialRate
-
-	if usdRate != nil || eurRate != nil {
-		sb.WriteString("\n<b>Курсы ЦБ (старые):</b>\n")
-		if usdRate != nil {
-			fmt.Fprintf(&sb, "USD/RUB %.4f\n", *usdRate)
-		}
-		if eurRate != nil {
-			fmt.Fprintf(&sb, "EUR/RUB %.4f\n", *eurRate)
-		}
-	}
-
-	return sb.String()
 }
 
-// formatCBRAlert строит сообщение о публикации новых курсов ЦБ и точных фандингах.
-func formatCBRAlert(pubTime time.Time, snap funding.FundingSnapshot) string {
+// fundingLine строит одну строку вида «🟢USDRUBF: +0.150% (+0.1173)».
+// Пустая строка, если фандинг ещё не посчитан или нет базы для процента.
+func fundingLine(sym string, fund *float64, rate float64) string {
+	if fund == nil || rate <= 0 {
+		return ""
+	}
+	pct := *fund / rate * 100
+	return fmt.Sprintf("%s%s: %+.3f%% (%+.4f)\n", indicatorEmoji(pct), sym, pct, *fund)
+}
+
+// formatCBRAlert строит сообщение о зафиксированном фандинге после публикации ЦБ.
+// Курсы — из PublicationInfo (ответ канала-победителя, без гонки со снапшотом);
+// фандинги USD/EUR — наш CBFunding, CNY — SWAPRATE MOEX. Проценты — от нового курса.
+func formatCBRAlert(pubTime time.Time, info cbr.PublicationInfo, snap funding.FundingSnapshot) string {
 	msk := time.FixedZone("MSK", 3*60*60)
-	t := pubTime.In(msk)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "📢 <b>Новые курсы ЦБ опубликованы</b>\nДата: %s · %s МСК\n",
-		t.Format("2006-01-02"), t.Format("15:04:05"))
+	fmt.Fprintf(&sb, "📢 <b>Фандинг зафиксирован</b>\n%s МСК\n", pubTime.In(msk).Format("15:04:05"))
 
-	usdRate := snap.USDRUBF.OfficialRate
-	eurRate := snap.EURRUBF.OfficialRate
-
-	if usdRate != nil || eurRate != nil {
-		sb.WriteString("\n<b>Курсы ЦБ (новые):</b>\n")
-		if usdRate != nil {
-			fmt.Fprintf(&sb, "USD/RUB %.4f\n", *usdRate)
-		}
-		if eurRate != nil {
-			fmt.Fprintf(&sb, "EUR/RUB %.4f\n", *eurRate)
-		}
+	lines := fundingLine("USDRUBF", snap.USDRUBF.CBFunding, info.USD) +
+		fundingLine("EURRUBF", snap.EURRUBF.CBFunding, info.EUR) +
+		fundingLine("CNYRUBF", snap.CNYRUBF.MOEXFunding, info.CNY)
+	if lines != "" {
+		sb.WriteString("\n")
+		sb.WriteString(lines)
 	}
 
-	usdFund := snap.USDRUBF.CBFunding
-	eurFund := snap.EURRUBF.CBFunding
-	cnyFund := snap.CNYRUBF.MOEXFunding
-
-	if usdFund != nil || eurFund != nil || cnyFund != nil {
-		sb.WriteString("\n<b>Точные фандинги:</b>\n")
-		if usdFund != nil {
-			fmt.Fprintf(&sb, "USDRUBF: %+.6f\n", *usdFund)
+	if info.USD > 0 || info.EUR > 0 {
+		fmt.Fprintf(&sb, "\nКурс ЦБ на %s:", info.Date)
+		if info.USD > 0 {
+			fmt.Fprintf(&sb, " USD %.2f", info.USD)
 		}
-		if eurFund != nil {
-			fmt.Fprintf(&sb, "EURRUBF: %+.6f\n", *eurFund)
+		if info.EUR > 0 {
+			fmt.Fprintf(&sb, " / EUR %.2f", info.EUR)
 		}
-		if cnyFund != nil {
-			fmt.Fprintf(&sb, "CNYRUBF: %+.6f\n", *cnyFund)
+		if info.CNY > 0 {
+			fmt.Fprintf(&sb, " / CNY %.2f", info.CNY)
 		}
 	}
 

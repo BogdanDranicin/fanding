@@ -260,7 +260,7 @@ func main() {
 					}
 				}
 				go bot.Run(ctx)
-				disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, log.Logger)
+				disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, cbrSrc.LastPublicationInfo, log.Logger)
 				disp.Run(ctx, eng.SettlementCh(), dispPubCh) // blocks until ctx is cancelled
 				return
 			}
