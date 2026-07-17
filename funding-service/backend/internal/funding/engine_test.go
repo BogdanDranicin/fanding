@@ -272,8 +272,9 @@ func TestEngine_PredictedFundingFromSpotTOM(t *testing.T) {
 	msk := time.FixedZone("MSK", 3*60*60)
 	at := time.Date(2026, 5, 29, 11, 0, 0, 0, msk)
 
-	// Futures session VWAP = 72.0 (single seeding tick).
+	// Futures session VWAP = 72.0 (VOLTODAY 100→200 = 100 traded @72 in-window).
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 72.0, 100, at))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 72.0, 200, at.Add(time.Minute)))
 	// Spot TOM in-window VWAP = 71.0 → predicted CBR rate.
 	e.Ingest(tomTick(source.SymbolUSDRubTOM, 71.0, 100, at))
 
@@ -344,8 +345,10 @@ func TestEngine_CBFundingIsReconstructionNotSwapRate(t *testing.T) {
 
 	// Settlement + today's CBR publication → reconstruction is available:
 	// d = 82.0 − 81.0 = 1.0 > l1 → capped at l2 = 0.0015 × 81.0 = 0.1215.
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
+	// VOLTODAY 100→200 in-window gives the session VWAP its weight.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle))
 	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 81.0, settle))
 
 	// MOEX publishes SWAPRATE at the evening clearing — MOEXFunding, not CBFunding.
@@ -375,8 +378,9 @@ func TestEngine_CBFundingStaleSwapRateYieldsToReconstruction(t *testing.T) {
 	// Yesterday's SWAPRATE observed since morning; the repeat after 15:30 carries
 	// the SAME value — not a clearing publication, must not count as fresh.
 	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.00631, settle.Add(-3*time.Hour)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle))
 	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.00631, settle.Add(time.Hour)))
 
 	// CBR publishes today's rate 81.0: d = 82.0 − 81.0 = 1.0 > l1 = 0.081,
@@ -400,8 +404,9 @@ func TestEngine_CBFundingNilBeforeCBRDespiteSwapRate(t *testing.T) {
 	settle := todaySettle()
 
 	e.Ingest(swapRateTick(source.SymbolUSDRUBF, 0.00631, settle.Add(-3*time.Hour)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle))
 
 	snap := e.Snapshot()
 	if snap.USDRUBF.CBFunding != nil {
@@ -452,9 +457,10 @@ func TestEngine_CBFundingLimitsFromEffectiveRate(t *testing.T) {
 
 	// Обычный день: действующий курс известен движку с утра (обычный опрос ЦБ).
 	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 76.6213, settle.Add(-5*time.Hour)))
-	// Сессия: VWAP = 77.17, заморозка на 15:30.
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 100, settle))
+	// Сессия: VWAP = 77.17 (прирост VOLTODAY 100→200 в окне), заморозка на 15:30.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.17, 200, settle))
 	// Публикация нового курса 77.4912 (на завтра).
 	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 77.4912, settle.Add(2*time.Hour)))
 
@@ -493,6 +499,84 @@ func TestEngine_CBFundingLimitsFromSeededEffectiveRate(t *testing.T) {
 	const want = -0.11493195
 	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("CBFunding: want %.8f (границы от засеянного действующего курса), got %.8f", want, *snap.USDRUBF.CBFunding)
+	}
+}
+
+// Регресс на живые числа 16.07.2026: ЕТС торгует с 07:00, но нога фьючерса в
+// фандинге MOEX — VWAP безадресных сделок ТОЛЬКО за 10:00–15:30 МСК. Утренние
+// сделки (бэкфилл отдаёт и их) не должны попадать в settlement VWAP, а полнота
+// трейд-фида сверяется с ДНЕВНЫМ VOLTODAY (который включает утро): 16.07 наш
+// VWAP с утра 78.078 улетал в кап −0.1169 против −0.1000 биржи (VWAP окна 78.140).
+func TestEngine_SettlVWAPExcludesMorningTrades(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// Действующий сегодня курс (опубликован вчера) — база границ K1/K2.
+	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 77.9568, at(9, 0)))
+
+	// Утренняя сессия ЕТС: 50 лотов @77.60 до 10:00 — НЕ входят в ногу фьючерса.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 77.60, 50, at(8, 0)))
+	// Окно 10:00–15:30: 100 лотов @78.1401 — это и есть нога фьючерса.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.1401, 100, at(11, 0)))
+	// Marketdata видит дневной объём 150 (утро + окно): полнота фида должна
+	// считаться от dayV=150, а не от объёма окна (100 < 0.9×150 дал бы ложный
+	// фолбэк на пустой ΔVOLTODAY).
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.1401, 150, at(11, 0)))
+	// Первая сделка после 15:30 замораживает settlement, не попадая в него.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 79.0, 5, at(15, 31)))
+
+	// Публикация нового курса (на завтра): d = 78.1401 − 78.3181 = −0.1780,
+	// inner = d + l1 = −0.1780 + 0.001×77.9568 = −0.1000432 — без капа.
+	// Старое поведение (утро в VWAP): 77.96 → кап −0.0015×77.9568 = −0.1169352.
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 78.3181, at(16, 56)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	want := (78.1401 - 78.3181) + 0.001*77.9568
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.7f (нога = VWAP окна 10:00–15:30), got %.7f", want, *snap.USDRUBF.CBFunding)
+	}
+}
+
+// То же окно для ΔVOLTODAY-фолбэка: тики до 10:00 двигают только базу lastVol,
+// а бутстрап не приписывает накопленный с 07:00 объём первой увиденной цене.
+func TestEngine_SessionVWAPWindowExcludesMorningVolume(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 77.9568, at(9, 30)))
+
+	// Утро ЕТС: VOLTODAY растёт 1000→4000 до 10:00 — только база, не VWAP.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.0, 1000, at(7, 5)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 77.5, 4000, at(9, 0)))
+	// Окно: 4000→5000 = 1000 @78.0 и 5000→7000 = 2000 @78.2 →
+	// VWAP = (78.0×1000 + 78.2×2000)/3000 = 78.13333…
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.0, 5000, at(10, 30)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.2, 7000, at(12, 0)))
+	// 15:30 — заморозка settlement (сам тик вне окна, дельты нет).
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.5, 7000, at(15, 30)))
+
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 78.3181, at(17, 0)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	// d = 78.13333 − 78.3181 = −0.1847667; inner = d + 0.001×77.9568 = −0.1068099.
+	// Старое поведение (бутстрап-засев + утро): VWAP 77.675 → кап −0.1169352.
+	want := (78.0*1000+78.2*2000)/3000 - 78.3181 + 0.001*77.9568
+	if diff := *snap.USDRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.7f (ΔVOLTODAY только из окна 10:00–15:30), got %.7f", want, *snap.USDRUBF.CBFunding)
 	}
 }
 
@@ -578,10 +662,12 @@ func TestEngine_CBFundingNilUntilCBRTick(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 
-	// Normally-running service: pre-settlement tick sets startedPre1530=true.
+	// Normally-running service: pre-settlement ticks set startedPre1530=true and
+	// give the accumulator in-window weight (VOLTODAY 100→200).
 	// Settlement tick at 15:30 sets settlVWAP (sentinel for post-settlement state).
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle))
 
 	// No CBR rate yet — CBFunding must be nil even though settlement happened.
 	snap := e.Snapshot()
@@ -701,9 +787,10 @@ func TestEngine_CBFundingValue(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 
-	// Settlement at 15:30 with VWAP = 91.0.
-	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle))
+	// Settlement at 15:30 with VWAP = 91.0 (VOLTODAY 100→200 in-window).
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 200, settle))
 
 	// CBFunding = clamp(91.0 − 90.0, K1*90.0, K2*90.0) = clamp(1.0, 0.09, 0.135) = 0.135.
 	e.Ingest(cbrNewTick(source.SymbolEURRubOfficial, 90.0, settle.Add(time.Hour)))
@@ -721,9 +808,10 @@ func TestEngine_CBFundingUpdatesOnCBRChange(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 
-	// Settlement at 15:30 with VWAP = 91.0.
-	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle.Add(-time.Minute)))
-	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle))
+	// Settlement at 15:30 with VWAP = 91.0 (VOLTODAY 100→200 in-window).
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 100, settle.Add(-2*time.Minute)))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 91.0, 200, settle))
 
 	// First CBR publication: clamp(91.0 − 90.0, 0.09, 0.135) = 0.135.
 	e.Ingest(cbrNewTick(source.SymbolEURRubOfficial, 90.0, settle.Add(time.Hour)))
@@ -873,13 +961,16 @@ func TestEngine_USDTRUBPrice(t *testing.T) {
 func TestEngine_EURRUBFIndependentFromUSDRUBF(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
-	pre := settle.Add(-time.Minute)
+	pre := settle.Add(-2 * time.Minute)
 
-	// Pre-settlement ticks ensure both accumulators have startedPre1530=true.
+	// Pre-settlement ticks ensure both accumulators have startedPre1530=true
+	// and in-window weight (VOLTODAY 100→200).
 	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, pre))
 	e.Ingest(moexTick(source.SymbolEURRUBF, 90.0, 100, pre))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, settle))
-	e.Ingest(moexTick(source.SymbolEURRUBF, 90.0, 100, settle))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 90.0, 200, settle.Add(-time.Minute)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 200, settle))
+	e.Ingest(moexTick(source.SymbolEURRUBF, 90.0, 200, settle))
 	// CBR rate only for USD — EUR has no CBR rate yet.
 	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 82.0, settle))
 

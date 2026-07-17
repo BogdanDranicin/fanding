@@ -17,10 +17,13 @@ var futuresOfficialSym = map[string]string{
 }
 
 
-// inCBRWindow reports whether t falls inside the CBR official-rate methodology window
-// (10:00–15:30 MSK). WAPRICE ticks outside this window are discarded so the stored
-// value freezes at the closing VWAP, which equals the actual CBR fixing.
-func inCBRWindow(t time.Time) bool {
+// inFundingWindow reports whether t falls inside the 10:00–15:30 MSK VWAP window.
+// Both legs of the MOEX funding formula are defined over exactly this window: the
+// CBR fixing (spot TOM WAPRICE, CBR methodology) and the perpetual-futures leg
+// (VWAP of on-book deals 10:00–15:30, MOEX methodology). Ticks outside the window
+// must not enter either accumulator: the derivatives market trades from 07:00 MSK
+// (ЕТС since 23.03.2026) and morning volume skews the VWAP off the exchange value.
+func inFundingWindow(t time.Time) bool {
 	h, m, _ := t.In(msk).Clock()
 	if h < 10 {
 		return false
@@ -53,12 +56,15 @@ type InstrumentFunding struct {
 	PredictedCBRate  *float64 // live estimate of today's CBR fixing: VWAP of spot TOM over 10:00–15:30 MSK
 }
 
-// sessionAcc accumulates a cumulative volume-weighted sum for the trading session.
-// Volumes from MOEX ISS are VOLTODAY (running total); we track deltas to get
-// proper incremental weights. The accumulator resets when the MSK date changes.
+// sessionAcc accumulates a volume-weighted sum over the 10:00–15:30 MSK funding
+// window (ΔVOLTODAY approximation, fallback to the exact trade feed). Volumes from
+// MOEX ISS are VOLTODAY (running total); we track deltas to get proper incremental
+// weights. Out-of-window ticks only move the lastVol baseline so pre-10:00 and
+// post-15:30 volume never enters the VWAP. The accumulator resets when the MSK
+// date changes.
 type sessionAcc struct {
-	sumPV          float64 // Σ(price × ΔvolToday)
-	sumV           float64 // Σ(ΔvolToday)
+	sumPV          float64 // Σ(price × ΔvolToday) over the funding window
+	sumV           float64 // Σ(ΔvolToday) over the funding window
 	lastVol        float64 // last observed VOLTODAY (to compute deltas)
 	date           string  // MSK date "YYYY-MM-DD" of the current accumulation
 	startedPre1530 bool    // true only if the first tick arrived before 15:30 MSK
@@ -71,12 +77,15 @@ func (a *sessionAcc) vwap() (float64, bool) {
 	return a.sumPV / a.sumV, true
 }
 
-// tradeAcc accumulates the session VWAP from individual executed deals
-// (KindTrade ticks). Unlike sessionAcc it needs no delta arithmetic: each
-// tick already carries the volume of exactly one trade.
+// tradeAcc accumulates the funding-window (10:00–15:30 MSK) VWAP from individual
+// executed deals (KindTrade ticks). Unlike sessionAcc it needs no delta arithmetic:
+// each tick already carries the volume of exactly one trade. dayV counts the whole
+// day including out-of-window deals — completeness against VOLTODAY (a full-day
+// total) must not be judged by the window-only volume.
 type tradeAcc struct {
-	sumPV          float64 // Σ(price × quantity)
-	sumV           float64 // Σ(quantity)
+	sumPV          float64 // Σ(price × quantity) over the funding window
+	sumV           float64 // Σ(quantity) over the funding window
+	dayV           float64 // Σ(quantity) over the whole day (feed-completeness check)
 	date           string  // MSK date "YYYY-MM-DD" of the current accumulation
 	startedPre1530 bool    // first trade of the day was before 15:30 MSK (backfill covers the session start)
 }
@@ -223,7 +232,7 @@ func (e *Engine) Ingest(tick source.Tick) {
 		// predicted row falls back to a live value instead of being empty on a late start.
 		if tick.Kind == source.KindWaprice {
 			e.spotTOMWAPLive[tick.Symbol] = tick.Price
-			if inCBRWindow(tick.Timestamp) {
+			if inFundingWindow(tick.Timestamp) {
 				e.spotTOMWAP[tick.Symbol] = tick.Price
 			}
 		}
@@ -264,11 +273,12 @@ func (e *Engine) ingestSessionTick(tick source.Tick) {
 				e.settlDate = ""
 			}
 		}
-		// Bootstrap accumulator with the first tick's full VOLTODAY weight.
+		// Bootstrap with an empty accumulator: the first tick's VOLTODAY is the
+		// day-so-far total and includes pre-10:00 (ЕТС) volume, which must not be
+		// attributed to the current price. It only sets the delta baseline; the
+		// funding-window VWAP is built from in-window deltas alone.
 		h0, m0, _ := mskTime.Clock()
 		e.sessionAccs[sym] = &sessionAcc{
-			sumPV:          tick.Price * tick.Volume,
-			sumV:           tick.Volume,
 			lastVol:        tick.Volume,
 			date:           mskDate,
 			startedPre1530: h0 < 15 || (h0 == 15 && m0 < 30),
@@ -276,7 +286,7 @@ func (e *Engine) ingestSessionTick(tick source.Tick) {
 		acc = e.sessionAccs[sym]
 	} else {
 		deltaVol := tick.Volume - acc.lastVol
-		if deltaVol > 0 {
+		if deltaVol > 0 && inFundingWindow(mskTime) {
 			acc.sumPV += tick.Price * deltaVol
 			acc.sumV += deltaVol
 		}
@@ -314,8 +324,14 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 	// must not leak into the 15:30 session snapshot.
 	e.maybeFreezeSettl(sym, mskTime)
 
-	acc.sumPV += tick.Price * tick.Volume
-	acc.sumV += tick.Volume
+	// Every deal counts toward day volume (completeness vs VOLTODAY) and the
+	// rolling display VWAP, but only 10:00–15:30 deals enter the funding-leg VWAP —
+	// the backfill replays the whole day including the 07:00 morning session.
+	acc.dayV += tick.Volume
+	if inFundingWindow(mskTime) {
+		acc.sumPV += tick.Price * tick.Volume
+		acc.sumV += tick.Volume
+	}
 	e.tradeVWAPs[sym].Add(tick.Price, tick.Volume, tick.Timestamp)
 }
 
@@ -372,7 +388,7 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 // captured volume then lags the growing VOLTODAY. Must be called while holding e.mu.
 func (e *Engine) tradeFeedFresh(sym string) bool {
 	acc := e.tradeAccs[sym]
-	if acc == nil || acc.sumV <= 0 {
+	if acc == nil || acc.dayV <= 0 {
 		return false
 	}
 	// Ignore a leftover accumulator from a previous day (no trades ingested yet
@@ -385,7 +401,9 @@ func (e *Engine) tradeFeedFresh(sym string) bool {
 		// No marketdata volume to compare against yet — trust the trades we have.
 		return true
 	}
-	return acc.sumV >= volToday*tradeFeedMinCompleteness
+	// Completeness is judged on whole-day volume: VOLTODAY counts from 07:00,
+	// while the funding accumulator (sumV) holds only the 10:00–15:30 window.
+	return acc.dayV >= volToday*tradeFeedMinCompleteness
 }
 
 // displayVWAP returns the rolling 6-hour VWAP for display: exact trade-based
