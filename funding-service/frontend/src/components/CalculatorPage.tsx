@@ -402,6 +402,12 @@ export function CalculatorPage() {
     return sum + Math.abs(lots) * inst.lot_size * p;
   }, 0);
 
+  // fundingBySymbol хранит денежный поток фандинга на ОДИН ЛОНГ-лот (в ₽).
+  // Знак — относительно направления позиции: SWAPRATE у MOEX положительна, когда
+  // лонг ПЛАТИТ, а шорт ПОЛУЧАЕТ. Поэтому поток лонга = −SWAPRATE × lot_size
+  // (лонг при плюсовой ставке в минус), а в строке умножается на знаковые лоты:
+  // −400 лотов (шорт) даёт плюс, +400 (лонг) — минус. Без этого знака газпром
+  // считался наоборот (лонг показывался доходом).
   const fundingBySymbol: Record<string, number> = {};
   // Live backend funding (real-time over WS) for the currency perpetuals.
   if (current) {
@@ -409,17 +415,17 @@ export function CalculatorPage() {
       const rate = current[sym as LiveSym]?.moex_funding;
       const inst = bySymbol[sym];
       if (rate != null && inst?.lot_size) {
-        fundingBySymbol[sym] = rate * inst.lot_size;
+        fundingBySymbol[sym] = -rate * inst.lot_size;
       }
     }
   }
   // MOEX SWAPRATE funding for every other perpetual future (equity perpetuals like
-  // GAZPF, SBERF, …). Same formula and sign as the currency path above. The WS value
+  // GAZPF, SBERF, …). Same sign convention as the currency path above. The WS value
   // wins when present because it is fresher than the 60 s ISS poll.
   for (const [sym, sr] of Object.entries(swapRates)) {
     if (sym in fundingBySymbol) continue;
     const inst = bySymbol[sym];
-    if (inst?.lot_size) fundingBySymbol[sym] = sr * inst.lot_size;
+    if (inst?.lot_size) fundingBySymbol[sym] = -sr * inst.lot_size;
   }
 
   const totalFunding = activeSymbols.reduce((sum, sym) => {
