@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/funding-service/backend/internal/source"
 )
 
@@ -128,6 +130,8 @@ type Engine struct {
 	officialRateAtSettl map[string]float64 // курс ЦБ, зафиксированный при settlement (15:30)
 	rateEffectiveToday  map[string]float64 // засев из БД: курс ЦБ, ДЕЙСТВУЮЩИЙ сегодня (опубликован вчера); officialSym -> rate
 	rateEffectiveDate   string             // MSK-дата, на которую действителен rateEffectiveToday
+	cbLoggedDate        map[string]string  // sym -> MSK-дата, за которую уже напечатана диагностика CBFunding (раз в сутки)
+	log                 zerolog.Logger
 	mu               sync.Mutex
 
 	// settlCh fires once per trading day when the first settlVWAP is frozen (~15:30).
@@ -161,8 +165,18 @@ func NewEngine() *Engine {
 		officialRateDate:    make(map[string]string),
 		officialRateAtSettl: make(map[string]float64),
 		rateEffectiveToday:  make(map[string]float64),
+		cbLoggedDate:        make(map[string]string),
+		log:                 zerolog.Nop(),
 		settlCh:             make(chan time.Time, 1),
 	}
+}
+
+// SetLogger attaches a logger for the once-per-day CBFunding diagnostic. Without
+// it (tests) the engine logs to a no-op writer.
+func (e *Engine) SetLogger(l zerolog.Logger) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.log = l
 }
 
 // SettlementCh returns a channel that receives the time once per trading day
@@ -621,7 +635,31 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 			d := *settlPtr - newRate
 			l1 := 0.001 * base
 			l2 := 0.0015 * base
-			inf.CBFunding = ptr(clampFunding(d, l1, l2))
+			cb := clampFunding(d, l1, l2)
+			inf.CBFunding = ptr(cb)
+
+			// Диагностика мёртвой зоны K1 (раз в сутки на символ, на момент публикации).
+			// Печатаем внутренности расчёта, чтобы в пятницу вживую сверить нашу
+			// реконструкцию с фактическим SWAPRATE биржи и подобрать верный K1.
+			// cbNoDeadband — чем был бы CBFunding без мёртвой зоны (только кап ±l2):
+			// если факт SWAPRATE окажется ближе к нему, значит K1 надо убирать.
+			if e.cbLoggedDate[sym] != today {
+				e.cbLoggedDate[sym] = today
+				cbNoDeadband := math.Max(-l2, math.Min(l2, d))
+				e.log.Warn().
+					Str("sym", sym).
+					Float64("settl_vwap", *settlPtr).
+					Float64("cb_rate_new", newRate).
+					Float64("base_effective_rate", base).
+					Float64("d", d).
+					Float64("l1_deadband", l1).
+					Float64("l2_cap", l2).
+					Float64("cb_funding", cb).
+					Float64("cb_funding_no_deadband", cbNoDeadband).
+					Float64("moex_swaprate_at_pub", e.swapRate[sym]). // SWAPRATE клиринга ещё не вышел — вечером сверять по UI
+					Str("date", today).
+					Msg("CBFunding diag: свод для сверки K1 с фактическим SWAPRATE")
+			}
 		}
 	}
 

@@ -96,6 +96,7 @@ func main() {
 	}
 
 	eng := funding.NewEngine()
+	eng.SetLogger(log.Logger)
 	seedEffectiveRates(ctx, store, eng)
 	snapshots := make(chan funding.FundingSnapshot, 16)
 	runner := funding.NewRunner(mux, eng, symbols, time.Second, snapshots)
