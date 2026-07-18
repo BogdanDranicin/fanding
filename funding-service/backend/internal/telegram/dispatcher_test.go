@@ -42,12 +42,15 @@ func TestFormatCBRAlert_withRates(t *testing.T) {
 		"17:56:31",
 		"🔴USDRUBF: -0.149% (-0.1169)",
 		"🟢EURRUBF: +0.149% (+0.1334)",
-		"🟡CNYRUBF: +0.060% (+0.0069)",
 		"Курс ЦБ на 17.07.2026: USD 78.32 / EUR 89.33 / CNY 11.51",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
+	}
+	// CNY фандинг убран из уведомлений (18.07) — строки индикатора по юаню быть не должно.
+	if strings.Contains(text, "CNYRUBF") {
+		t.Errorf("CNY funding line must be gone, got:\n%s", text)
 	}
 }
 

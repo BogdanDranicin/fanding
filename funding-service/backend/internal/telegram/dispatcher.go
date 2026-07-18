@@ -175,16 +175,16 @@ func fundingLine(sym string, fund *float64, rate float64) string {
 
 // formatCBRAlert строит сообщение о зафиксированном фандинге после публикации ЦБ.
 // Курсы — из PublicationInfo (ответ канала-победителя, без гонки со снапшотом);
-// фандинги USD/EUR — наш CBFunding, CNY — SWAPRATE MOEX. Проценты — от нового курса.
+// фандинги только USD/EUR — наш CBFunding (CNY убран 18.07). Проценты — от нового курса.
 func formatCBRAlert(pubTime time.Time, info cbr.PublicationInfo, snap funding.FundingSnapshot) string {
 	msk := time.FixedZone("MSK", 3*60*60)
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "📢 <b>Фандинг зафиксирован</b>\n%s МСК\n", pubTime.In(msk).Format("15:04:05"))
 
+	// CNY фандинг убран из уведомлений (18.07): показываем только USD/EUR (наш CBFunding).
 	lines := fundingLine("USDRUBF", snap.USDRUBF.CBFunding, info.USD) +
-		fundingLine("EURRUBF", snap.EURRUBF.CBFunding, info.EUR) +
-		fundingLine("CNYRUBF", snap.CNYRUBF.MOEXFunding, info.CNY)
+		fundingLine("EURRUBF", snap.EURRUBF.CBFunding, info.EUR)
 	if lines != "" {
 		sb.WriteString("\n")
 		sb.WriteString(lines)
