@@ -37,6 +37,42 @@ function predErr(pred: number | null, actual: number | null): string {
   const pct = actual !== 0 ? (d / actual) * 100 : 0;
   return `${d >= 0 ? '+' : ''}${fmtRate.format(d)} (${pct >= 0 ? '+' : ''}${pct.toFixed(3)}%)`;
 }
+// dev — отклонение ноги фьючерса на 15:30 от курса ЦБ (settlVWAP − курс).
+function dev(vwap: number | null, rateV: number | null): string {
+  if (vwap == null || rateV == null) return '—';
+  const d = vwap - rateV;
+  return `${d >= 0 ? '+' : ''}${fmtRate.format(d)}`;
+}
+// diff — расхождение нашего расчёта с биржей (наш − факт SWAPRATE).
+function diff(ours: number | null, actual: number | null): string {
+  if (ours == null || actual == null) return '—';
+  const d = ours - actual;
+  return `${d >= 0 ? '+' : ''}${fmtFund.format(d)}`;
+}
+
+// ReconBlock — сверка НАШЕЙ реконструкции CBFunding с фактическим SWAPRATE биржи
+// по одной валюте: видно ногу фьючерса, отклонение, наш расчёт (и без мёртвой зоны K1)
+// и биржевой факт, чтобы точно локализовать расхождение.
+function ReconBlock({ ccy, settlVwap, rateV, cb, cbNoDb, moex }: {
+  ccy: string;
+  settlVwap: number | null;
+  rateV: number | null;
+  cb: number | null;
+  cbNoDb: number | null;
+  moex: number | null;
+}) {
+  return (
+    <div className="jrn-detail-group">
+      <div className="jrn-detail-title">Сверка {ccy}: расчёт vs биржа</div>
+      <Detail label="Нога фьючерса 15:30" value={rate(settlVwap)} muted={settlVwap == null} />
+      <Detail label="Отклонение d (нога − курс)" value={dev(settlVwap, rateV)} muted={settlVwap == null || rateV == null} />
+      <Detail label="CB funding (наш)" value={fund(cb)} muted={cb == null} />
+      <Detail label="Без мёртвой зоны K1" value={fund(cbNoDb)} muted={cbNoDb == null} />
+      <Detail label="MOEX SWAPRATE (факт)" value={fund(moex)} muted={moex == null} />
+      <Detail label="Расхождение (наш − факт)" value={diff(cb, moex)} muted={cb == null || moex == null} />
+    </div>
+  );
+}
 
 // Detail — одна строка «метка / значение» в раскрывающейся части карточки.
 function Detail({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
@@ -106,6 +142,11 @@ function JournalCard({ r }: { r: CBPublication }) {
           <Detail label="Курс USD → ошибка" value={predErr(r.predicted_cb_rate_usd, r.usd_rate)} muted={r.predicted_cb_rate_usd == null} />
         </div>
 
+        <ReconBlock ccy="USD" settlVwap={r.settl_vwap_usd} rateV={r.usd_rate}
+          cb={r.cb_funding_usd} cbNoDb={r.cb_funding_no_deadband_usd} moex={r.moex_funding_usd} />
+        <ReconBlock ccy="EUR" settlVwap={r.settl_vwap_eur} rateV={r.eur_rate}
+          cb={r.cb_funding_eur} cbNoDb={r.cb_funding_no_deadband_eur} moex={r.moex_funding_eur} />
+
         <div className="jrn-detail-group">
           <div className="jrn-detail-title">Гонка каналов ЦБ</div>
           <Detail label="Первый канал" value={r.winner_channel ?? '—'} muted={r.winner_channel == null} />
@@ -156,7 +197,9 @@ export function JournalPage() {
       <p className="race-subtitle">
         Аудит каждой публикации: во сколько (до секунды по МСК) наш сервис получил новый курс,
         какие курсы пришли, какой фандинг по ним рассчитан, каким был прогноз до публикации и
-        какой канал ЦБ оказался первым. Нажмите на карточку, чтобы раскрыть подробности.
+        какой канал ЦБ оказался первым. В блоке «Сверка» — нога фьючерса на 15:30, наш расчёт
+        (и без мёртвой зоны K1) против фактического SWAPRATE биржи, чтобы видеть расхождения.
+        Нажмите на карточку, чтобы раскрыть подробности.
       </p>
 
       {error && <p className="race-error">Ошибка загрузки: {error}</p>}

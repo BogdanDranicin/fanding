@@ -56,6 +56,10 @@ type InstrumentFunding struct {
 	OfficialRate     *float64 // most recent CBR rate; nil until published
 	PredictedFunding *float64 // live clamp(sessionVWAP_futures − predictedCBRate, K1·rate, K2·rate)
 	PredictedCBRate  *float64 // live estimate of today's CBR fixing: VWAP of spot TOM over 10:00–15:30 MSK
+
+	// Диагностика реконструкции CBFunding (для журнала сверки с биржей):
+	SettlVWAP           *float64 // нога фьючерса на 15:30 (settlVWAP), non-nil после клиринга
+	CBFundingNoDeadband *float64 // CBFunding БЕЗ мёртвой зоны K1 — clamp(d, ±l2); чтобы видеть, зануляет ли K1
 }
 
 // sessionAcc accumulates a volume-weighted sum over the 10:00–15:30 MSK funding
@@ -615,6 +619,9 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 
 	settlPtr := e.settlVWAP[sym]
 	settlDone := settlPtr != nil
+	if settlDone {
+		inf.SettlVWAP = settlPtr // нога фьючерса на 15:30 — для журнала сверки
+	}
 
 	// CBFunding — НАШ расчёт от официального курса ЦБ, появляется ТОЛЬКО после его
 	// публикации (до этого строка пустая — семантика поля):
@@ -638,14 +645,16 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 			cb := clampFunding(d, l1, l2)
 			inf.CBFunding = ptr(cb)
 
-			// Диагностика мёртвой зоны K1 (раз в сутки на символ, на момент публикации).
-			// Печатаем внутренности расчёта, чтобы в пятницу вживую сверить нашу
-			// реконструкцию с фактическим SWAPRATE биржи и подобрать верный K1.
-			// cbNoDeadband — чем был бы CBFunding без мёртвой зоны (только кап ±l2):
-			// если факт SWAPRATE окажется ближе к нему, значит K1 надо убирать.
+			// cbNoDeadband — чем был бы CBFunding без мёртвой зоны K1 (только кап ±l2).
+			// Кладём в снапшот, чтобы журнал показал: зануляет ли K1 реальный фандинг
+			// (если факт SWAPRATE ближе к нему, чем к cb — значит K1 надо убирать).
+			cbNoDeadband := math.Max(-l2, math.Min(l2, d))
+			inf.CBFundingNoDeadband = ptr(cbNoDeadband)
+
+			// Диагностика мёртвой зоны K1 (раз в сутки на символ, на момент публикации)
+			// в лог — дублирует то, что теперь оседает в журнале, для быстрой сверки.
 			if e.cbLoggedDate[sym] != today {
 				e.cbLoggedDate[sym] = today
-				cbNoDeadband := math.Max(-l2, math.Min(l2, d))
 				e.log.Warn().
 					Str("sym", sym).
 					Float64("settl_vwap", *settlPtr).

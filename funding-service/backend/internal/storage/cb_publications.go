@@ -21,6 +21,15 @@ type CBPublicationInput struct {
 	CBFundingEUR *float64
 	CNYFunding   *float64
 
+	// Диагностика реконструкции vs биржа (USD/EUR): нога фьючерса на 15:30,
+	// фактический MOEX SWAPRATE и наш расчёт без мёртвой зоны K1.
+	SettlVWAPUSD           *float64
+	SettlVWAPEUR           *float64
+	MOEXFundingUSD         *float64
+	MOEXFundingEUR         *float64
+	CBFundingNoDeadbandUSD *float64
+	CBFundingNoDeadbandEUR *float64
+
 	PredictedFundingUSD *float64 // live forecast captured just before publication
 	PredictedFundingEUR *float64
 	PredictedCBRateUSD  *float64
@@ -46,8 +55,10 @@ func (s *Store) UpsertCBPublication(ctx context.Context, in CBPublicationInput) 
 			 cb_funding_usd, cb_funding_eur, cny_funding,
 			 predicted_funding_usd, predicted_funding_eur,
 			 predicted_cb_rate_usd, predicted_cb_rate_eur,
-			 winner_channel, winner_latency_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			 winner_channel, winner_latency_ms,
+			 settl_vwap_usd, settl_vwap_eur, moex_funding_usd, moex_funding_eur,
+			 cb_funding_no_deadband_usd, cb_funding_no_deadband_eur)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT (date) DO UPDATE SET
 			detected_at           = COALESCE(cb_publications.detected_at, EXCLUDED.detected_at),
 			updated_at            = EXCLUDED.updated_at,
@@ -62,7 +73,13 @@ func (s *Store) UpsertCBPublication(ctx context.Context, in CBPublicationInput) 
 			predicted_cb_rate_usd = COALESCE(EXCLUDED.predicted_cb_rate_usd, cb_publications.predicted_cb_rate_usd),
 			predicted_cb_rate_eur = COALESCE(EXCLUDED.predicted_cb_rate_eur, cb_publications.predicted_cb_rate_eur),
 			winner_channel        = COALESCE(cb_publications.winner_channel, EXCLUDED.winner_channel),
-			winner_latency_ms     = COALESCE(cb_publications.winner_latency_ms, EXCLUDED.winner_latency_ms)`
+			winner_latency_ms     = COALESCE(cb_publications.winner_latency_ms, EXCLUDED.winner_latency_ms),
+			settl_vwap_usd             = COALESCE(EXCLUDED.settl_vwap_usd, cb_publications.settl_vwap_usd),
+			settl_vwap_eur             = COALESCE(EXCLUDED.settl_vwap_eur, cb_publications.settl_vwap_eur),
+			moex_funding_usd           = COALESCE(EXCLUDED.moex_funding_usd, cb_publications.moex_funding_usd),
+			moex_funding_eur           = COALESCE(EXCLUDED.moex_funding_eur, cb_publications.moex_funding_eur),
+			cb_funding_no_deadband_usd = COALESCE(EXCLUDED.cb_funding_no_deadband_usd, cb_publications.cb_funding_no_deadband_usd),
+			cb_funding_no_deadband_eur = COALESCE(EXCLUDED.cb_funding_no_deadband_eur, cb_publications.cb_funding_no_deadband_eur)`
 
 	_, err := s.pool.Exec(ctx, q,
 		in.Date, in.DetectedAt, in.UpdatedAt, in.USDRate, in.EURRate, in.CNYRate,
@@ -70,6 +87,8 @@ func (s *Store) UpsertCBPublication(ctx context.Context, in CBPublicationInput) 
 		in.PredictedFundingUSD, in.PredictedFundingEUR,
 		in.PredictedCBRateUSD, in.PredictedCBRateEUR,
 		in.WinnerChannel, in.WinnerLatencyMs,
+		in.SettlVWAPUSD, in.SettlVWAPEUR, in.MOEXFundingUSD, in.MOEXFundingEUR,
+		in.CBFundingNoDeadbandUSD, in.CBFundingNoDeadbandEUR,
 	)
 	return err
 }

@@ -63,6 +63,14 @@ type CBPublicationRow struct {
 	PredictedCBRateEUR  *float64   `json:"predicted_cb_rate_eur"`
 	WinnerChannel       *string    `json:"winner_channel"`
 	WinnerLatencyMs     *int64     `json:"winner_latency_ms"`
+
+	// Диагностика реконструкции vs биржа (USD/EUR).
+	SettlVWAPUSD           *float64 `json:"settl_vwap_usd"`
+	SettlVWAPEUR           *float64 `json:"settl_vwap_eur"`
+	MOEXFundingUSD         *float64 `json:"moex_funding_usd"`
+	MOEXFundingEUR         *float64 `json:"moex_funding_eur"`
+	CBFundingNoDeadbandUSD *float64 `json:"cb_funding_no_deadband_usd"`
+	CBFundingNoDeadbandEUR *float64 `json:"cb_funding_no_deadband_eur"`
 }
 
 // RecentCBPublications returns publications from the last N days, newest first.
@@ -72,7 +80,9 @@ func (s *Store) RecentCBPublications(ctx context.Context, days int) ([]CBPublica
 		       cb_funding_usd, cb_funding_eur, cny_funding,
 		       predicted_funding_usd, predicted_funding_eur,
 		       predicted_cb_rate_usd, predicted_cb_rate_eur,
-		       winner_channel, winner_latency_ms
+		       winner_channel, winner_latency_ms,
+		       settl_vwap_usd, settl_vwap_eur, moex_funding_usd, moex_funding_eur,
+		       cb_funding_no_deadband_usd, cb_funding_no_deadband_eur
 		FROM cb_publications
 		WHERE date >= current_date - ($1::int || ' days')::interval
 		ORDER BY date DESC`
@@ -91,7 +101,9 @@ func (s *Store) RecentCBPublications(ctx context.Context, days int) ([]CBPublica
 			&r.CBFundingUSD, &r.CBFundingEUR, &r.CNYFunding,
 			&r.PredictedFundingUSD, &r.PredictedFundingEUR,
 			&r.PredictedCBRateUSD, &r.PredictedCBRateEUR,
-			&r.WinnerChannel, &r.WinnerLatencyMs); err != nil {
+			&r.WinnerChannel, &r.WinnerLatencyMs,
+			&r.SettlVWAPUSD, &r.SettlVWAPEUR, &r.MOEXFundingUSD, &r.MOEXFundingEUR,
+			&r.CBFundingNoDeadbandUSD, &r.CBFundingNoDeadbandEUR); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

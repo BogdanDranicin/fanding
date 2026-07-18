@@ -54,6 +54,13 @@ export interface CBPublication {
   predicted_cb_rate_eur: number | null;
   winner_channel: string | null;
   winner_latency_ms: number | null;
+  // Диагностика реконструкции vs биржа (USD/EUR).
+  settl_vwap_usd: number | null;
+  settl_vwap_eur: number | null;
+  moex_funding_usd: number | null;
+  moex_funding_eur: number | null;
+  cb_funding_no_deadband_usd: number | null;
+  cb_funding_no_deadband_eur: number | null;
 }
 
 export type WSStatus = 'connecting' | 'connected' | 'disconnected';

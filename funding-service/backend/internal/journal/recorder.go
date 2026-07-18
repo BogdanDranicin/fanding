@@ -123,6 +123,13 @@ func (r *Recorder) recordPublication(ctx context.Context, t time.Time) {
 		CBFundingUSD: snap.USDRUBF.CBFunding,
 		CBFundingEUR: snap.EURRUBF.CBFunding,
 		CNYFunding:   snap.CNYRUBF.MOEXFunding,
+
+		SettlVWAPUSD:           snap.USDRUBF.SettlVWAP,
+		SettlVWAPEUR:           snap.EURRUBF.SettlVWAP,
+		MOEXFundingUSD:         snap.USDRUBF.MOEXFunding,
+		MOEXFundingEUR:         snap.EURRUBF.MOEXFunding,
+		CBFundingNoDeadbandUSD: snap.USDRUBF.CBFundingNoDeadband,
+		CBFundingNoDeadbandEUR: snap.EURRUBF.CBFundingNoDeadband,
 	}
 	if info.Winner != "" {
 		in.WinnerChannel = &info.Winner
@@ -172,10 +179,19 @@ func (r *Recorder) recordPoll(ctx context.Context) {
 
 	// Post-publication re-fix: only for the day we recorded a publication, so we
 	// never touch a past day's funding and never create a row without cause.
+	// Через вечер сюда же подтягивается фактический MOEX SWAPRATE (moex_funding),
+	// чтобы строка сошлась на биржевой факт и стала видна сверка с реконструкцией.
 	if r.lastPubDay == day.Format(dayFmt) {
 		in.CBFundingUSD = snap.USDRUBF.CBFunding
 		in.CBFundingEUR = snap.EURRUBF.CBFunding
 		in.CNYFunding = snap.CNYRUBF.MOEXFunding
+
+		in.SettlVWAPUSD = snap.USDRUBF.SettlVWAP
+		in.SettlVWAPEUR = snap.EURRUBF.SettlVWAP
+		in.MOEXFundingUSD = snap.USDRUBF.MOEXFunding
+		in.MOEXFundingEUR = snap.EURRUBF.MOEXFunding
+		in.CBFundingNoDeadbandUSD = snap.USDRUBF.CBFundingNoDeadband
+		in.CBFundingNoDeadbandEUR = snap.EURRUBF.CBFundingNoDeadband
 	}
 
 	fp := fingerprint(&in)
@@ -190,7 +206,7 @@ func (r *Recorder) recordPoll(ctx context.Context) {
 }
 
 // emptyFP is fingerprint() of an input whose value fields are all nil.
-const emptyFP = "-|-|-|-|-|-|-"
+const emptyFP = "-|-|-|-|-|-|-|-|-|-|-|-|-"
 
 // fingerprint serializes the value fields recordPoll writes, so identical
 // consecutive polls can be skipped. Date/UpdatedAt are deliberately excluded:
@@ -207,6 +223,9 @@ func fingerprint(in *storage.CBPublicationInput) string {
 		f(in.PredictedFundingUSD), f(in.PredictedFundingEUR),
 		f(in.PredictedCBRateUSD), f(in.PredictedCBRateEUR),
 		f(in.CBFundingUSD), f(in.CBFundingEUR), f(in.CNYFunding),
+		f(in.SettlVWAPUSD), f(in.SettlVWAPEUR),
+		f(in.MOEXFundingUSD), f(in.MOEXFundingEUR),
+		f(in.CBFundingNoDeadbandUSD), f(in.CBFundingNoDeadbandEUR),
 	}, "|")
 }
 
