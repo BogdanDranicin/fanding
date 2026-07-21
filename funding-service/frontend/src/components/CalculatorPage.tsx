@@ -39,6 +39,32 @@ const fmtInt = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? '';
 
+// ─── keyboard-layout-tolerant search ─────────────────────────────────────────
+// Позволяет искать инструмент, набранный в неправильной раскладке: физические
+// клавиши QWERTY ↔ ЙЦУКЕН. Пример: GAZP на русской раскладке набирается как
+// «пфяз» (g→п, a→ф, z→я, p→з) — оба варианта должны находить GAZP. И наоборот,
+// латиница «ghbdtn» разворачивается в «привет» для поиска по русским названиям.
+const EN_TO_RU: Record<string, string> = {
+  q: 'й', w: 'ц', e: 'у', r: 'к', t: 'е', y: 'н', u: 'г', i: 'ш', o: 'щ', p: 'з', '[': 'х', ']': 'ъ',
+  a: 'ф', s: 'ы', d: 'в', f: 'а', g: 'п', h: 'р', j: 'о', k: 'л', l: 'д', ';': 'ж', "'": 'э',
+  z: 'я', x: 'ч', c: 'с', v: 'м', b: 'и', n: 'т', m: 'ь', ',': 'б', '.': 'ю', '/': '.', '`': 'ё',
+};
+const RU_TO_EN: Record<string, string> = Object.fromEntries(
+  Object.entries(EN_TO_RU).map(([en, ru]) => [ru, en] as [string, string])
+);
+
+const convertLayout = (s: string, map: Record<string, string>): string =>
+  s.replace(/./g, (ch) => map[ch] ?? ch);
+
+// searchVariants returns the raw query plus both layout conversions (deduped),
+// so a match on any of them counts. Empty/unchanged conversions are dropped.
+function searchVariants(q: string): string[] {
+  const variants = new Set<string>([q]);
+  variants.add(convertLayout(q, RU_TO_EN)); // русская раскладка → латиница (тикеры)
+  variants.add(convertLayout(q, EN_TO_RU)); // латиница → русская (названия)
+  return [...variants].filter(Boolean);
+}
+
 const LIVE_FUNDING_SYMS = ['USDRUBF', 'EURRUBF', 'CNYRUBF'] as const;
 type LiveSym = (typeof LIVE_FUNDING_SYMS)[number];
 
@@ -444,6 +470,8 @@ export function CalculatorPage() {
 
   // ── search results ───────────────────────────────────────────────────────
   const q = search.trim().toLowerCase();
+  // Варианты запроса с учётом раскладки (см. searchVariants): «пфяз» → «gazp» и т.д.
+  const qVariants = useMemo(() => (q ? searchVariants(q) : []), [q]);
 
   const filtered = useMemo(() => {
     let list = instruments.filter((i) => {
@@ -452,7 +480,11 @@ export function CalculatorPage() {
       if (filterType === 'stock'     && i.market_type !== 'stock')  return false;
       if (filterType === 'favorites' && !favorites.has(i.symbol))   return false;
       if (filterType !== 'favorites' && !q) return false;
-      if (q && !i.symbol.toLowerCase().includes(q) && !i.short_name.toLowerCase().includes(q)) return false;
+      if (q) {
+        const sym  = i.symbol.toLowerCase();
+        const name = i.short_name.toLowerCase();
+        if (!qVariants.some((v) => sym.includes(v) || name.includes(v))) return false;
+      }
       return true;
     });
 
@@ -463,7 +495,7 @@ export function CalculatorPage() {
     });
 
     return filterType === 'favorites' ? list : list.slice(0, 50);
-  }, [instruments, positions, q, sortBy, filterType, favorites]);
+  }, [instruments, positions, q, qVariants, sortBy, filterType, favorites]);
 
   // ─── render ─────────────────────────────────────────────────────────────
   return (

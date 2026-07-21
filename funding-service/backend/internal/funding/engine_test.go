@@ -321,6 +321,27 @@ func TestEngine_SpotTOMWindowFreezePreferredOverLive(t *testing.T) {
 	}
 }
 
+// TestEngine_SpotTOMWindowResetsNextDay guards the daily reset of the frozen
+// 10:00–15:30 predictor. Yesterday's fixing must not survive into a new MSK day:
+// before today's window fills, the predicted rate has to fall back to the fresh
+// live WAPRICE. Without the reset the stale frozen value was preferred and produced
+// a large spurious «ошибка прогноза» — the reported "wrong rates" bug.
+func TestEngine_SpotTOMWindowResetsNextDay(t *testing.T) {
+	e := funding.NewEngine()
+	msk := time.FixedZone("MSK", 3*60*60)
+
+	// Day 1: an in-window tick freezes the predictor at 71.0.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 71.0, 100, time.Date(2026, 5, 29, 12, 0, 0, 0, msk)))
+
+	// Day 2, before the 10:00–15:30 window opens (ЕТС morning): only a live tick at 85.0.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 85.0, 150, time.Date(2026, 5, 30, 9, 0, 0, 0, msk)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.PredictedCBRate == nil || *snap.USDRUBF.PredictedCBRate != 85.0 {
+		t.Errorf("PredictedCBRate must reset on a new day and fall back to today's live 85.0, got %v (stale 71.0 would leak across midnight)", snap.USDRUBF.PredictedCBRate)
+	}
+}
+
 func TestEngine_SpotTOMLiveFallbackWhenNoWindowData(t *testing.T) {
 	e := funding.NewEngine()
 	msk := time.FixedZone("MSK", 3*60*60)

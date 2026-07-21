@@ -120,6 +120,7 @@ type Engine struct {
 	lastPriceAt  map[string]time.Time       // timestamp of the newest KindLastPrice tick per symbol
 	sessionAccs  map[string]*sessionAcc     // cumulative session VWAP (reset at MSK midnight)
 	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
+	spotTOMWAPDate map[string]string        // MSK date the frozen spotTOMWAP belongs to (daily reset, like eurUSDFixDate)
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
 	settlDate        string                     // MSK date for which settlement was recorded
@@ -159,6 +160,7 @@ func NewEngine() *Engine {
 		lastPriceAt:      make(map[string]time.Time),
 		sessionAccs:      make(map[string]*sessionAcc),
 		spotTOMWAP:       make(map[string]float64),
+		spotTOMWAPDate:   make(map[string]string),
 		spotTOMWAPLive:   make(map[string]float64),
 		settlVWAP:        make(map[string]*float64),
 		vwapLastVol:      make(map[string]float64),
@@ -250,6 +252,16 @@ func (e *Engine) Ingest(tick source.Tick) {
 		// predicted row falls back to a live value instead of being empty on a late start.
 		if tick.Kind == source.KindWaprice {
 			e.spotTOMWAPLive[tick.Symbol] = tick.Price
+			// Суточный сброс замороженного окна 10:00–15:30: значение действительно только
+			// за свой торговый день. Без сброса вчерашний фиксинг переживал бы полночь и
+			// предпочитался бы живому WAPRICE (spotTOMWAP выигрывает у spotTOMWAPLive в
+			// Snapshot), давая ложную «ошибку прогноза» на новом дне до наполнения окна —
+			// именно это ломало предсказанный курс. Логика симметрична eurUSDFix/eurUSDFixDate.
+			mskDate := tick.Timestamp.In(msk).Format("2006-01-02")
+			if e.spotTOMWAPDate[tick.Symbol] != mskDate {
+				e.spotTOMWAPDate[tick.Symbol] = mskDate
+				delete(e.spotTOMWAP, tick.Symbol)
+			}
 			if inFundingWindow(tick.Timestamp) {
 				e.spotTOMWAP[tick.Symbol] = tick.Price
 			}
