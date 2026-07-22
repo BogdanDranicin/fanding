@@ -60,6 +60,12 @@ type InstrumentFunding struct {
 	// Диагностика реконструкции CBFunding (для журнала сверки с биржей):
 	SettlVWAP           *float64 // нога фьючерса на 15:30 (settlVWAP), non-nil после клиринга
 	CBFundingNoDeadband *float64 // CBFunding БЕЗ мёртвой зоны K1 — clamp(d, ±l2); чтобы видеть, зануляет ли K1
+
+	// Гипотеза о перекосе ~0.0035: ЦенаСпот в формуле MOEX — оконённый VWAP спота
+	// 10:00–15:30, а не опубликованный курс ЦБ. Считаем его и альтернативный фандинг
+	// параллельно (не подменяя боевой CBFunding), чтобы сверить на живой сессии.
+	SpotWindowVWAP  *float64 // VWAP спота USDRUB_TOM за 10:00–15:30 (кандидат в ЦенаСпот); non-nil после 15:30
+	CBFundingSpotLeg *float64 // clamp(settlVWAP − SpotWindowVWAP, K1, K2) — CBFunding со спотовой ногой вместо курса ЦБ
 }
 
 // sessionAcc accumulates a volume-weighted sum over the 10:00–15:30 MSK funding
@@ -103,6 +109,39 @@ func (a *tradeAcc) vwap() (float64, bool) {
 	return a.sumPV / a.sumV, true
 }
 
+// spotWindowAcc reconstructs the 10:00–15:30 MSK VWAP of the spot leg (USDRUB_TOM)
+// from cumulative marketdata: WAPRICE is the session VWAP and VOLTODAY the running
+// volume, so WAPRICE×VOLTODAY is cumulative ruble turnover since session open
+// (07:00 ЕТС). The windowed VWAP is the turnover/volume ratio between the window
+// edges — baseline captured just before 10:00 (to strip the morning), snapshot at
+// the last tick before 15:30. This is MOEX's clearing spot price; the CBR published
+// rate is a rounded/shifted proxy for it (~0.0035 apart). No FX trade feed needed —
+// marketdata WAPRICE/VOLTODAY are public even though FX trades.json is not.
+type spotWindowAcc struct {
+	baseVal  float64 // cumulative turnover (WAPRICE×VOLTODAY) as of the last tick before 10:00
+	baseVol  float64 // cumulative VOLTODAY as of the last tick before 10:00
+	haveBase bool    // a pre-10:00 baseline was captured (service ran before the window)
+	winVal   float64 // cumulative turnover as of the last tick strictly before 15:30
+	winVol   float64 // cumulative VOLTODAY as of the last tick strictly before 15:30
+	haveWin  bool    // at least one in-window tick was seen
+	date     string  // MSK date "YYYY-MM-DD" of the current accumulation
+	frozen   *float64 // windowed VWAP frozen at 15:30
+}
+
+// windowVWAP returns the current 10:00–15:30 VWAP from the accumulated edges.
+// Needs both a pre-window baseline (to subtract the morning) and an in-window
+// snapshot with positive incremental volume.
+func (a *spotWindowAcc) windowVWAP() (float64, bool) {
+	if !a.haveBase || !a.haveWin {
+		return 0, false
+	}
+	dv := a.winVol - a.baseVol
+	if dv <= 0 {
+		return 0, false
+	}
+	return (a.winVal - a.baseVal) / dv, true
+}
+
 // tradeFeedMinCompleteness is the fraction of marketdata VOLTODAY that the
 // captured trade volume must cover for the trade feed to be considered
 // authoritative. Below this the trades endpoint is lagging behind real volume
@@ -122,6 +161,7 @@ type Engine struct {
 	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
 	spotTOMWAPDate map[string]string        // MSK date the frozen spotTOMWAP belongs to (daily reset, like eurUSDFixDate)
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
+	spotAccs       map[string]*spotWindowAcc // 10:00–15:30 windowed VWAP of spot TOM (candidate ЦенаСпот), reset on MSK date change
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
 	settlDate        string                     // MSK date for which settlement was recorded
 	vwapLastVol      map[string]float64         // last VOLTODAY per symbol, to weight the rolling VWAP by ΔVOLTODAY
@@ -162,6 +202,7 @@ func NewEngine() *Engine {
 		spotTOMWAP:       make(map[string]float64),
 		spotTOMWAPDate:   make(map[string]string),
 		spotTOMWAPLive:   make(map[string]float64),
+		spotAccs:         make(map[string]*spotWindowAcc),
 		settlVWAP:        make(map[string]*float64),
 		vwapLastVol:      make(map[string]float64),
 		lastPrice:        make(map[string]float64),
@@ -265,6 +306,7 @@ func (e *Engine) Ingest(tick source.Tick) {
 			if inFundingWindow(tick.Timestamp) {
 				e.spotTOMWAP[tick.Symbol] = tick.Price
 			}
+			e.ingestSpotWindow(tick)
 		}
 
 	case source.SymbolEURUSD, source.SymbolUSDCNH:
@@ -542,6 +584,65 @@ func (e *Engine) freezeEURUSDFixing(tick source.Tick) {
 	}
 }
 
+// ingestSpotWindow feeds a spot TOM WAPRICE tick (Price=WAPRICE, Volume=VOLTODAY)
+// into the windowed-VWAP accumulator. Cumulative turnover = WAPRICE×VOLTODAY; the
+// baseline advances on every pre-10:00 tick (latest morning cumulative to subtract)
+// and the in-window snapshot advances on every tick before 15:30. Frozen once at
+// the first tick at/after 15:30 so post-close prints don't leak in — mirrors the
+// futures settlement freeze. Must be called while holding e.mu.
+func (e *Engine) ingestSpotWindow(tick source.Tick) {
+	if tick.Price <= 0 || tick.Volume <= 0 {
+		return
+	}
+	sym := tick.Symbol
+	mskTime := tick.Timestamp.In(msk)
+	mskDate := mskTime.Format("2006-01-02")
+
+	acc := e.spotAccs[sym]
+	if acc == nil || acc.date != mskDate {
+		acc = &spotWindowAcc{date: mskDate}
+		e.spotAccs[sym] = acc
+	}
+
+	turnover := tick.Price * tick.Volume
+	h, m, _ := mskTime.Clock()
+	switch {
+	case h < 10:
+		// Pre-window: keep the baseline at the latest morning cumulative so all
+		// ЕТС (07:00–10:00) turnover is stripped when we difference the edges.
+		acc.baseVal = turnover
+		acc.baseVol = tick.Volume
+		acc.haveBase = true
+	case h < 15 || (h == 15 && m < 30):
+		// In window: advance the snapshot used for the close.
+		acc.winVal = turnover
+		acc.winVol = tick.Volume
+		acc.haveWin = true
+	}
+
+	// Freeze at 15:30 from the last strictly-pre-15:30 snapshot.
+	if acc.frozen == nil && !(h < 15 || (h == 15 && m < 30)) {
+		if v, ok := acc.windowVWAP(); ok {
+			acc.frozen = ptr(v)
+		}
+	}
+}
+
+// spotWindowVWAP returns the best 10:00–15:30 windowed VWAP of the spot TOM leg:
+// the frozen 15:30 value once settled, otherwise the live in-window estimate.
+// 0/false until a pre-window baseline and an in-window snapshot both exist.
+// Must be called while holding e.mu.
+func (e *Engine) spotWindowVWAP(sym string) (float64, bool) {
+	acc := e.spotAccs[sym]
+	if acc == nil {
+		return 0, false
+	}
+	if acc.frozen != nil {
+		return *acc.frozen, true
+	}
+	return acc.windowVWAP()
+}
+
 // Snapshot computes and returns current funding values for all instruments.
 func (e *Engine) Snapshot() FundingSnapshot {
 	e.mu.Lock()
@@ -587,10 +688,19 @@ func (e *Engine) Snapshot() FundingSnapshot {
 		eurPredictedCBRate = eurUSD * usdPredictedCBRate
 	}
 
+	// Оконённый VWAP спота 10:00–15:30 — кандидат в ЦенаСпот (сверяем с курсом ЦБ).
+	// USD берётся напрямую; EUR/RUB_TOM на бирже не торгуется — та же USD-нога × EUR/USD@15:30,
+	// как в предсказанном курсе.
+	usdSpotWindow, _ := e.spotWindowVWAP(source.SymbolUSDRubTOM)
+	eurSpotWindow := 0.0
+	if eurUSD > 0 && usdSpotWindow > 0 {
+		eurSpotWindow = eurUSD * usdSpotWindow
+	}
+
 	return FundingSnapshot{
 		Timestamp:    now,
-		USDRUBF:      e.buildFunding(source.SymbolUSDRUBF, source.SymbolUSDRubOfficial, usdRubSpot, usdPredictedCBRate, now),
-		EURRUBF:      e.buildFunding(source.SymbolEURRUBF, source.SymbolEURRubOfficial, eurRubSpot, eurPredictedCBRate, now),
+		USDRUBF:      e.buildFunding(source.SymbolUSDRUBF, source.SymbolUSDRubOfficial, usdRubSpot, usdPredictedCBRate, usdSpotWindow, now),
+		EURRUBF:      e.buildFunding(source.SymbolEURRUBF, source.SymbolEURRubOfficial, eurRubSpot, eurPredictedCBRate, eurSpotWindow, now),
 		CNYRUBF:      e.buildCNYFunding(now),
 		USDTRUBPrice: e.lastPrice[source.SymbolUSDTRUB],
 	}
@@ -599,7 +709,7 @@ func (e *Engine) Snapshot() FundingSnapshot {
 // buildFunding produces InstrumentFunding for USD/RUB and EUR/RUB futures.
 // spotRate and predictedCBRate are pre-computed by the caller; zero means unavailable.
 // predictedCBRate for USD comes from USDRUB_TOM WAPRICE; for EUR via EUR/USD × USD cross.
-func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate float64, now time.Time) InstrumentFunding {
+func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate, spotWindow float64, now time.Time) InstrumentFunding {
 	// Rolling VWAP (6-hour window) for live display and ForexFunding:
 	// exact trade-based feed preferred, ΔVOLTODAY approximation as fallback.
 	vwap, hasVWAP := e.displayVWAP(sym, now)
@@ -635,6 +745,12 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 		inf.SettlVWAP = settlPtr // нога фьючерса на 15:30 — для журнала сверки
 	}
 
+	// SpotWindowVWAP — кандидат в ЦенаСпот (оконённый VWAP спота 10:00–15:30).
+	// Показываем всегда, когда посчитан, чтобы видеть его и до клиринга.
+	if spotWindow > 0 {
+		inf.SpotWindowVWAP = ptr(spotWindow)
+	}
+
 	// CBFunding — НАШ расчёт от официального курса ЦБ, появляется ТОЛЬКО после его
 	// публикации (до этого строка пустая — семантика поля):
 	//   D = clamp(settleVWAP(15:30) − курс ЦБ, установленный сегодня)
@@ -663,6 +779,17 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 			cbNoDeadband := math.Max(-l2, math.Min(l2, d))
 			inf.CBFundingNoDeadband = ptr(cbNoDeadband)
 
+			// Спот-нога: та же формула, но ЦенаСпот = оконённый VWAP спота 10:00–15:30
+			// вместо опубликованного курса ЦБ. Гипотеза: именно это даёт факт MOEX
+			// (наш CBFunding завышен на ~0.0035, ровно spotWindow−курс ЦБ). Считаем
+			// параллельно, боевой CBFunding не подменяем — сверяем на живой сессии.
+			cbSpotLeg := math.NaN()
+			if spotWindow > 0 {
+				dSpot := *settlPtr - spotWindow
+				cbSpotLeg = clampFunding(dSpot, l1, l2)
+				inf.CBFundingSpotLeg = ptr(cbSpotLeg)
+			}
+
 			// Диагностика мёртвой зоны K1 (раз в сутки на символ, на момент публикации)
 			// в лог — дублирует то, что теперь оседает в журнале, для быстрой сверки.
 			if e.cbLoggedDate[sym] != today {
@@ -677,9 +804,12 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 					Float64("l2_cap", l2).
 					Float64("cb_funding", cb).
 					Float64("cb_funding_no_deadband", cbNoDeadband).
+					Float64("spot_window_vwap", spotWindow).      // кандидат в ЦенаСпот
+					Float64("spot_minus_cb", spotWindow-newRate). // ожидаем ~+0.0035, если гипотеза верна
+					Float64("cb_funding_spotleg", cbSpotLeg).     // должен совпасть с фактом SWAPRATE
 					Float64("moex_swaprate_at_pub", e.swapRate[sym]). // SWAPRATE клиринга ещё не вышел — вечером сверять по UI
 					Str("date", today).
-					Msg("CBFunding diag: свод для сверки K1 с фактическим SWAPRATE")
+					Msg("CBFunding diag: свод для сверки K1 + спот-ноги с фактическим SWAPRATE")
 			}
 		}
 	}

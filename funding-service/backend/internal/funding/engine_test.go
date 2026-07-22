@@ -1006,3 +1006,86 @@ func TestEngine_EURRUBFIndependentFromUSDRUBF(t *testing.T) {
 		t.Error("EURRUBF.CBFunding must be nil when no EUR CBR rate was ingested")
 	}
 }
+
+// Оконённый VWAP спота 10:00–15:30 — кандидат в ЦенаСпот (гипотеза о перекосе ~0.0035).
+// Считается из кумулятивных (WAPRICE, VOLTODAY): разность оборота на краях окна, с
+// вычетом утренней ЕТС-сессии (baseline до 10:00) и без загрязнения пост-15:30 тиками.
+func TestEngine_SpotWindowVWAPExcludesMorningAndPost(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// База границ K1/K2 — действующий сегодня курс (опубликован вчера): 78.00.
+	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 78.00, at(9, 0)))
+
+	// --- Спот USDRUB_TOM (кумулятивные WAPRICE × VOLTODAY = оборот) ---
+	// Утро ЕТС до 10:00: оборот 79000 @ объёме 1000 (WAPRICE 79.0) — baseline, вычитается.
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 79.0, 1000, at(8, 0)))
+	// В окне: кумулятив 157030 @ 2000 (WAPRICE 78.515) → оконённый VWAP =
+	// (157030−79000)/(2000−1000) = 78.03 (окно торговалось по 78.03, ниже утра).
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 78.515, 2000, at(14, 0)))
+	// После 15:30 — не должен просочиться (замораживаем по последнему до-15:30 снимку).
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 77.0, 3000, at(16, 0)))
+
+	// --- Фьючерс USDRUBF: нога = VWAP окна 78.20 ---
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.20, 100, at(11, 0)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.20, 100, at(11, 0))) // marketdata VOLTODAY → трейд-фид свеж
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 79.0, 5, at(15, 31)))  // замораживает settlement на 78.20
+
+	// Публикация нового курса ЦБ (на завтра): 78.05.
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 78.05, at(16, 56)))
+
+	snap := e.Snapshot()
+
+	// 1) Оконённый спот = 78.03 (утро 79.0 вычтено, пост-15:30 77.0 не просочился).
+	if snap.USDRUBF.SpotWindowVWAP == nil {
+		t.Fatal("SpotWindowVWAP must be non-nil after 15:30 with morning + in-window ticks")
+	}
+	if diff := *snap.USDRUBF.SpotWindowVWAP - 78.03; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("SpotWindowVWAP: want 78.03 (окно 10:00–15:30 без утра и пост-15:30), got %.6f", *snap.USDRUBF.SpotWindowVWAP)
+	}
+
+	// 2) Боевой CBFunding по-прежнему считает от курса ЦБ: d = 78.20 − 78.05 = 0.15,
+	//    минус мёртвая зона l1 = 0.001×78.00 = 0.078 → 0.072.
+	wantCB := (78.20 - 78.05) - 0.001*78.00
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil (settlement + CBR publication)")
+	}
+	if diff := *snap.USDRUBF.CBFunding - wantCB; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.6f (нога = курс ЦБ), got %.6f", wantCB, *snap.USDRUBF.CBFunding)
+	}
+
+	// 3) Альтернатива со спот-ногой: d = 78.20 − 78.03 = 0.17, минус l1 → 0.092.
+	//    Именно это значение сверяем с фактом SWAPRATE на живой сессии.
+	wantSpotLeg := (78.20 - 78.03) - 0.001*78.00
+	if snap.USDRUBF.CBFundingSpotLeg == nil {
+		t.Fatal("CBFundingSpotLeg must be non-nil when SpotWindowVWAP is available")
+	}
+	if diff := *snap.USDRUBF.CBFundingSpotLeg - wantSpotLeg; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFundingSpotLeg: want %.6f (нога = оконённый спот), got %.6f", wantSpotLeg, *snap.USDRUBF.CBFundingSpotLeg)
+	}
+}
+
+// Поздний старт (нет тиков до 10:00): без baseline оконённый спот не восстановить,
+// и мы НЕ подставляем сырой WAPRICE (кумулятив с утра, завышен). Поле остаётся nil,
+// боевой CBFunding при этом считается как обычно (деградация безопасна).
+func TestEngine_SpotWindowVWAPNilWithoutPreWindowBaseline(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// Только тики в окне и позже — до 10:00 ничего (сервис стартовал поздно).
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 78.5, 2000, at(14, 0)))
+	e.Ingest(tomTick(source.SymbolUSDRubTOM, 77.0, 3000, at(16, 0)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.SpotWindowVWAP != nil {
+		t.Errorf("SpotWindowVWAP must be nil without a pre-10:00 baseline (no morning to subtract), got %.6f", *snap.USDRUBF.SpotWindowVWAP)
+	}
+}
