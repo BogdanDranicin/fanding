@@ -190,9 +190,11 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 			s.maybeEmit(ch, symbol, "BID", source.KindBid, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "OFFER", source.KindAsk, resp.MarketData, vol, ts)
 			s.maybeEmit(ch, symbol, "SETTLEPRICE", source.KindSettlePrice, resp.MarketData, vol, ts)
-			// VOLTODAY (не 0) едет вместе с WAPRICE: для спота USDRUB_TOM движок считает
-			// из пары (WAPRICE, VOLTODAY) оконённый VWAP 10:00–15:30 — точную ЦенаСпот
-			// клиринга MOEX (WAPRICE сам по себе кумулятивен с 07:00 ЕТС и завышен утром).
+			// WAPRICE спота USDRUB_TOM — прокси для предсказанного курса ЦБ (spotTOMWAP)
+			// до его публикации. Внимание: WAPRICE кумулятивен с 07:00 ЕТС и завышен утром,
+			// а VOLTODAY по фиду CETS приходит null (оконного объёма нет) — поэтому оконённый
+			// VWAP спота из marketdata НЕ реконструируется. Боевой фандинг это не затрагивает:
+			// по методике MOEX ЦенаСпот = официальный курс ЦБ, а не оконённый VWAP спота.
 			s.maybeEmit(ch, symbol, "WAPRICE", source.KindWaprice, resp.MarketData, vol, ts)
 			s.emitSwapRate(ch, symbol, resp.MarketData, ts)
 			log.Debug().Msg("polled")
