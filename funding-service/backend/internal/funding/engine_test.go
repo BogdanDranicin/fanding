@@ -82,6 +82,18 @@ func tomTick(sym string, price, voltoday float64, ts time.Time) source.Tick {
 	}
 }
 
+// prevSettleTick builds a KindPrevSettle tick: расчётная цена предыдущего
+// вечернего клиринга (PREVSETTLEPRICE у ISS) — база границ K1/K2.
+func prevSettleTick(sym string, price float64, ts time.Time) source.Tick {
+	return source.Tick{
+		Symbol:    sym,
+		Price:     price,
+		Kind:      source.KindPrevSettle,
+		Timestamp: ts,
+		Source:    "moex-iss",
+	}
+}
+
 // tradeTick builds a KindTrade tick: one executed deal with its own volume.
 func tradeTick(sym string, price, qty float64, ts time.Time) source.Tick {
 	return source.Tick{
@@ -438,10 +450,11 @@ func TestEngine_CBFundingNilBeforeCBRDespiteSwapRate(t *testing.T) {
 	}
 }
 
-// После 15:30 нога фьючерса в прогнозе замораживается на settlement VWAP:
-// послерасчётные сделки не должны тащить прогноз (нога ЦБ уже заморожена,
-// живой сессионный VWAP делает ноги несопоставимыми по времени).
-func TestEngine_PredictedFundingFrozenAfterSettlement(t *testing.T) {
+// Прогноз живёт только до 15:30. После заморозки ноги фьючерса он ничего не
+// предсказывает (обе ноги неподвижны), а нога ЦБ у нас с почти не торгуемого спота
+// и врёт: 27.07.2026 сайт с 15:30 показывал застывшие −0.117 при факте +0.0235.
+// Правильное поведение — пустая строка до публикации курса ЦБ, затем CBFunding.
+func TestEngine_PredictedFundingStopsAtSettlement(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
 	mskZone := settle.Location()
@@ -451,20 +464,143 @@ func TestEngine_PredictedFundingFrozenAfterSettlement(t *testing.T) {
 
 	// Predicted CB rate from spot TOM (in window) = 81.0.
 	e.Ingest(tomTick(source.SymbolUSDRubTOM, 81.0, 0, at(14, 0)))
-	// Session deals before 15:30: VWAP = 81.05 → frozen at settlement.
-	// d = 0.05 is INSIDE the deadband l1 = 0.081 → prediction must be exactly 0.
 	e.Ingest(tradeTick(source.SymbolUSDRUBF, 81.05, 10, at(11, 0)))
-	// Post-settlement deal at a wildly different price triggers the freeze and
-	// must NOT feed the prediction. If it leaked, the live session VWAP would be
-	// (81.05×10 + 90×100)/110 ≈ 89.19 → d ≈ 8.19 → capped 0.1215, not 0.
-	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.0, 100, at(15, 31)))
 
+	// До 15:30 прогноз есть: d = 0.05 внутри мёртвой зоны l1 = 0.081 → ровно 0.
 	snap := e.Snapshot()
 	if snap.USDRUBF.PredictedFunding == nil {
-		t.Fatal("PredictedFunding must be non-nil (CBR not published yet)")
+		t.Fatal("PredictedFunding must be non-nil before settlement")
 	}
 	if got := *snap.USDRUBF.PredictedFunding; got > 1e-9 || got < -1e-9 {
-		t.Errorf("PredictedFunding: want 0 (frozen at settle, inside deadband), got %.6f", got)
+		t.Errorf("PredictedFunding before 15:30: want 0 (inside deadband), got %.6f", got)
+	}
+
+	// Первая сделка после 15:30 замораживает ногу фьючерса — прогноз исчезает.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.0, 100, at(15, 31)))
+
+	snap = e.Snapshot()
+	if snap.USDRUBF.PredictedFunding != nil {
+		t.Errorf("PredictedFunding after settlement: want nil, got %.6f", *snap.USDRUBF.PredictedFunding)
+	}
+	// Курс ЦБ ещё не опубликован — точного фандинга тоже нет: строка пустая.
+	if snap.USDRUBF.CBFunding != nil {
+		t.Errorf("CBFunding: want nil before CBR publication, got %.6f", *snap.USDRUBF.CBFunding)
+	}
+}
+
+// После 15:30 VWAP на сайте показывает ЗАМОРОЖЕННУЮ ногу фьючерса: именно на ней
+// фиксируется сегодняшний фандинг, и вечерние сделки не должны её двигать.
+func TestEngine_VWAPFrozenAfterSettlement(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// Окно 10:00–15:30: VWAP = (80×10 + 82×30)/40 = 81.5.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, at(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, at(12, 0)))
+	// Вечерние сделки по 95 — в роллинговый VWAP попадут, на витрину не должны.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 95.0, 200, at(15, 31)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 95.0, 200, at(19, 0)))
+
+	snap := e.Snapshot()
+	const want = 81.5
+	if diff := snap.USDRUBF.VWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("VWAP after 15:30: want frozen %.4f, got %.6f", want, snap.USDRUBF.VWAP)
+	}
+	if snap.USDRUBF.SettlVWAP == nil || *snap.USDRUBF.SettlVWAP != want {
+		t.Errorf("SettlVWAP: want %.4f, got %v", want, snap.USDRUBF.SettlVWAP)
+	}
+}
+
+// Сделки чужого календарного дня, приписанные биржей к сегодняшней сессии
+// (выходные торги, опубликованные утренним клирингом понедельника), в цену окна
+// не входят. Живой случай 27.07.2026: 1377 таких сделок в окне тянули VWAP
+// USDRUBF на 0.0144 вниз, а объём для проверки полноты фида они дают.
+func TestEngine_BackdatedTradesExcludedFromWindowVWAP(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	// Сделки выходных: биржа доложила их в сессию в 06:14, цена — прошлой недели.
+	backdated := tradeTick(source.SymbolUSDRUBF, 70.0, 60, at(6, 14))
+	backdated.Backdated = true
+	e.Ingest(backdated)
+	// Сегодняшнее окно: VWAP = (80×10 + 82×30)/40 = 81.5.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, at(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, at(12, 0)))
+	// VOLTODAY у биржи считает и сделки выходных: 60 + 40 = 100. Полнота фида
+	// должна сойтись, иначе движок свалится на пустой ΔVOLTODAY-фолбэк.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, at(12, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.0, 5, at(15, 31)))
+
+	snap := e.Snapshot()
+	const want = 81.5
+	if snap.USDRUBF.SettlVWAP == nil {
+		t.Fatal("SettlVWAP must be frozen at 15:30")
+	}
+	if diff := *snap.USDRUBF.SettlVWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("SettlVWAP: want %.4f (без сделок чужих дней), got %.6f", want, *snap.USDRUBF.SettlVWAP)
+	}
+}
+
+// Границы K1/K2 биржа масштабирует от РАСЧЁТНОЙ ЦЕНЫ предыдущего вечернего
+// клиринга (PREVSETTLEPRICE), а не от курса ЦБ. Регресс на факт 27.07.2026:
+// кап EURRUBF = 0.13334 = 0.0015 × 88.89 (PREVSETTLE); от нового курса 88.7602
+// получалось 0.13314 — ровно тот зазор, который мы видели в уведомлении.
+func TestEngine_CBFundingLimitsFromPrevSettlePrice(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	e.Ingest(prevSettleTick(source.SymbolEURRUBF, 88.89, at(10, 0)))
+	// Нога фьючерса 89.01625 — выше курса ЦБ настолько, что фандинг упирается в кап.
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 89.01625, 100, at(11, 0)))
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 89.0, 5, at(15, 31)))
+	e.Ingest(cbrNewTick(source.SymbolEURRubOfficial, 88.7602, at(17, 7)))
+
+	snap := e.Snapshot()
+	if snap.EURRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	const want = 0.0015 * 88.89 // 0.133335 → биржа публикует 0.13334
+	if diff := *snap.EURRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.8f (кап от расчётной цены), got %.8f", want, *snap.EURRUBF.CBFunding)
+	}
+}
+
+// Вечерний клиринг (19:00) перезаписывает PREVSETTLEPRICE сегодняшней ценой —
+// сегодняшний фандинг от этого меняться не должен: база заморожена на 15:30.
+func TestEngine_FundingBaseFrozenAgainstEveningClearing(t *testing.T) {
+	e := funding.NewEngine()
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
+	}
+
+	e.Ingest(prevSettleTick(source.SymbolEURRUBF, 88.89, at(10, 0)))
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 89.01625, 100, at(11, 0)))
+	e.Ingest(tradeTick(source.SymbolEURRUBF, 89.0, 5, at(15, 31)))
+	e.Ingest(cbrNewTick(source.SymbolEURRubOfficial, 88.7602, at(17, 7)))
+	// Вечерний клиринг: расчётная цена стала сегодняшней.
+	e.Ingest(prevSettleTick(source.SymbolEURRUBF, 88.76, at(19, 5)))
+
+	snap := e.Snapshot()
+	if snap.EURRUBF.CBFunding == nil {
+		t.Fatal("CBFunding must be non-nil")
+	}
+	const want = 0.0015 * 88.89
+	if diff := *snap.EURRUBF.CBFunding - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CBFunding: want %.8f (база заморожена на 15:30), got %.8f", want, *snap.EURRUBF.CBFunding)
 	}
 }
 

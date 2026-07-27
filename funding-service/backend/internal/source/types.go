@@ -16,6 +16,7 @@ const (
 	KindSettlePrice // official MOEX settlement price published after 15:30 MSK
 	KindWaprice     // session VWAP published by MOEX ISS (WAPRICE field)
 	KindTrade       // single executed deal from MOEX ISS trades.json (Volume = QUANTITY of that trade)
+	KindPrevSettle  // расчётная цена предыдущего вечернего клиринга (PREVSETTLEPRICE) — база границ K1/K2
 )
 
 // Symbol constants for all tracked instruments.
@@ -42,4 +43,12 @@ type Tick struct {
 	Kind      TickKind
 	Timestamp time.Time
 	Source    string
+
+	// Backdated marks a KindTrade whose deal happened on ANOTHER calendar day but
+	// which the exchange booked into the current trading session (TRADEDATE !=
+	// TRADE_SESSION_DATE): weekend deals published at the Monday morning technical
+	// session, previous-day evening deals, and the like. Their volume counts toward
+	// VOLTODAY, but their price belongs to another day and must stay out of every
+	// price accumulator.
+	Backdated bool
 }

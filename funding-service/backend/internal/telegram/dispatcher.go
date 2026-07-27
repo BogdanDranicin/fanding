@@ -163,19 +163,22 @@ func indicatorEmoji(pct float64) string {
 	}
 }
 
-// fundingLine строит одну строку вида «🟢USDRUBF: +0.150% (+0.1173)».
+// fundingLine строит одну строку вида «🟢USDRUBF: +0.11730».
+// Процент из сообщения убран (18+ 27.07): в ленте нужна сама ставка, и ровно в том
+// виде, в каком её публикует биржа (SWAPRATE, 5 знаков) — чтобы сверять один в один.
+// Процент по-прежнему считается: по нему выбирается цветовой индикатор.
 // Пустая строка, если фандинг ещё не посчитан или нет базы для процента.
 func fundingLine(sym string, fund *float64, rate float64) string {
 	if fund == nil || rate <= 0 {
 		return ""
 	}
 	pct := *fund / rate * 100
-	return fmt.Sprintf("%s%s: %+.3f%% (%+.4f)\n", indicatorEmoji(pct), sym, pct, *fund)
+	return fmt.Sprintf("%s%s: %+.5f\n", indicatorEmoji(pct), sym, *fund)
 }
 
 // formatCBRAlert строит сообщение о зафиксированном фандинге после публикации ЦБ.
 // Курсы — из PublicationInfo (ответ канала-победителя, без гонки со снапшотом);
-// фандинги только USD/EUR — наш CBFunding (CNY убран 18.07). Проценты — от нового курса.
+// фандинги только USD/EUR — наш CBFunding (CNY убран 18.07).
 func formatCBRAlert(pubTime time.Time, info cbr.PublicationInfo, snap funding.FundingSnapshot) string {
 	msk := time.FixedZone("MSK", 3*60*60)
 

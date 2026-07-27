@@ -130,6 +130,8 @@ type Engine struct {
 	forexRates       map[string]float64
 	eurUSDFix        float64 // EUR/USD «по состоянию на 15:30 МСК» — фиксинг ЕЦБ для расчёта курса EUR ЦБ (методика с 08.06.2026)
 	eurUSDFixDate    string  // MSK-дата, за которую накоплен eurUSDFix (для суточного сброса)
+	prevSettle          map[string]float64 // PREVSETTLEPRICE ISS: расчётная цена предыдущего вечернего клиринга
+	prevSettleAtSettl   map[string]float64 // та же цена, замороженная на 15:30 (вечерний клиринг её перезапишет)
 	officialRate        map[string]float64
 	officialRateDate    map[string]string  // MSK date when officialRate was last published
 	officialRateAtSettl map[string]float64 // курс ЦБ, зафиксированный при settlement (15:30)
@@ -167,6 +169,8 @@ func NewEngine() *Engine {
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
 		forexRates:       make(map[string]float64),
+		prevSettle:          make(map[string]float64),
+		prevSettleAtSettl:   make(map[string]float64),
 		officialRate:        make(map[string]float64),
 		officialRateDate:    make(map[string]string),
 		officialRateAtSettl: make(map[string]float64),
@@ -234,6 +238,8 @@ func (e *Engine) Ingest(tick source.Tick) {
 			e.lastPrice[tick.Symbol] = tick.Price
 		case source.KindSwapRate:
 			e.swapRate[tick.Symbol] = tick.Price
+		case source.KindPrevSettle:
+			e.prevSettle[tick.Symbol] = tick.Price
 		case source.KindSettlePrice:
 			// IGNORED as a settlement source. ISS puts the CURRENT price into
 			// SETTLEPRICE after a restart (observed live 14.07: SETTLEPRICE 78.01 vs
@@ -299,6 +305,7 @@ func (e *Engine) ingestSessionTick(tick source.Tick) {
 		if acc != nil {
 			e.settlVWAP[sym] = nil
 			delete(e.officialRateAtSettl, sym)
+			delete(e.prevSettleAtSettl, sym)
 			if e.settlDate == acc.date {
 				e.settlDate = ""
 			}
@@ -358,6 +365,16 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 	// rolling display VWAP, but only 10:00–15:30 deals enter the funding-leg VWAP —
 	// the backfill replays the whole day including the 07:00 morning session.
 	acc.dayV += tick.Volume
+
+	// Сделка чужого дня, приписанная биржей к сегодняшней сессии (выходные, вечёрка
+	// прошлого дня): её объём VOLTODAY считает — поэтому dayV выше уже прибавлен, —
+	// но цена относится к другому дню и в средневзвешенную не входит. Биржа считает
+	// так же: 27.07.2026 её минутные свечи покрывали ровно объём БЕЗ таких сделок,
+	// а с ними наш VWAP окна уезжал на 0.0144 вниз (78.10417 против биржевых 78.11873).
+	if tick.Backdated {
+		return
+	}
+
 	if inFundingWindow(mskTime) {
 		acc.sumPV += tick.Price * tick.Volume
 		acc.sumV += tick.Volume
@@ -405,6 +422,12 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	e.settlVWAP[sym] = ptr(v)
 	e.settlDate = mskDate
 	e.freezeOfficialRateAtSettl(sym)
+	// Расчётную цену предыдущего клиринга тоже фиксируем: вечерний клиринг (19:00)
+	// перезапишет PREVSETTLEPRICE сегодняшней ценой, а границы K1/K2 сегодняшнего
+	// фандинга масштабируются от вчерашней — иначе значение поехало бы вечером.
+	if base, ok := e.prevSettle[sym]; ok && base > 0 {
+		e.prevSettleAtSettl[sym] = base
+	}
 	e.tryFireSettlSignal(mskDate)
 }
 
@@ -500,6 +523,26 @@ func (e *Engine) effectiveRate(sym, officialSym string, now time.Time) float64 {
 		return e.rateEffectiveToday[officialSym]
 	}
 	return 0
+}
+
+// fundingBase возвращает «ЦенаСпот» формулы MOEX — базу границ L1=K1·base и
+// L2=K2·base. Биржа берёт РАСЧЁТНУЮ ЦЕНУ предыдущего вечернего клиринга
+// (PREVSETTLEPRICE у ISS); вечерний клиринг ставит её равной опубликованному в тот
+// день курсу ЦБ, округлённому до шага цены (0.01), поэтому «вчерашний курс ЦБ» —
+// корректный, но чуть менее точный фолбэк. Сверено с фактом:
+//   14.07.2026 кап USDRUBF = −0.11493 = −0.0015 × 76.62 (PREVSETTLE), тик-в-тик;
+//   27.07.2026 кап EURRUBF =  0.13334 =  0.0015 × 88.89 (PREVSETTLE), тик-в-тик,
+//     тогда как от нового курса 88.7602 получалось 0.13314 — это и был наш зазор.
+// Приоритет: цена, замороженная на 15:30 → живая PREVSETTLEPRICE → действующий курс
+// ЦБ. 0 = база неизвестна. Must be called while holding e.mu.
+func (e *Engine) fundingBase(sym, officialSym string, now time.Time) float64 {
+	if base := e.prevSettleAtSettl[sym]; base > 0 {
+		return base
+	}
+	if base := e.prevSettle[sym]; base > 0 {
+		return base
+	}
+	return e.effectiveRate(sym, officialSym, now)
 }
 
 // freezeOfficialRateAtSettl сохраняет текущий курс ЦБ для sym на момент settlement.
@@ -602,7 +645,13 @@ func (e *Engine) Snapshot() FundingSnapshot {
 func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate float64, now time.Time) InstrumentFunding {
 	// Rolling VWAP (6-hour window) for live display and ForexFunding:
 	// exact trade-based feed preferred, ΔVOLTODAY approximation as fallback.
+	// После 15:30 показываем ЗАМОРОЖЕННУЮ ногу фьючерса (settlement VWAP): именно на
+	// ней зафиксирован сегодняшний фандинг, и «живое» число, продолжающее ползти
+	// вечером, только вводило в заблуждение при сверке с биржей.
 	vwap, hasVWAP := e.displayVWAP(sym, now)
+	if settl := e.settlVWAP[sym]; settl != nil {
+		vwap, hasVWAP = *settl, true
+	}
 	last := e.lastPrice[sym]
 
 	inf := InstrumentFunding{
@@ -647,9 +696,9 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 			// но границы K1/K2 MOEX масштабирует от курса, ДЕЙСТВУЮЩЕГО сегодня.
 			// Сверено с фактом 14.07: SWAPRATE = −0.11493 = −0.0015 × 76.6213
 			// (вчерашний курс), а границы от нового 77.4912 давали бы −0.11624.
-			base := e.effectiveRate(sym, officialSym, now)
+			base := e.fundingBase(sym, officialSym, now)
 			if base <= 0 {
-				base = newRate // курс на сегодня неизвестен (нет засева) — деградация к новому
+				base = newRate // база неизвестна (нет ни PREVSETTLE, ни засева) — деградация к новому
 			}
 			d := *settlPtr - newRate
 			l1 := 0.001 * base
@@ -700,23 +749,18 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	// the prediction converges to the actual CBFunding:
 	//   d = sessionVWAP(futures) − predictedCBRate(spot TOM VWAP)
 	// Deadband/cap are scaled by the predicted rate (K1=0.1%, K2=0.15%), matching the MOEX formula.
-	// After 15:30 the futures leg is FROZEN at the settlement VWAP: the live session
-	// accumulator keeps ingesting post-settlement trades, while the CB leg froze at 15:30 —
-	// mixing them made the prediction drift away from the value funding is actually fixed on.
-	// Hidden once CBFunding takes over (settlement done + CBR published today).
-	if inf.PredictedCBRate != nil && !(settlDone && cbPublishedToday) {
-		var futVWAP float64
-		hasFut := false
-		if settlDone {
-			futVWAP, hasFut = *settlPtr, true
-		} else {
-			futVWAP, hasFut = e.bestSessionVWAP(sym)
-		}
+	// Прогноз живёт ТОЛЬКО до 15:30. После заморозки ноги фьючерса он больше ничего не
+	// предсказывает — обе ноги неподвижны, а нога ЦБ у нас взята с почти не торгуемого
+	// спота USDRUB_TOM и врёт (27.07.2026: прогноз −0.117 против факта +0.0235). Держать
+	// на сайте застывшее неверное число хуже, чем пустую строку: до публикации курса ЦБ
+	// точного ответа не существует, а сразу после неё появляется CBFunding.
+	if inf.PredictedCBRate != nil && !settlDone {
+		futVWAP, hasFut := e.bestSessionVWAP(sym)
 		if hasFut {
 			predRate := *inf.PredictedCBRate
-			// Границы — от действующего сегодня курса ЦБ (как в самой формуле MOEX);
-			// прогнозный курс — лишь фолбэк, пока действующий неизвестен.
-			base := e.effectiveRate(sym, officialSym, now)
+			// Границы — от расчётной цены предыдущего клиринга (как в самой формуле
+			// MOEX); прогнозный курс — лишь фолбэк, пока база неизвестна.
+			base := e.fundingBase(sym, officialSym, now)
 			if base <= 0 {
 				base = predRate
 			}
@@ -734,6 +778,9 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 // MOEXFunding comes from MOEX ISS swap_rate; no ForexFunding or CBFunding for CNYRUBF.
 func (e *Engine) buildCNYFunding(now time.Time) InstrumentFunding {
 	vwap, _ := e.displayVWAP(source.SymbolCNYRUBF, now)
+	if settl := e.settlVWAP[source.SymbolCNYRUBF]; settl != nil {
+		vwap = *settl // после 15:30 — как у USD/EUR: замороженная нога фьючерса
+	}
 	last := e.lastPrice[source.SymbolCNYRUBF]
 
 	inf := InstrumentFunding{

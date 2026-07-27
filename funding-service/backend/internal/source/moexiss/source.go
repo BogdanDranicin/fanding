@@ -184,6 +184,9 @@ func (s *Source) pollSymbol(ctx context.Context, symbol string, ch chan<- source
 
 			if resp.Securities != nil {
 				s.updateSpec(symbol, resp.Securities)
+				// PREVSETTLEPRICE — расчётная цена предыдущего вечернего клиринга.
+				// Именно от неё биржа масштабирует границы K1/K2 фандинга (см. движок).
+				s.maybeEmit(ch, symbol, "PREVSETTLEPRICE", source.KindPrevSettle, resp.Securities, vol, ts)
 			}
 
 			s.maybeEmit(ch, symbol, "LAST", source.KindLastPrice, resp.MarketData, vol, ts)
@@ -249,6 +252,7 @@ func (s *Source) pollTrades(ctx context.Context, symbol string, ch chan<- source
 					Kind:      source.KindTrade,
 					Timestamp: tr.Timestamp,
 					Source:    s.Name(),
+					Backdated: tr.Backdated,
 				}:
 				case <-ctx.Done():
 					return

@@ -193,6 +193,48 @@ func TestFetchTradesSince_ParsesAndPaginates(t *testing.T) {
 	}
 }
 
+// Сделки выходных, доложенные биржей в сессию понедельника: TRADEDATE 25–26.07 при
+// TRADE_SESSION_DATE 27.07, SYSTIME — момент утреннего клиринга (06:14). Такие сделки
+// метятся Backdated и получают время SYSTIME, иначе они попадают в окно 10:00–15:30
+// (их TRADETIME — 09:59–18:59 чужого дня) и уводят VWAP: 27.07.2026 наш settl_vwap
+// USDRUBF был бы 78.10417 вместо биржевых 78.11873.
+func TestFetchTradesSince_WeekendDealsBackdated(t *testing.T) {
+	const page = `{"trades": {"columns": ["TRADENO","BOARDNAME","SECID","TRADEDATE","TRADETIME","PRICE","QUANTITY","SYSTIME","OFFMARKETDEAL","TRADE_SESSION_DATE"], "data": [
+		[101, "RFUD", "USDRUBF", "2026-07-25", "11:28:10", 77.90, 435, "2026-07-27 06:14:06", 0, "2026-07-27"],
+		[102, "RFUD", "USDRUBF", "2026-07-27", "11:29:00", 78.10, 5, "2026-07-27 11:29:01", 0, "2026-07-27"]
+	]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("tradeno") == "0" {
+			_, _ = w.Write([]byte(page))
+			return
+		}
+		_, _ = w.Write([]byte(tradesPage(nil)))
+	}))
+	defer srv.Close()
+
+	trades, err := moexiss.NewClientWithBaseURL(srv.URL).
+		FetchTradesSince(context.Background(), "futures", "forts", "USDRUBF", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(trades) != 2 {
+		t.Fatalf("want 2 trades, got %d", len(trades))
+	}
+	if !trades[0].Backdated {
+		t.Error("weekend deal (TRADEDATE != TRADE_SESSION_DATE) must be flagged Backdated")
+	}
+	if got := trades[0].Timestamp.Format("2006-01-02 15:04:05"); got != "2026-07-27 06:14:06" {
+		t.Errorf("backdated timestamp: want SYSTIME 2026-07-27 06:14:06, got %s", got)
+	}
+	if trades[1].Backdated {
+		t.Error("today's deal must not be flagged Backdated")
+	}
+	if got := trades[1].Timestamp.Format("2006-01-02 15:04:05"); got != "2026-07-27 11:29:00" {
+		t.Errorf("normal timestamp: want TRADEDATE+TRADETIME, got %s", got)
+	}
+}
+
 func TestFetchTradesSince_HugeTradeNoExact(t *testing.T) {
 	// Real FORTS TRADENO is a ~19-digit composite (~2e18) that overflows float64's
 	// 53-bit mantissa. Decoding it through float64 rounds it (…177 -> …176), which

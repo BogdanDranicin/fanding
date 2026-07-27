@@ -40,13 +40,19 @@ func TestFormatCBRAlert_withRates(t *testing.T) {
 	for _, want := range []string{
 		"Фандинг зафиксирован",
 		"17:56:31",
-		"🔴USDRUBF: -0.149% (-0.1169)",
-		"🟢EURRUBF: +0.149% (+0.1334)",
+		// Только числовое значение ставки, 5 знаков — как публикует биржа (SWAPRATE).
+		// Индикатор по-прежнему выбирается по проценту от нового курса ЦБ.
+		"🔴USDRUBF: -0.11693",
+		"🟢EURRUBF: +0.13337",
 		"Курс ЦБ на 17.07.2026: USD 78.32 / EUR 89.33 / CNY 11.51",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
+	}
+	// Процент из строк фандинга убран (27.07).
+	if strings.Contains(text, "%") {
+		t.Errorf("funding lines must carry no percentage, got:\n%s", text)
 	}
 	// CNY фандинг убран из уведомлений (18.07) — строки индикатора по юаню быть не должно.
 	if strings.Contains(text, "CNYRUBF") {

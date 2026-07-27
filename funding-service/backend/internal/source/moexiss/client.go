@@ -169,6 +169,9 @@ type Trade struct {
 	Quantity  float64
 	Timestamp time.Time // trade moment (TRADEDATE+TRADETIME MSK, falls back to SYSTIME)
 	OffMarket bool      // OFFMARKETDEAL != 0 — адресная сделка, исключается из VWAP
+	// Backdated: TRADEDATE не совпадает с TRADE_SESSION_DATE — сделка чужого
+	// календарного дня, которую биржа приписала к текущей сессии (см. Tick.Backdated).
+	Backdated bool
 }
 
 type tradesResponse struct {
@@ -290,6 +293,15 @@ func parseTrades(cd columnData) ([]Trade, error) {
 			t.OffMarket = true
 		}
 		t.Timestamp = parseTradeTime(cell("TRADEDATE"), cell("TRADETIME"), cell("SYSTIME"))
+		t.Backdated = isBackdated(cell("TRADEDATE"), cell("TRADE_SESSION_DATE"))
+		if t.Backdated {
+			// Момент сделки принадлежит другому дню, а в поток она попала в момент
+			// SYSTIME (утренний технический клиринг текущей сессии). Метим её этим
+			// моментом: так суточные аккумуляторы движка не сбрасываются чужой датой.
+			if ts := parseMSK(cell("SYSTIME")); !ts.IsZero() {
+				t.Timestamp = ts
+			}
+		}
 		trades = append(trades, t)
 	}
 	return trades, nil
@@ -337,12 +349,38 @@ func parseTradeTime(dateV, timeV, sysV interface{}) time.Time {
 			}
 		}
 	}
-	if s, ok := sysV.(string); ok {
-		if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, mskZone); err == nil {
-			return t
-		}
+	return parseMSK(sysV)
+}
+
+// parseMSK parses an ISS "2006-01-02 15:04:05" MSK timestamp cell; zero time on failure.
+func parseMSK(v interface{}) time.Time {
+	s, ok := v.(string)
+	if !ok {
+		return time.Time{}
 	}
-	return time.Time{}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.FixedZone("MSK", 3*60*60))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// isBackdated reports whether the deal was struck on a different calendar day than
+// the session it is reported in. Live example (27.07.2026, USDRUBF): 1689 weekend
+// deals with TRADEDATE 25–26.07 and TRADETIME 09:59–18:59 arrived at SYSTIME 06:14
+// under TRADE_SESSION_DATE=27.07. Counting them as Monday deals dragged the
+// 10:00–15:30 VWAP down by 0.0144 (78.10417 instead of 78.11873 — the exchange's
+// own minute candles cover exactly the 100673 lots that remain after dropping them).
+func isBackdated(dateV, sessionV interface{}) bool {
+	d, ok := dateV.(string)
+	if !ok || d == "" {
+		return false
+	}
+	s, ok := sessionV.(string)
+	if !ok || s == "" {
+		return false
+	}
+	return d != s
 }
 
 // parseColumnData zips columns and data[0] into a map.
