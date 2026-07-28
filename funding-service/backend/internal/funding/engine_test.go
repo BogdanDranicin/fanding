@@ -1143,3 +1143,69 @@ func TestEngine_EURRUBFIndependentFromUSDRUBF(t *testing.T) {
 	}
 }
 
+// --- задержка публичного фида ISS (~15 минут) и заморозка ноги фьючерса ---
+
+// mskDay возвращает момент сегодняшнего дня по МСК: сценарии заморозки должны
+// жить в той же дате, что и now, — иначе суточные гейты движка их отбросят.
+func mskDay(h, m int) time.Time {
+	settl := todaySettle()
+	return time.Date(settl.Year(), settl.Month(), settl.Day(), h, m, 0, 0, time.FixedZone("MSK", 3*60*60))
+}
+
+// Данные ISS запаздывают ~15 минут, и тик marketdata с рыночным временем 15:30
+// приходит РАНЬШЕ, чем поток сделок довозит хвост окна. Морозить ногу по нему
+// нельзя: 28.07.2026 так получилось окно, обрезанное на ~15:15 — settl_vwap USD
+// 78.55228 против биржевых 78.55453, фандинг −0.06770 вместо −0.06545.
+func TestEngine_SettlementWaitsForDelayedTradeFeed(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 78.02, mskDay(9, 0)))
+
+	// Поток сделок пока довёз окно только до 15:15.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.50, 200, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.50, 100, mskDay(15, 15)))
+
+	// А marketdata уже перешагнул 15:30 своим рыночным временем.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.50, 600, mskDay(15, 31)))
+	if got := e.Snapshot().USDRUBF.SettlVWAP; got != nil {
+		t.Fatalf("нога фьючерса заморожена до того, как поток сделок дошёл до 15:30: %.5f", *got)
+	}
+
+	// Хвост окна приезжает следом — он обязан войти в ногу.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 79.30, 300, mskDay(15, 29)))
+	// Первая сделка за границей окна: сама в ногу не входит, но разрешает заморозку.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.00, 100, mskDay(15, 32)))
+
+	got := e.Snapshot().USDRUBF.SettlVWAP
+	if got == nil {
+		t.Fatal("нога фьючерса не заморожена после того, как поток сделок перешагнул 15:30")
+	}
+	want := (78.50*300 + 79.30*300) / 600
+	if diff := *got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("settlVWAP = %.6f, ожидалось полное окно 10:00–15:30 = %.6f", *got, want)
+	}
+}
+
+// Если поток сделок застрял и границу 15:30 так и не перешагнул, ждать вечно нельзя:
+// после отсрочки движок морозит ногу тем, что есть. Фандинг нужен к публикации курса
+// ЦБ (после 17:30 МСК), так что запас времени всё равно остаётся большой.
+func TestEngine_SettlementFreezesAfterGraceWhenTradeFeedStalls(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 78.02, mskDay(9, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 78.50, 200, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 79.30, 200, mskDay(15, 15)))
+
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.90, 400, mskDay(15, 31)))
+	if got := e.Snapshot().USDRUBF.SettlVWAP; got != nil {
+		t.Fatalf("заморозка раньше отсрочки: %.5f", *got)
+	}
+
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.91, 400, mskDay(15, 46)))
+	got := e.Snapshot().USDRUBF.SettlVWAP
+	if got == nil {
+		t.Fatal("нога фьючерса не заморожена даже после истечения отсрочки")
+	}
+	want := (78.50*200 + 79.30*200) / 400
+	if diff := *got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("settlVWAP = %.6f, ожидалось %.6f", *got, want)
+	}
+}

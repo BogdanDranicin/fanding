@@ -36,6 +36,21 @@ func inFundingWindow(t time.Time) bool {
 	return h == 15 && m < 30
 }
 
+// atOrAfterSettl reports whether t is at or past the 15:30 MSK window close.
+func atOrAfterSettl(t time.Time) bool {
+	h, m, _ := t.In(msk).Clock()
+	return h > 15 || (h == 15 && m >= 30)
+}
+
+// afterSettlGrace — истёк ли крайний срок ожидания, до которого движок держит ногу
+// фьючерса незамороженной, пока поток сделок не перешагнул 15:30 своим собственным
+// временем. После него замораживаем тем, что есть: фандинг всё равно нужен только
+// к публикации курса ЦБ (после 17:30 МСК), запас огромный.
+func afterSettlGrace(t time.Time) bool {
+	h, m, _ := t.In(msk).Clock()
+	return h > 15 || (h == 15 && m >= 45)
+}
+
 // FundingSnapshot holds the latest computed values for all tracked instruments.
 type FundingSnapshot struct {
 	Timestamp    time.Time
@@ -94,6 +109,10 @@ type tradeAcc struct {
 	dayV           float64 // Σ(quantity) over the whole day (feed-completeness check)
 	date           string  // MSK date "YYYY-MM-DD" of the current accumulation
 	startedPre1530 bool    // first trade of the day was before 15:30 MSK (backfill covers the session start)
+	// sawPost1530 — фид сделок сам перешагнул 15:30: пришла сделка со временем
+	// ≥15:30. Только это доказывает, что окно 10:00–15:30 довезено полностью.
+	// Данные ISS запаздывают ~15 минут, поэтому «настенные» 15:30 ничего не значат.
+	sawPost1530 bool
 }
 
 func (a *tradeAcc) vwap() (float64, bool) {
@@ -357,6 +376,14 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 		e.tradeAccs[sym] = acc
 	}
 
+	// Сделка со временем ≥15:30 — сигнал, что поток сделок довёз окно до конца.
+	// Ставим флаг ДО заморозки: именно эта сделка её и разрешает, а в окно она
+	// не попадёт (inFundingWindow ниже). Сделки чужих дней помечены временем
+	// утреннего клиринга — доказательством перехода границы они быть не могут.
+	if !tick.Backdated && atOrAfterSettl(mskTime) {
+		acc.sawPost1530 = true
+	}
+
 	// Freeze the settlement VWAP before adding this trade: a post-15:30 trade
 	// must not leak into the 15:30 session snapshot.
 	e.maybeFreezeSettl(sym, mskTime)
@@ -387,6 +414,9 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 // mid-day restart thanks to the backfill); the ΔVOLTODAY accumulator is the
 // fallback and also wins when the trade feed went stale mid-session (its own
 // coverage would then be truncated). KindSettlePrice ticks can override later.
+//
+// mskTime — РЫНОЧНОЕ время тика (момент, к которому относятся данные), а не время
+// ответа сервера ISS: публичный фид запаздывает ~15 минут (см. moexiss.parseTime).
 // Must be called while holding e.mu.
 func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	if e.settlVWAP[sym] != nil {
@@ -399,9 +429,10 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	mskDate := mskTime.Format("2006-01-02")
 
 	var tradeV float64
-	tradeOK := false
+	tradeOK, tradeCrossed := false, false
 	if tacc := e.tradeAccs[sym]; tacc != nil && tacc.date == mskDate && tacc.startedPre1530 {
 		tradeV, tradeOK = tacc.vwap()
+		tradeCrossed = tacc.sawPost1530
 	}
 	var sessV float64
 	sessOK := false
@@ -409,13 +440,24 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 		sessV, sessOK = acc.vwap()
 	}
 
+	// Ключевое условие: замораживать ногу фьючерса можно, только когда САМ поток
+	// сделок дошёл до 15:30. Публичный фид ISS запаздывает ~15 минут, и тик
+	// marketdata с рыночным временем 15:30 приходит на 15 минут раньше последних
+	// сделок окна. Раньше движок морозил по нему — и получал окно, обрезанное на
+	// ~15:15 (28.07.2026: USD −0.00225, EUR +0.01305 против биржи).
+	// Исключение — истёкшая отсрочка: если сделок так и нет (мёртвый эндпоинт) или
+	// поток застрял, работаем тем, что есть, лишь бы не остаться без фандинга.
+	graceOver := afterSettlGrace(mskTime)
+	tradeReady := tradeOK && (tradeCrossed || (graceOver && e.tradeFeedFresh(sym)))
+
 	var v float64
 	switch {
-	case tradeOK && (e.tradeFeedFresh(sym) || !sessOK):
+	case tradeReady && (e.tradeFeedFresh(sym) || !sessOK):
 		v = tradeV
-	case sessOK:
+	case sessOK && (tradeReady || graceOver || !tradeOK):
 		v = sessV
 	default:
+		// Поток сделок ещё догоняет окно — ждём следующего тика.
 		return
 	}
 

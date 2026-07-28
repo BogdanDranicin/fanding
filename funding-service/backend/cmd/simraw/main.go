@@ -10,7 +10,14 @@
 //
 // Запуск:
 //
-//	go run ./cmd/simraw <trades.json> <symbol> <prev_settle> <cb_rate_new> <swaprate_факт>
+//	go run ./cmd/simraw <trades.json> <symbol> <prev_settle> <cb_rate_new> <swaprate_факт> [опережение_marketdata_сек]
+//
+// Последний (необязательный) аргумент моделирует ГЛАВНУЮ граблю прод-пути: поток
+// marketdata бежит впереди потока сделок. Публичный фид ISS отдаёт данные с
+// задержкой ~15 минут, и пока тик marketdata штамповался временем ответа сервера
+// (SYSTIME), он опережал сделки ровно на эту задержку — движок морозил ногу
+// фьючерса окном, обрезанным на ~15:15 (28.07.2026: USD −0.06770 вместо −0.06545).
+// Прогон с опережением 900 секунд обязан давать тот же ответ, что и без него.
 package main
 
 import (
@@ -32,12 +39,16 @@ type table struct {
 }
 
 func main() {
-	if len(os.Args) != 6 {
-		fmt.Println("usage: simraw <trades.json> <symbol> <prev_settle> <cb_rate_new> <swaprate>")
+	if len(os.Args) != 6 && len(os.Args) != 7 {
+		fmt.Println("usage: simraw <trades.json> <symbol> <prev_settle> <cb_rate_new> <swaprate> [marketdata_lead_sec]")
 		os.Exit(2)
 	}
 	path, sym := os.Args[1], os.Args[2]
 	prevSettle, cbNew, swap := mustF(os.Args[3]), mustF(os.Args[4]), mustF(os.Args[5])
+	var mdLead time.Duration
+	if len(os.Args) == 7 {
+		mdLead = time.Duration(mustF(os.Args[6])) * time.Second
+	}
 
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -65,6 +76,7 @@ func main() {
 
 	var backdated, used int
 	var lastTS time.Time
+	var dayVol float64
 	for _, row := range t.Data {
 		cell := func(name string) interface{} { return row[idx[name]] }
 		price, _ := cell("PRICE").(float64)
@@ -90,6 +102,15 @@ func main() {
 		}
 		ts := at(today, clock)
 		lastTS = ts
+
+		// Тик marketdata, опережающий поток сделок: VOLTODAY уже включает эту сделку,
+		// а сама она движку ещё не приехала — ровно то, что делает боевой фид.
+		if mdLead > 0 {
+			dayVol += qty
+			eng.Ingest(source.Tick{Symbol: sym, Price: price, Volume: dayVol,
+				Kind: source.KindLastPrice, Timestamp: ts.Add(mdLead)})
+		}
+
 		eng.Ingest(source.Tick{Symbol: sym, Price: price, Volume: qty,
 			Kind: source.KindTrade, Timestamp: ts, Backdated: isBack})
 	}

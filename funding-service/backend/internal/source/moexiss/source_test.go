@@ -324,3 +324,108 @@ func TestSource_DoubleSubscribeReturnsError(t *testing.T) {
 		t.Error("expected error on second Subscribe call")
 	}
 }
+
+// Публичный фид ISS запаздывает ~15 минут: SYSTIME — это «сейчас» на сервере биржи,
+// а содержимое строки относится к UPDATETIME. Замер 28.07.2026 (USDRUBF):
+// SYSTIME 23:44:44 при UPDATETIME 23:29:44. Тик обязан нести РЫНОЧНОЕ время: по нему
+// движок решает, попал ли он в окно 10:00–15:30 и пора ли морозить ногу фьючерса.
+func TestSource_TickTimestampIsMarketTimeNotSystime(t *testing.T) {
+	const body = `{
+  "marketdata": {
+    "columns": ["SECID","LAST","BID","OFFER","VOLTODAY","SYSTIME","TIME","UPDATETIME"],
+    "data":    [["USDRUBF", 78.55, 78.54, 78.56, 1000, "2026-07-28 15:45:12", "15:29:58", "15:30:04"]]
+  }
+}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv.URL)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRUBF})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	tick, ok := <-ch
+	if !ok {
+		t.Fatal("no tick delivered")
+	}
+	msk := time.FixedZone("MSK", 3*60*60)
+	want := time.Date(2026, 7, 28, 15, 30, 4, 0, msk)
+	if !tick.Timestamp.Equal(want) {
+		t.Errorf("метка тика = %s, ожидалось рыночное время UPDATETIME %s (не SYSTIME 15:45:12)",
+			tick.Timestamp.In(msk).Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+// Без UPDATETIME/TIME остаётся единственный ориентир — SYSTIME (так выглядят
+// исторические фикстуры и урезанные ответы ISS).
+func TestSource_TickTimestampFallsBackToSystime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, issResponse("USDRUBF", 81.91, 81.90, 81.95))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv.URL)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRUBF})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	tick, ok := <-ch
+	if !ok {
+		t.Fatal("no tick delivered")
+	}
+	msk := time.FixedZone("MSK", 3*60*60)
+	want := time.Date(2024, 1, 15, 10, 30, 0, 0, msk)
+	if !tick.Timestamp.Equal(want) {
+		t.Errorf("метка тика = %s, ожидался SYSTIME %s", tick.Timestamp.In(msk), want)
+	}
+}
+
+// Полуночный перевал: SYSTIME уже за полночь, а UPDATETIME — вечер прошедшей сессии.
+// Дату берём из SYSTIME, поэтому метка обязана уехать на день назад, а не вперёд.
+func TestSource_TickTimestampHandlesMidnightRollover(t *testing.T) {
+	const body = `{
+  "marketdata": {
+    "columns": ["SECID","LAST","BID","OFFER","VOLTODAY","SYSTIME","UPDATETIME"],
+    "data":    [["USDRUBF", 78.55, 78.54, 78.56, 1000, "2026-07-29 00:05:10", "23:49:58"]]
+  }
+}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv.URL)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRUBF})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	tick, ok := <-ch
+	if !ok {
+		t.Fatal("no tick delivered")
+	}
+	msk := time.FixedZone("MSK", 3*60*60)
+	want := time.Date(2026, 7, 28, 23, 49, 58, 0, msk)
+	if !tick.Timestamp.Equal(want) {
+		t.Errorf("метка тика = %s, ожидался вечер предыдущего дня %s", tick.Timestamp.In(msk), want)
+	}
+}

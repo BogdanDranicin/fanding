@@ -14,6 +14,8 @@ import (
 
 const sysTimeLayout = "2006-01-02 15:04:05"
 
+var mskZone = time.FixedZone("MSK", 3*60*60)
+
 // InstrumentSpec holds static contract parameters from the MOEX ISS securities block.
 type InstrumentSpec struct {
 	Symbol        string  `json:"symbol"`
@@ -346,18 +348,68 @@ func (s *Source) updateSpec(symbol string, sec map[string]interface{}) {
 	}
 }
 
+// parseTime returns the moment the marketdata snapshot ACTUALLY DESCRIBES, not the
+// moment ISS answered the request.
+//
+// Публичный фид ISS отдаёт данные с задержкой ~15 минут: SYSTIME — это «сейчас» на
+// сервере биржи, а содержимое строки (LAST, VOLTODAY, WAPRICE) относится к моменту
+// UPDATETIME/TIME. Замер 28.07.2026, USDRUBF: SYSTIME 23:44:44 при UPDATETIME 23:29:44.
+//
+// Штамповать тик временем SYSTIME нельзя: по метке тика движок решает, попал ли он
+// в окно фандинга 10:00–15:30 и пора ли морозить ногу фьючерса. С SYSTIME окно
+// закрывалось в тот момент, когда фид довёз данные лишь до ~15:15, и в ноге
+// фьючерса оказывалось обрезанное окно (28.07.2026: наш settl_vwap USD 78.55228
+// против биржевых 78.55453 → фандинг −0.06770 вместо −0.06545).
 func parseTime(md map[string]interface{}) time.Time {
-	v, ok := md["SYSTIME"]
-	if !ok || v == nil {
-		return time.Now()
+	sys := parseMSKStamp(md["SYSTIME"])
+
+	// UPDATETIME — момент последнего обновления строки, TIME — время последней сделки.
+	// Обе — «время суток» без даты, дату берём из SYSTIME (иной у ISS в этой строке нет).
+	if clock := firstClock(md["UPDATETIME"], md["TIME"]); clock != "" {
+		day := sys
+		if day.IsZero() {
+			day = time.Now().In(mskZone)
+		}
+		if t, err := time.ParseInLocation(sysTimeLayout, day.Format("2006-01-02")+" "+clock, mskZone); err == nil {
+			// Полуночный перевал: SYSTIME уже за полночь нового дня, а UPDATETIME —
+			// вечер предыдущей сессии. Данные с задержкой всегда ПОЗАДИ SYSTIME,
+			// поэтому метка, ушедшая далеко вперёд, принадлежит вчерашнему дню.
+			if !sys.IsZero() && t.Sub(sys) > 12*time.Hour {
+				t = t.AddDate(0, 0, -1)
+			}
+			return t
+		}
 	}
-	str, ok := v.(string)
+
+	if !sys.IsZero() {
+		return sys
+	}
+	return time.Now()
+}
+
+// firstClock returns the first cell that looks like an ISS "15:04:05" time of day.
+func firstClock(cells ...interface{}) string {
+	for _, c := range cells {
+		s, ok := c.(string)
+		if !ok || len(s) != 8 {
+			continue
+		}
+		if _, err := time.Parse("15:04:05", s); err == nil {
+			return s
+		}
+	}
+	return ""
+}
+
+// parseMSKStamp parses an ISS "2006-01-02 15:04:05" MSK cell; zero time on failure.
+func parseMSKStamp(v interface{}) time.Time {
+	s, ok := v.(string)
 	if !ok {
-		return time.Now()
+		return time.Time{}
 	}
-	t, err := time.ParseInLocation(sysTimeLayout, str, time.FixedZone("MSK", 3*60*60))
+	t, err := time.ParseInLocation(sysTimeLayout, s, mskZone)
 	if err != nil {
-		return time.Now()
+		return time.Time{}
 	}
 	return t
 }
