@@ -161,12 +161,34 @@ type Engine struct {
 	mu               sync.Mutex
 
 	// settlCh fires once per trading day when the first settlVWAP is frozen (~15:30).
-	settlCh         chan time.Time
+	settlCh         chan SettlementSignal
 	settlFiredDate  string // MSK date on which the settlement signal was already sent
+	// startedAt — момент запуска процесса. По нему (и только по нему) отличается
+	// штатный клиринг от восстановления данных после рестарта: см. SettlementSignal.
+	startedAt time.Time
+}
+
+// SettlementSignal — событие «нога фьючерса заморожена». Restored=true означает,
+// что процесс поднялся уже ПОСЛЕ 15:30 и заморозка произошла на бэкфилле, то есть
+// это восстановление после перезапуска, а не живой клиринг.
+//
+// Раньше это различал получатель, сравнивая At с окном 15:30–15:45 МСК. С 29.07.2026
+// такая эвристика сломалась: движок ждёт, пока поток сделок сам перешагнёт 15:30
+// своим рыночным временем (см. maybeFreezeSettl), а публичный фид ISS отстаёт ~15 мин —
+// штатная заморозка приходится на настенные ~15:45+ и выпадала из окна, из-за чего
+// в Telegram каждый день улетало ложное «Сервис перезапущен».
+type SettlementSignal struct {
+	At       time.Time // настенное время сигнала
+	Restored bool      // true — данные восстановлены после рестарта, а не посчитаны вживую
 }
 
 // NewEngine creates an Engine with a 6-hour rolling VWAP window.
-func NewEngine() *Engine {
+func NewEngine() *Engine { return NewEngineAt(time.Now()) }
+
+// NewEngineAt is NewEngine with an explicit process start time. Only the settlement
+// signal uses it (see SettlementSignal.Restored); tests pass a fixed moment so the
+// «live clearing vs. restart» verdict does not depend on when the suite runs.
+func NewEngineAt(startedAt time.Time) *Engine {
 	futures := []string{source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF}
 	vwaps := make(map[string]*VWAPCalculator, len(futures))
 	tradeVWAPs := make(map[string]*VWAPCalculator, len(futures))
@@ -196,7 +218,8 @@ func NewEngine() *Engine {
 		rateEffectiveToday:  make(map[string]float64),
 		cbLoggedDate:        make(map[string]string),
 		log:                 zerolog.Nop(),
-		settlCh:             make(chan time.Time, 1),
+		settlCh:             make(chan SettlementSignal, 1),
+		startedAt:           startedAt,
 	}
 }
 
@@ -208,9 +231,11 @@ func (e *Engine) SetLogger(l zerolog.Logger) {
 	e.log = l
 }
 
-// SettlementCh returns a channel that receives the time once per trading day
-// when the first settlement VWAP is frozen (~15:30 MSK).
-func (e *Engine) SettlementCh() <-chan time.Time { return e.settlCh }
+// SettlementCh returns a channel that receives one signal per trading day, when
+// the first settlement VWAP is frozen (~15:30 MSK market time, i.e. ~15:45+ by the
+// wall clock — the public ISS feed lags). The signal says whether the freeze was
+// live or restored after a restart.
+func (e *Engine) SettlementCh() <-chan SettlementSignal { return e.settlCh }
 
 // tryFireSettlSignal sends to settlCh once per MSK trading day.
 // Must be called while holding e.mu.
@@ -220,9 +245,22 @@ func (e *Engine) tryFireSettlSignal(mskDate string) {
 	}
 	e.settlFiredDate = mskDate
 	select {
-	case e.settlCh <- time.Now():
+	case e.settlCh <- SettlementSignal{At: time.Now(), Restored: e.restoredAfterRestart(mskDate)}:
 	default:
 	}
+}
+
+// restoredAfterRestart сообщает, что заморозка ноги фьючерса за mskDate — это
+// восстановление на бэкфилле, а не живой расчёт: процесс поднялся в тот же торговый
+// день и уже после 15:30 МСК. Запуск до 15:30 (или в любой предыдущий день) означает,
+// что движок сам прошёл окно фандинга — это штатный клиринг.
+// Must be called while holding e.mu.
+func (e *Engine) restoredAfterRestart(mskDate string) bool {
+	started := e.startedAt.In(msk)
+	if started.Format("2006-01-02") != mskDate {
+		return false
+	}
+	return atOrAfterSettl(started)
 }
 
 // Ingest routes a tick to the appropriate internal cache or VWAP calculator.

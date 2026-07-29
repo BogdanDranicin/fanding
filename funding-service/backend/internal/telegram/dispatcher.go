@@ -42,19 +42,20 @@ func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.Fundi
 
 // Run blocks, forwarding publication signals to all linked users. The settlement
 // signal no longer produces a «прогнозный фандинг зафиксирован» message (решение
-// 17.07 — точные цифры приходят с публикацией ЦБ); вне окна настоящего клиринга
-// он остаётся служебным «Обновлением сервиса» (рестарт).
-func (d *Dispatcher) Run(ctx context.Context, settlCh, pubCh <-chan time.Time) {
+// 17.07 — точные цифры приходят с публикацией ЦБ); в эфир идёт только служебное
+// «Обновление сервиса», и только когда движок сам сказал, что данные восстановлены
+// после перезапуска (SettlementSignal.Restored).
+func (d *Dispatcher) Run(ctx context.Context, settlCh <-chan funding.SettlementSignal, pubCh <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case t, ok := <-settlCh:
+		case sig, ok := <-settlCh:
 			if !ok {
 				return
 			}
-			if !isSettlementTime(t) {
-				d.broadcast(ctx, formatRestartNotice(t))
+			if sig.Restored {
+				d.broadcast(ctx, formatRestartNotice(sig.At))
 			}
 		case t, ok := <-pubCh:
 			if !ok {
@@ -127,15 +128,6 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string) {
 	}
 
 	d.log.Info().Int("recipients", len(chatIDs)).Msg("alert sent")
-}
-
-// isSettlementTime reports whether t falls into the real settlement window
-// (15:30–15:45 МСК): движок стреляет сигналом на первом же тике после 15:30,
-// то есть в течение секунд. Всё вне окна — восстановление после рестарта.
-func isSettlementTime(t time.Time) bool {
-	msk := time.FixedZone("MSK", 3*60*60)
-	h, m, _ := t.In(msk).Clock()
-	return h == 15 && m >= 30 && m < 45
 }
 
 // formatRestartNotice строит служебное сообщение, когда settlement лишь

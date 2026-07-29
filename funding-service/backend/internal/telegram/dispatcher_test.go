@@ -135,24 +135,9 @@ func TestAwaitCBFunding_returnsWhenEngineCatchesUp(t *testing.T) {
 	}
 }
 
-func TestIsSettlementTime(t *testing.T) {
-	cases := []struct {
-		utc  time.Time
-		want bool
-	}{
-		{time.Date(2026, 7, 16, 12, 30, 5, 0, time.UTC), true},   // 15:30:05 МСК — настоящий клиринг
-		{time.Date(2026, 7, 16, 12, 44, 59, 0, time.UTC), true},  // 15:44:59 МСК — край окна
-		{time.Date(2026, 7, 16, 12, 45, 0, 0, time.UTC), false},  // 15:45:00 МСК — уже вне
-		{time.Date(2026, 7, 16, 20, 34, 39, 0, time.UTC), false}, // 23:34:39 МСК — рестарт докера
-		{time.Date(2026, 7, 16, 7, 0, 0, 0, time.UTC), false},    // 10:00 МСК
-	}
-	for _, c := range cases {
-		if got := isSettlementTime(c.utc); got != c.want {
-			t.Errorf("isSettlementTime(%s МСК) = %v, want %v",
-				c.utc.In(time.FixedZone("MSK", 3*60*60)).Format("15:04:05"), got, c.want)
-		}
-	}
-}
+// Окна «настоящего клиринга» по настенным часам больше нет: живой клиринг от
+// восстановления после рестарта отличает сам движок (funding.SettlementSignal.Restored),
+// см. TestEngine_SettlementSignalRestoredFlag. Диспетчер лишь пересылает флаг.
 
 func TestFormatRestartNotice(t *testing.T) {
 	ts := time.Date(2026, 7, 16, 20, 34, 39, 0, time.UTC) // 23:34:39 МСК

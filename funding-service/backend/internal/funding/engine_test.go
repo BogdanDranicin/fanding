@@ -784,6 +784,51 @@ func TestEngine_ForexFundingNilUntilForexTick(t *testing.T) {
 	}
 }
 
+func TestEngine_SettlementSignalRestoredFlag(t *testing.T) {
+	// 29.07.2026: в Telegram улетело ложное «Сервис перезапущен». Диспетчер считал
+	// рестартом всё, что пришло вне окна 15:30–15:45 по НАСТЕННЫМ часам, а после
+	// фикса задержки фида ISS штатная заморозка приходится как раз на ~15:45+.
+	// Теперь вердикт выносит движок — по времени старта процесса.
+	mskZone := time.FixedZone("MSK", 3*60*60)
+	day := func(d, h, m int) time.Time {
+		return time.Date(2026, 5, 20, h, m, 0, 0, mskZone).AddDate(0, 0, d)
+	}
+
+	cases := []struct {
+		name      string
+		startedAt time.Time
+		want      bool
+	}{
+		// Процесс прошёл окно фандинга сам — это живой клиринг, молчим,
+		// даже если сигнал ушёл в 15:45+ из-за отставания фида.
+		{"живой клиринг: старт в 10:00", day(0, 10, 0), false},
+		{"живой клиринг: старт вчера вечером", day(-1, 20, 0), false},
+		{"живой клиринг: старт впритык, 15:29", day(0, 15, 29), false},
+		// Процесс поднялся после клиринга — ногу восстановил бэкфилл, шлём уведомление.
+		{"рестарт: старт в 15:30", day(0, 15, 30), true},
+		{"рестарт: старт в 17:00", day(0, 17, 0), true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := funding.NewEngineAt(c.startedAt)
+			// Бэкфилл сделок за 20.05.2026 + первая сделка после 15:30 → заморозка.
+			e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, day(0, 10, 0)))
+			e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, day(0, 12, 0)))
+			e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.0, 5, day(0, 15, 31)))
+
+			select {
+			case sig := <-e.SettlementCh():
+				if sig.Restored != c.want {
+					t.Errorf("Restored = %v, want %v", sig.Restored, c.want)
+				}
+			default:
+				t.Fatal("settlement signal must fire")
+			}
+		})
+	}
+}
+
 func TestEngine_CBFundingNilWhenSessionStartedAfterSettlement(t *testing.T) {
 	e := funding.NewEngine()
 	msk := time.FixedZone("MSK", 3*60*60)
