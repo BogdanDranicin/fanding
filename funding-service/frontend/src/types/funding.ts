@@ -2,7 +2,6 @@ export interface InstrumentFunding {
   vwap: number;
   last_price: number;
   moex_funding?: number;
-  forex_funding?: number;
   cb_funding?: number;
   official_rate?: number;
   predicted_funding?: number;

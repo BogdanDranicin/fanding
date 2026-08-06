@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { ensureUser, getTelegramLink } from '../api/users';
+import { fetchTelegramLink } from '../api/auth';
+import { useAuthStore } from '../store/authStore';
 import {
   clearCustomSound,
   getAlertVolume,
@@ -16,10 +17,13 @@ interface Props {
 }
 
 export function SettingsPage({ onBack }: Props) {
+  const me = useAuthStore((s) => s.me);
+  const authLoading = useAuthStore((s) => s.loading);
+  const authError = useAuthStore((s) => s.error);
+  const refreshAuth = useAuthStore((s) => s.refresh);
+
   const [tgUrl, setTgUrl] = useState<string | null>(null);
-  const [linked, setLinked] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const [soundOn, setSoundOn] = useState(isAlertEnabled);
   const [volume, setVolume] = useState(getAlertVolume);
@@ -27,26 +31,34 @@ export function SettingsPage({ onBack }: Props) {
   const [soundError, setSoundError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Ссылка нужна только непривязанному — за привязанного всё уже сказал /api/v1/me.
   useEffect(() => {
+    if (authLoading || me.linked) return;
     let cancelled = false;
 
     (async () => {
       try {
-        const user = await ensureUser();
-        const link = await getTelegramLink(user.id, user.token);
+        const link = await fetchTelegramLink();
         if (!cancelled) {
           setTgUrl(link.url);
-          setLinked(link.linked);
+          setLinkError(null);
         }
       } catch (e) {
-        if (!cancelled) setError(String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setLinkError(e instanceof Error ? e.message : String(e));
       }
     })();
 
     return () => { cancelled = true; };
-  }, []);
+  }, [authLoading, me.linked]);
+
+  // Привязка делается в Telegram, в другом окне. Пока пользователь не привязан и
+  // смотрит на эту страницу, спрашиваем сервер раз в 3 секунды: вернувшись из
+  // мессенджера, он видит «✓ привязан», не перезагружая сайт.
+  useEffect(() => {
+    if (authLoading || me.linked) return;
+    const id = setInterval(() => { void refreshAuth(); }, 3000);
+    return () => clearInterval(id);
+  }, [authLoading, me.linked, refreshAuth]);
 
   const toggleSound = (on: boolean) => {
     setAlertEnabled(on);
@@ -89,20 +101,28 @@ export function SettingsPage({ onBack }: Props) {
         <h3>Telegram-уведомления</h3>
         <p>Получайте мгновенные уведомления при публикации нового официального курса ЦБ.</p>
 
-        {loading && <span style={{ color: 'var(--text-muted)' }}>Загрузка…</span>}
-        {error && <span style={{ color: 'var(--accent-down)' }}>Ошибка: {error}</span>}
-        {!loading && !error && linked && (
-          <span style={{ color: 'var(--accent-up)' }}>✓ Telegram привязан</span>
+        {authLoading && <span style={{ color: 'var(--text-muted)' }}>Загрузка…</span>}
+        {!authLoading && authError && (
+          <span style={{ color: 'var(--accent-down)' }}>Ошибка: {authError}</span>
         )}
-        {!loading && !error && !linked && tgUrl && (
+        {!authLoading && !authError && me.linked && (
+          <span style={{ color: 'var(--accent-up)' }}>
+            ✓ Telegram привязан{me.telegram_username && ` (@${me.telegram_username})`}
+            {me.is_admin && ' · админ'}
+          </span>
+        )}
+        {!authLoading && !authError && !me.linked && tgUrl && (
           <a href={tgUrl} target="_blank" rel="noreferrer" className="btn-tg">
             Привязать Telegram
           </a>
         )}
-        {!loading && !error && !tgUrl && (
+        {!authLoading && !authError && !me.linked && tgUrl === '' && (
           <span style={{ color: 'var(--text-muted)' }}>
             Бот не настроен (TELEGRAM_BOT_USERNAME не задан)
           </span>
+        )}
+        {!authLoading && !authError && !me.linked && linkError && (
+          <span style={{ color: 'var(--accent-down)' }}>Ошибка: {linkError}</span>
         )}
       </div>
 

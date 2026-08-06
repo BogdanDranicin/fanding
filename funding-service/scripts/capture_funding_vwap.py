@@ -52,8 +52,11 @@ SECIDS = ["USDRUBF", "EURRUBF"]
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 
 
-def get_json(url, timeout=40):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+def get_json(url, timeout=40, token=None):
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
 
@@ -137,9 +140,18 @@ def sec_field(secid, block, field):
 
 
 def prod_publication():
-    """Последняя строка журнала прод: наш settl_vwap / cb_funding / курс ЦБ / факт SWAPRATE."""
+    """Последняя строка журнала прод: наш settl_vwap / cb_funding / курс ЦБ / факт SWAPRATE.
+
+    Журнал — админская ручка (403 без прав). Токен сессии кладём в FUNDING_TOKEN:
+    его видно в localStorage сайта под ключом funding_session, у аккаунта из
+    TELEGRAM_ADMINS. Без токена скрипт всё равно считает эталон по сырым сделкам —
+    просто не с чем будет сверить прод.
+    """
+    token = os.environ.get("FUNDING_TOKEN")
+    if not token:
+        return {"_error": "FUNDING_TOKEN не задан — журнал прод доступен только админу"}
     try:
-        d = get_json(f"{PROD}/api/v1/cb-publications")
+        d = get_json(f"{PROD}/api/v1/cb-publications", token=token)
         return d[0] if d else None
     except Exception as e:
         return {"_error": str(e)}

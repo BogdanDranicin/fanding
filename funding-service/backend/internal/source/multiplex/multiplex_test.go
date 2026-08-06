@@ -72,15 +72,15 @@ func TestMultiplex_FansInFromTwoSources(t *testing.T) {
 		{Symbol: source.SymbolUSDRUBF, Price: 81.0, Kind: source.KindLastPrice, Source: "src1"},
 	}}
 	src2 := &staticSource{name: "src2", ticks: []source.Tick{
-		{Symbol: source.SymbolEURUSD, Price: 1.08, Kind: source.KindLastPrice, Source: "src2"},
+		{Symbol: source.SymbolUSDRubOfficial, Price: 1.08, Kind: source.KindLastPrice, Source: "src2"},
 	}}
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
 		source.SymbolUSDRUBF: src1,
-		source.SymbolEURUSD:  src2,
+		source.SymbolUSDRubOfficial:  src2,
 	})
 
-	ch, err := mux.Subscribe(context.Background(), []string{source.SymbolUSDRUBF, source.SymbolEURUSD})
+	ch, err := mux.Subscribe(context.Background(), []string{source.SymbolUSDRUBF, source.SymbolUSDRubOfficial})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -93,8 +93,8 @@ func TestMultiplex_FansInFromTwoSources(t *testing.T) {
 	if seen[source.SymbolUSDRUBF] != 81.0 {
 		t.Errorf("USDRUBF: want 81.0, got %v", seen[source.SymbolUSDRUBF])
 	}
-	if seen[source.SymbolEURUSD] != 1.08 {
-		t.Errorf("EURUSD: want 1.08, got %v", seen[source.SymbolEURUSD])
+	if seen[source.SymbolUSDRubOfficial] != 1.08 {
+		t.Errorf("USDRUB_CB: want 1.08, got %v", seen[source.SymbolUSDRubOfficial])
 	}
 }
 
@@ -136,11 +136,11 @@ func TestMultiplex_ContextCancelClosesChannel(t *testing.T) {
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
 		source.SymbolUSDRUBF: src1,
-		source.SymbolEURUSD:  src2,
+		source.SymbolUSDRubOfficial:  src2,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := mux.Subscribe(ctx, []string{source.SymbolUSDRUBF, source.SymbolEURUSD})
+	ch, err := mux.Subscribe(ctx, []string{source.SymbolUSDRUBF, source.SymbolUSDRubOfficial})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestMultiplex_CloseCallsUnderlyingSources(t *testing.T) {
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
 		source.SymbolUSDRUBF: src1,
-		source.SymbolEURUSD:  src2,
+		source.SymbolUSDRubOfficial:  src2,
 	})
 
 	if err := mux.Close(); err != nil {
@@ -177,18 +177,16 @@ func TestMultiplex_CloseCallsUnderlyingSources(t *testing.T) {
 
 func TestMultiplex_DefaultRoutingCoversAllSymbols(t *testing.T) {
 	moex := &capturingSource{name: "moex"}
-	forex := &capturingSource{name: "forex"}
 	cbr := &capturingSource{name: "cbr"}
 
-	routing := multiplex.DefaultRouting(moex, forex, cbr)
+	routing := multiplex.DefaultRouting(moex, cbr)
 
 	allSymbols := []string{
 		source.SymbolUSDRUBF,
 		source.SymbolEURRUBF,
 		source.SymbolCNYRUBF,
 		source.SymbolUSDTRUB,
-		source.SymbolEURUSD,
-		source.SymbolUSDCNH,
+		source.SymbolUSDRubTOM,
 		source.SymbolUSDRubOfficial,
 		source.SymbolEURRubOfficial,
 	}
@@ -202,8 +200,8 @@ func TestMultiplex_DefaultRoutingCoversAllSymbols(t *testing.T) {
 	if routing[source.SymbolUSDRUBF] != moex {
 		t.Error("USDRUBF should map to moex")
 	}
-	if routing[source.SymbolEURUSD] != forex {
-		t.Error("EURUSD should map to forex")
+	if routing[source.SymbolUSDRubTOM] != moex {
+		t.Error("USDRUB_TOM should map to moex")
 	}
 	if routing[source.SymbolUSDRubOfficial] != cbr {
 		t.Error("USDRubOfficial should map to cbr")

@@ -4,9 +4,9 @@ Real-time сервис для анализа ставок фандинга на 
 
 ## Что показывает
 
-| Инструмент | VWAP | Forex funding | MOEX funding | CB funding |
+| Инструмент | VWAP | Прогнозный фандинг | MOEX funding | CB funding |
 |---|---|---|---|---|
-| USDRUBF | ✓ | ✓ (TwelveData) | ✓ | ✓ (после публикации ЦБ) |
+| USDRUBF | ✓ | ✓ (до 15:30) | ✓ | ✓ (после публикации ЦБ) |
 | EURRUBF | ✓ | ✓ | ✓ | ✓ |
 | CNYRUBF | ✓ | — | ✓ | — |
 
@@ -52,6 +52,18 @@ Healthcheck: `http://localhost:8080/healthz`.
 
 После запуска: зайдите в «Настройки» на сайте → нажмите «Привязать Telegram».
 
+## Авторизация и роли
+
+Личность пользователя — это Telegram-аккаунт, привязанный через `/start` в боте.
+Браузер хранит токен сессии в `localStorage`, поэтому привязка переживает
+закрытие вкладки. Если открыть сайт в другом браузере и снова нажать
+«Привязать Telegram», сессия переедет на тот же аккаунт — подписка не двоится.
+
+Админы задаются переменной `TELEGRAM_ADMINS` (список `chat_id` и/или `@username`
+через запятую). Только им видны вкладки **«Журнал»** и **«Скорость»**, и только
+им сервер отдаёт данные этих страниц. Роль пересчитывается при каждом `/start`,
+поэтому после правки списка достаточно один раз нажать `/start` в чате с ботом.
+
 ## Архитектура
 
 ```
@@ -93,9 +105,14 @@ docker compose build frontend   # Node 20 в Docker
 |---|---|---|
 | GET | `/api/v1/instruments` | Список инструментов |
 | GET | `/api/v1/snapshots/recent?limit=N` | Последние N строк (default 300) |
-| GET | `/api/v1/cb-publications?days=N` | Публикации ЦБ за N дней (default 7) |
-| POST | `/api/v1/users` | Создать пользователя (возвращает id и link_token) |
-| GET | `/api/v1/users/{id}/telegram-link` | Ссылка для привязки Telegram |
+| POST | `/api/v1/session` | Завести сессию браузера (возвращает token) |
+| GET | `/api/v1/me` | Состояние сессии: `linked`, `is_admin`, `telegram_username` |
+| GET | `/api/v1/me/telegram-link` | Ссылка для привязки Telegram |
+| GET | `/api/v1/cb-publications?days=N` | **Только админ.** Публикации ЦБ за N дней (default 7) |
+| GET | `/api/v1/cbr-race` | **Только админ.** Гонка каналов публикации ЦБ |
+
+Все ручки, кроме `POST /api/v1/session`, требуют заголовок
+`Authorization: Bearer <token>`. Неизвестный токен — 401, не хватает прав — 403.
 
 ## Troubleshooting
 

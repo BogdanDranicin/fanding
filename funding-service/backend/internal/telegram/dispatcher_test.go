@@ -135,20 +135,7 @@ func TestAwaitCBFunding_returnsWhenEngineCatchesUp(t *testing.T) {
 	}
 }
 
-// Окна «настоящего клиринга» по настенным часам больше нет: живой клиринг от
-// восстановления после рестарта отличает сам движок (funding.SettlementSignal.Restored),
-// см. TestEngine_SettlementSignalRestoredFlag. Диспетчер лишь пересылает флаг.
-
-func TestFormatRestartNotice(t *testing.T) {
-	ts := time.Date(2026, 7, 16, 20, 34, 39, 0, time.UTC) // 23:34:39 МСК
-	text := formatRestartNotice(ts)
-	if !strings.Contains(text, "Обновление сервиса") {
-		t.Error("missing header")
-	}
-	if !strings.Contains(text, "23:34:39") {
-		t.Error("missing MSK time")
-	}
-	if strings.Contains(text, "зафиксирован") || strings.Contains(text, "Курс ЦБ") {
-		t.Error("restart notice must not look like a funding alert")
-	}
-}
+// Служебного «Обновление сервиса / Сервис перезапущен» больше нет (06.08.2026):
+// клиринг вообще не повод писать подписчику, а Run теперь принимает только канал
+// публикаций ЦБ — уведомление физически неоткуда взять. Раньше сообщение уходило
+// каждый день: сначала из-за окна по настенным часам, потом из-за флага Restored.

@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -23,8 +22,8 @@ type instrumentMeta struct {
 }
 
 var instruments = []instrumentMeta{
-	{Symbol: "USDRUBF", Description: "USD/RUB futures (MOEX)", Sources: []string{"moex_vwap", "cbr_official", "forex"}},
-	{Symbol: "EURRUBF", Description: "EUR/RUB futures (MOEX)", Sources: []string{"moex_vwap", "cbr_official", "forex"}},
+	{Symbol: "USDRUBF", Description: "USD/RUB futures (MOEX)", Sources: []string{"moex_vwap", "cbr_official"}},
+	{Symbol: "EURRUBF", Description: "EUR/RUB futures (MOEX)", Sources: []string{"moex_vwap", "cbr_official"}},
 	{Symbol: "CNYRUBF", Description: "CNY/RUB futures (MOEX)", Sources: []string{"moex_vwap"}},
 }
 
@@ -45,12 +44,20 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	r.Get("/api/v1/all-specs", handleAllSpecs)
 	r.Get("/api/v1/prices", handlePrices)
 	r.Get("/api/v1/swap-rates", handleSwapRates)
-	r.Get("/api/v1/cbr-race", handleCBRRace)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
-	r.Get("/api/v1/cb-publications", handleCBPublications(store))
+
+	// Сессия браузера: анонимная при создании, становится аккаунтом после /start в боте.
 	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute)).
-		Post("/api/v1/users", handleCreateUser(store))
-	r.Get("/api/v1/users/{id}/telegram-link", handleTelegramLink(store, botUsername))
+		Post("/api/v1/session", handleCreateSession(store))
+
+	auth := authMiddleware(store)
+	r.With(auth).Get("/api/v1/me", handleMe())
+	r.With(auth).Get("/api/v1/me/telegram-link", handleTelegramLink(store, botUsername))
+
+	// Админские данные: «Журнал» и «Скорость». Вкладки скрыты во фронте, но
+	// решает всё равно сервер — иначе их видел бы любой, кто знает адрес.
+	r.With(auth, adminMiddleware).Get("/api/v1/cb-publications", handleCBPublications(store))
+	r.With(auth, adminMiddleware).Get("/api/v1/cbr-race", handleCBRRace)
 
 	return r
 }
@@ -99,48 +106,6 @@ func handleCBPublications(store *storage.Store) http.HandlerFunc {
 	}
 }
 
-func handleCreateUser(store *storage.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rec, err := store.CreateUser(r.Context())
-		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"id":    rec.ID,
-			"token": rec.LinkToken,
-		})
-	}
-}
-
-func handleTelegramLink(store *storage.Store, botUsername string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if botUsername == "" {
-			http.Error(w, "bot not configured", http.StatusServiceUnavailable)
-			return
-		}
-		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid id", http.StatusBadRequest)
-			return
-		}
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			http.Error(w, "token required", http.StatusUnauthorized)
-			return
-		}
-		linked, err := store.UserByIDAndToken(r.Context(), id, token)
-		if err != nil {
-			http.Error(w, "user not found", http.StatusNotFound)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"url":    fmt.Sprintf("https://t.me/%s?start=%s", botUsername, token),
-			"linked": linked,
-		})
-	}
-}
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -152,7 +117,7 @@ func corsMiddleware(allowedOrigin string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if allowedOrigin != "*" {
 				w.Header().Add("Vary", "Origin")
 			}

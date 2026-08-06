@@ -88,7 +88,6 @@ const ROWS: Row[] = [
   { label: 'Предсказанный курс ЦБ', field: 'predicted_cb_rate', kind: 'rate',                              skipCNY: true       },
   { label: 'Курс ЦБ (факт)',        field: 'official_rate',     kind: 'rate',                              skipCNY: true       },
   { label: 'Ошибка прогноза',       kind: 'delta',  compute: predictionError, refField: 'official_rate',  skipCNY: true       },
-  { label: 'Forex funding',         field: 'forex_funding',     kind: 'funding', refField: 'vwap',         skipCNY: true       },
   { label: 'Прогнозный фандинг',    field: 'predicted_funding', kind: 'funding', refField: 'predicted_cb_rate', skipCNY: true  },
   { label: 'MOEX funding',          field: 'moex_funding',      kind: 'funding', refField: 'last_price'                       },
   { label: 'CB funding',            field: 'cb_funding',        kind: 'funding', refField: 'official_rate', skipCNY: true       },

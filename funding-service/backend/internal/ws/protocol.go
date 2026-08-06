@@ -25,9 +25,6 @@ func instrPayload(f funding.InstrumentFunding) map[string]any {
 	if f.MOEXFunding != nil {
 		m["moex_funding"] = *f.MOEXFunding
 	}
-	if f.ForexFunding != nil {
-		m["forex_funding"] = *f.ForexFunding
-	}
 	if f.CBFunding != nil {
 		m["cb_funding"] = *f.CBFunding
 	}

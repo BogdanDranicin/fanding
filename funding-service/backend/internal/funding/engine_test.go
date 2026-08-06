@@ -29,16 +29,6 @@ func swapRateTick(sym string, rate float64, ts time.Time) source.Tick {
 	}
 }
 
-func forexTick(sym string, price float64, ts time.Time) source.Tick {
-	return source.Tick{
-		Symbol:    sym,
-		Price:     price,
-		Kind:      source.KindLastPrice,
-		Timestamp: ts,
-		Source:    "twelvedata",
-	}
-}
-
 func cbrTick(sym string, price float64, ts time.Time) source.Tick {
 	return source.Tick{
 		Symbol:    sym,
@@ -211,10 +201,11 @@ func TestEngine_SettlementFreezeFromTradeBackfill(t *testing.T) {
 	// First post-15:30 deal triggers the freeze but stays out of the snapshot.
 	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.0, 5, at(15, 31)))
 
-	select {
-	case <-e.SettlementCh():
-	default:
-		t.Fatal("settlement signal must fire from trade backfill")
+	// Заморозка сама по себе наружу не сигналит — её видно по SettlVWAP в снапшоте.
+	if settl := e.Snapshot().USDRUBF.SettlVWAP; settl == nil {
+		t.Fatal("settlement freeze must happen from trade backfill")
+	} else if diff := *settl - 81.5; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("settlVWAP: want 81.5, got %.6f", *settl)
 	}
 
 	// CBR publishes today's rate 81.44: d = 81.5 − 81.44 = 0.06, inside the
@@ -254,28 +245,28 @@ func TestEngine_PredictedCBRateFromSpotTOMWindow(t *testing.T) {
 }
 
 // Методика ЦБ с 08.06.2026: EUR/RUB(ЦБ) = USD/RUB(ЦБ) × EUR/USD(ЕЦБ) по состоянию на 15:30 МСК.
-// Прогнозный курс EUR должен использовать EUR/USD, ЗАМОРОЖЕННЫЙ на 15:30, а не живой —
-// тик EUR/USD после 15:30 не должен менять прогноз.
-func TestEngine_EURPredictedCBRateFixesEURUSDAt1530(t *testing.T) {
+// Прямого форекс-фида у сервиса нет (TwelveData убран 06.08.2026 вместе с Forex funding),
+// поэтому ногу EUR/USD берём из отношения последних официальных курсов ЦБ: ЦБ считает их
+// по тому же фиксингу ЕЦБ, так что отношение и есть нужный кросс.
+func TestEngine_EURPredictedCBRateFromOfficialRateRatio(t *testing.T) {
 	e := funding.NewEngine()
 	msk := time.FixedZone("MSK", 3*60*60)
 	at := func(h, m int) time.Time { return time.Date(2026, 6, 8, h, m, 0, 0, msk) }
 
 	// USD predicted CB rate из спот TOM (в окне 10:00–15:30) = 80.0.
 	e.Ingest(tomTick(source.SymbolUSDRubTOM, 80.0, 0, at(14, 0)))
-	// EUR/USD до 15:30 — это нога фиксинга. Значение на 15:29 должно быть взято в расчёт.
-	e.Ingest(forexTick(source.SymbolEURUSD, 1.10, at(15, 29)))
-	// Тик EUR/USD после 15:30 НЕ должен сдвигать прогнозный курс EUR ЦБ.
-	e.Ingest(forexTick(source.SymbolEURUSD, 1.20, at(16, 0)))
+	// Действующие курсы ЦБ дают EUR/USD = 88.0 / 80.0 = 1.10.
+	e.Ingest(cbrTick(source.SymbolUSDRubOfficial, 80.0, at(12, 0)))
+	e.Ingest(cbrTick(source.SymbolEURRubOfficial, 88.0, at(12, 0)))
 
 	snap := e.Snapshot()
 	if snap.EURRUBF.PredictedCBRate == nil {
 		t.Fatal("EURRUBF.PredictedCBRate must be non-nil")
 	}
-	// EUR/RUB(ЦБ) = 80.0 × 1.10 = 88.0 (а не 96.0 с живым 1.20).
+	// EUR/RUB(ЦБ) = 80.0 × 1.10 = 88.0.
 	const want = 88.0
 	if diff := *snap.EURRUBF.PredictedCBRate - want; diff > 1e-9 || diff < -1e-9 {
-		t.Errorf("EUR PredictedCBRate: want %.6f (EUR/USD заморожен на 15:30), got %.6f", want, *snap.EURRUBF.PredictedCBRate)
+		t.Errorf("EUR PredictedCBRate: want %.6f, got %.6f", want, *snap.EURRUBF.PredictedCBRate)
 	}
 }
 
@@ -743,91 +734,65 @@ func TestEngine_FundingNilBeforeAnyTicks(t *testing.T) {
 	e := funding.NewEngine()
 	snap := e.Snapshot()
 
-	if snap.USDRUBF.ForexFunding != nil {
-		t.Error("USDRUBF.ForexFunding: want nil before any forex tick")
-	}
 	if snap.USDRUBF.CBFunding != nil {
 		t.Error("USDRUBF.CBFunding: want nil before any CBR tick")
 	}
 	if snap.USDRUBF.MOEXFunding != nil {
 		t.Error("USDRUBF.MOEXFunding: want nil before any MOEX tick")
 	}
-	if snap.EURRUBF.ForexFunding != nil {
-		t.Error("EURRUBF.ForexFunding: want nil before any forex tick")
+	if snap.EURRUBF.CBFunding != nil {
+		t.Error("EURRUBF.CBFunding: want nil before any CBR tick")
 	}
 }
 
-func TestEngine_ForexFundingNilUntilForexTick(t *testing.T) {
+// Отсрочка не должна срабатывать, пока поток сделок ещё довозит хвост окна.
+//
+// 06.08.2026: наша нога USDRUBF вышла 81.51676 против эталонных 81.51729 по сырым
+// сделкам ISS — окно, обрезанное ровно на 15:25 (потеряно 2520 контрактов из 244789),
+// и −0.00053 к биржевому SWAPRATE. Причина: marketdata обгоняет фид сделок, тик с
+// рыночным временем 15:45 приходил раньше последних сделок окна и включал аварийную
+// ветку заморозки. Проверка по объёму этого не ловит: 5 минут — около 1% дня.
+func TestEngine_SettlNotFrozenWhileTradesStillCatchingUp(t *testing.T) {
 	e := funding.NewEngine()
-	now := time.Now()
-
-	// USDRUBF MOEX ticks (cumulative VOLTODAY 100→110) — VWAP known, but no USDCNH/CNYRUBF yet
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, now))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 110, now.Add(time.Millisecond)))
-	snap := e.Snapshot()
-	if snap.USDRUBF.ForexFunding != nil {
-		t.Error("ForexFunding must be nil until both USDCNH and CNYRUBF are ingested")
+	settle := todaySettle()
+	mskZone := settle.Location()
+	at := func(h, m int) time.Time {
+		return time.Date(settle.Year(), settle.Month(), settle.Day(), h, m, 0, 0, mskZone)
 	}
 
-	// USDCNH tick — still nil (no CNYRUBF last price yet)
-	e.Ingest(forexTick(source.SymbolUSDCNH, 7.5, now))
-	snap = e.Snapshot()
-	if snap.USDRUBF.ForexFunding != nil {
-		t.Error("ForexFunding must remain nil until CNYRUBF last price is ingested")
+	// Сделки довезены только до 15:25 — хвост окна ещё в пути.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 900, at(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 81.0, 100, at(15, 25)))
+	// Полнота по объёму высокая: marketdata видит 1010 при наших 1000 (99%).
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 81.0, 1000, at(15, 25)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 81.0, 1010, at(15, 26)))
+
+	// Marketdata убегает за 15:45 — раньше на этом тике нога и замерзала обрезанной.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 1010, at(15, 46)))
+	if settl := e.Snapshot().USDRUBF.SettlVWAP; settl != nil {
+		t.Fatalf("нога заморожена раньше времени на %.6f — хвост окна ещё не доехал", *settl)
 	}
 
-	// CNYRUBF tick — all components available; ForexFunding becomes non-nil
-	e.Ingest(moexTick(source.SymbolCNYRUBF, 10.5, 100, now))
-	snap = e.Snapshot()
-	if snap.USDRUBF.ForexFunding == nil {
-		t.Error("ForexFunding must be non-nil after USDCNH and CNYRUBF are both ingested")
+	// Дошла первая сделка хвоста, затем сделка после 15:30 — теперь можно морозить.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.0, 1000, at(15, 29)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 99.0, 100, at(15, 31)))
+
+	settl := e.Snapshot().USDRUBF.SettlVWAP
+	if settl == nil {
+		t.Fatal("нога должна замёрзнуть, когда поток сделок сам перешагнул 15:30")
 	}
-}
-
-func TestEngine_SettlementSignalRestoredFlag(t *testing.T) {
-	// 29.07.2026: в Telegram улетело ложное «Сервис перезапущен». Диспетчер считал
-	// рестартом всё, что пришло вне окна 15:30–15:45 по НАСТЕННЫМ часам, а после
-	// фикса задержки фида ISS штатная заморозка приходится как раз на ~15:45+.
-	// Теперь вердикт выносит движок — по времени старта процесса.
-	mskZone := time.FixedZone("MSK", 3*60*60)
-	day := func(d, h, m int) time.Time {
-		return time.Date(2026, 5, 20, h, m, 0, 0, mskZone).AddDate(0, 0, d)
-	}
-
-	cases := []struct {
-		name      string
-		startedAt time.Time
-		want      bool
-	}{
-		// Процесс прошёл окно фандинга сам — это живой клиринг, молчим,
-		// даже если сигнал ушёл в 15:45+ из-за отставания фида.
-		{"живой клиринг: старт в 10:00", day(0, 10, 0), false},
-		{"живой клиринг: старт вчера вечером", day(-1, 20, 0), false},
-		{"живой клиринг: старт впритык, 15:29", day(0, 15, 29), false},
-		// Процесс поднялся после клиринга — ногу восстановил бэкфилл, шлём уведомление.
-		{"рестарт: старт в 15:30", day(0, 15, 30), true},
-		{"рестарт: старт в 17:00", day(0, 17, 0), true},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			e := funding.NewEngineAt(c.startedAt)
-			// Бэкфилл сделок за 20.05.2026 + первая сделка после 15:30 → заморозка.
-			e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.0, 10, day(0, 10, 0)))
-			e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.0, 30, day(0, 12, 0)))
-			e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.0, 5, day(0, 15, 31)))
-
-			select {
-			case sig := <-e.SettlementCh():
-				if sig.Restored != c.want {
-					t.Errorf("Restored = %v, want %v", sig.Restored, c.want)
-				}
-			default:
-				t.Fatal("settlement signal must fire")
-			}
-		})
+	// VWAP окна = (80×900 + 81×100 + 90×1000) / 2000 = 85.05; сделка 15:31 не входит.
+	const want = 85.05
+	if diff := *settl - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("settlVWAP: want %.6f (весь хвост окна учтён), got %.6f", want, *settl)
 	}
 }
+
+// Сигнала о заморозке ноги фьючерса (SettlementSignal) у движка больше нет:
+// единственным его потребителем был Telegram-диспетчер со служебным
+// «Сервис перезапущен», а это сообщение убрано 06.08.2026 — оно приходило
+// каждый день и ничего не говорило по делу. Сама заморозка (settlVWAP) жива
+// и проверяется тестами вокруг maybeFreezeSettl.
 
 func TestEngine_CBFundingNilWhenSessionStartedAfterSettlement(t *testing.T) {
 	e := funding.NewEngine()
@@ -963,28 +928,6 @@ func TestEngine_MOEXFundingValue(t *testing.T) {
 	}
 }
 
-func TestEngine_ForexFundingValue(t *testing.T) {
-	e := funding.NewEngine()
-	now := time.Now()
-
-	// ForexFunding(USDRUBF) = VWAP - USDCNH*CNYRUBF_last = 82 - 8*10 = 2.0.
-	// Two USDRUBF ticks (cumulative VOLTODAY 100→110) give the rolling VWAP an
-	// attributable increment: 10 traded @82 → VWAP=82.
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 100, now))
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 82.0, 110, now.Add(time.Millisecond)))
-	e.Ingest(forexTick(source.SymbolUSDCNH, 8.0, now))
-	e.Ingest(moexTick(source.SymbolCNYRUBF, 10.0, 100, now))
-
-	snap := e.Snapshot()
-	want := 82.0 - 8.0*10.0
-	if snap.USDRUBF.ForexFunding == nil {
-		t.Fatal("ForexFunding must not be nil")
-	}
-	if diff := *snap.USDRUBF.ForexFunding - want; diff > 1e-9 || diff < -1e-9 {
-		t.Errorf("ForexFunding: want %.6f, got %.6f", want, *snap.USDRUBF.ForexFunding)
-	}
-}
-
 func TestEngine_CBFundingValue(t *testing.T) {
 	e := funding.NewEngine()
 	settle := todaySettle()
@@ -1045,9 +988,6 @@ func TestEngine_CNYRUBFMOEXFunding(t *testing.T) {
 	const wantVWAP = 11.6
 	if diff := snap.CNYRUBF.VWAP - wantVWAP; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("CNYRUBF VWAP: want %.4f, got %.4f", wantVWAP, snap.CNYRUBF.VWAP)
-	}
-	if snap.CNYRUBF.ForexFunding != nil {
-		t.Error("CNYRUBF.ForexFunding should be nil (taken from MOEX, not computed)")
 	}
 	if snap.CNYRUBF.CBFunding != nil {
 		t.Error("CNYRUBF.CBFunding should be nil")
@@ -1233,6 +1173,10 @@ func TestEngine_SettlementWaitsForDelayedTradeFeed(t *testing.T) {
 // Если поток сделок застрял и границу 15:30 так и не перешагнул, ждать вечно нельзя:
 // после отсрочки движок морозит ногу тем, что есть. Фандинг нужен к публикации курса
 // ЦБ (после 17:30 МСК), так что запас времени всё равно остаётся большой.
+//
+// Сама отсрочка — 17:00, а не 15:45: пятнадцати минут не хватало нормальному
+// отставанию фида, и по этой аварийной ветке морозилось обрезанное окно
+// (см. TestEngine_SettlNotFrozenWhileTradesStillCatchingUp).
 func TestEngine_SettlementFreezesAfterGraceWhenTradeFeedStalls(t *testing.T) {
 	e := funding.NewEngine()
 	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 78.02, mskDay(9, 0)))
@@ -1243,8 +1187,12 @@ func TestEngine_SettlementFreezesAfterGraceWhenTradeFeedStalls(t *testing.T) {
 	if got := e.Snapshot().USDRUBF.SettlVWAP; got != nil {
 		t.Fatalf("заморозка раньше отсрочки: %.5f", *got)
 	}
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.90, 400, mskDay(16, 30)))
+	if got := e.Snapshot().USDRUBF.SettlVWAP; got != nil {
+		t.Fatalf("заморозка раньше отсрочки (16:30): %.5f", *got)
+	}
 
-	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.91, 400, mskDay(15, 46)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 78.91, 400, mskDay(17, 0)))
 	got := e.Snapshot().USDRUBF.SettlVWAP
 	if got == nil {
 		t.Fatal("нога фьючерса не заморожена даже после истечения отсрочки")

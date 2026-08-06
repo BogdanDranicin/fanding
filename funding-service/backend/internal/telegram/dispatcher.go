@@ -40,23 +40,16 @@ func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.Fundi
 	}
 }
 
-// Run blocks, forwarding publication signals to all linked users. The settlement
-// signal no longer produces a «прогнозный фандинг зафиксирован» message (решение
-// 17.07 — точные цифры приходят с публикацией ЦБ); в эфир идёт только служебное
-// «Обновление сервиса», и только когда движок сам сказал, что данные восстановлены
-// после перезапуска (SettlementSignal.Restored).
-func (d *Dispatcher) Run(ctx context.Context, settlCh <-chan funding.SettlementSignal, pubCh <-chan time.Time) {
+// Run blocks, forwarding publication signals to all linked users. Публикация курса
+// ЦБ — единственный повод написать подписчику: клиринг больше не рассылает ни
+// «прогнозный фандинг зафиксирован» (решение 17.07 — точные цифры приходят с
+// публикацией ЦБ), ни служебное «Обновление сервиса / Сервис перезапущен»
+// (убрано 06.08.2026 — приходило каждый день и ничего не сообщало по делу).
+func (d *Dispatcher) Run(ctx context.Context, pubCh <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case sig, ok := <-settlCh:
-			if !ok {
-				return
-			}
-			if sig.Restored {
-				d.broadcast(ctx, formatRestartNotice(sig.At))
-			}
 		case t, ok := <-pubCh:
 			if !ok {
 				return
@@ -128,14 +121,6 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string) {
 	}
 
 	d.log.Info().Int("recipients", len(chatIDs)).Msg("alert sent")
-}
-
-// formatRestartNotice строит служебное сообщение, когда settlement лишь
-// восстановлен после перезапуска сервиса.
-func formatRestartNotice(t time.Time) string {
-	msk := time.FixedZone("MSK", 3*60*60)
-	return fmt.Sprintf("🔄 <b>Обновление сервиса</b>\n%s МСК\nСервис перезапущен, расчётные данные восстановлены.",
-		t.In(msk).Format("15:04:05"))
 }
 
 // indicatorEmoji подбирает цветовой индикатор по величине фандинга в процентах

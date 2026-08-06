@@ -32,15 +32,14 @@ func New(routing map[string]source.MarketDataSource) *Source {
 }
 
 // DefaultRouting returns the canonical symbol→source mapping for production.
-// Pass the three live sources in order: moex, forex, cbr.
-func DefaultRouting(moex, forex, cbr source.MarketDataSource) map[string]source.MarketDataSource {
+// Pass the two live sources in order: moex, cbr.
+func DefaultRouting(moex, cbr source.MarketDataSource) map[string]source.MarketDataSource {
 	return map[string]source.MarketDataSource{
 		source.SymbolUSDRUBF:        moex,
 		source.SymbolEURRUBF:        moex,
 		source.SymbolCNYRUBF:        moex,
 		source.SymbolUSDTRUB:        moex,
-		source.SymbolEURUSD:         forex,
-		source.SymbolUSDCNH:         forex,
+		source.SymbolUSDRubTOM:      moex,
 		source.SymbolUSDRubOfficial: cbr,
 		source.SymbolEURRubOfficial: cbr,
 	}

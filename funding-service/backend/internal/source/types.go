@@ -25,8 +25,6 @@ const (
 	SymbolEURRUBF       = "EURRUBF"
 	SymbolCNYRUBF       = "CNYRUBF"
 	SymbolUSDTRUB       = "USDTRUB"
-	SymbolEURUSD        = "EURUSD"
-	SymbolUSDCNH        = "USDCNH"
 	SymbolUSDRubOfficial = "USDRUB_CB"
 	SymbolEURRubOfficial = "EURRUB_CB"
 

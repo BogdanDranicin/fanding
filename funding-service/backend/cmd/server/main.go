@@ -244,10 +244,14 @@ func main() {
 		// unreachable from some networks, so each proxy is tried with a timeout).
 		// Run the whole bot lifecycle in the background so a slow or dead proxy
 		// never delays the HTTP server or data collection.
+		admins := tgbot.ParseAdmins(cfg.TelegramAdmins)
+		if len(admins) == 0 {
+			log.Warn().Msg("TELEGRAM_ADMINS not set — вкладки «Журнал» и «Скорость» не увидит никто")
+		}
 		go func() {
 			const retryEvery = 30 * time.Second
 			for {
-				bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, log.Logger)
+				bot, err := tgbot.New(cfg.TelegramToken, cfg.TelegramProxyURLs, pool, store, admins, log.Logger)
 				if err != nil {
 					// Proxies to api.telegram.org can be flaky (rotating IPs, transient
 					// Bad Gateway). Keep retrying so the bot connects on its own the
@@ -262,7 +266,7 @@ func main() {
 				}
 				go bot.Run(ctx)
 				disp := tgbot.NewDispatcher(bot, pool, eng.Snapshot, cbrSrc.LastPublicationInfo, log.Logger)
-				disp.Run(ctx, eng.SettlementCh(), dispPubCh) // blocks until ctx is cancelled
+				disp.Run(ctx, dispPubCh) // blocks until ctx is cancelled
 				return
 			}
 		}()

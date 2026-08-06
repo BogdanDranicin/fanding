@@ -55,8 +55,7 @@ func TestSymbolConstants(t *testing.T) {
 		source.SymbolEURRUBF,
 		source.SymbolCNYRUBF,
 		source.SymbolUSDTRUB,
-		source.SymbolEURUSD,
-		source.SymbolUSDCNH,
+		source.SymbolUSDRubTOM,
 		source.SymbolUSDRubOfficial,
 		source.SymbolEURRubOfficial,
 	}

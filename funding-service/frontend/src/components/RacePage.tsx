@@ -1,11 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useRaceStore, parseDateNum, type CBRRaceResult } from '../store/raceStore';
+import { authFetch } from '../api/auth';
 
 const fmtRate = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 const fmtTime = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const MEDALS = ['🥇', '🥈', '🥉', '4️⃣'];
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
 
 function fmtTimestamp(ts?: string): string {
   if (!ts) return '';
@@ -38,7 +38,7 @@ export function RacePage() {
     setRunning(true);
     const startedAt = new Date();
     try {
-      const resp = await fetch(`${API_BASE}/api/v1/cbr-race`);
+      const resp = await authFetch('/api/v1/cbr-race');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const results: CBRRaceResult[] = await resp.json();
       addRound(startedAt, results);

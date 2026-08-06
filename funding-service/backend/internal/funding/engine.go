@@ -46,9 +46,17 @@ func atOrAfterSettl(t time.Time) bool {
 // фьючерса незамороженной, пока поток сделок не перешагнул 15:30 своим собственным
 // временем. После него замораживаем тем, что есть: фандинг всё равно нужен только
 // к публикации курса ЦБ (после 17:30 МСК), запас огромный.
+//
+// Срок 17:00, а не 15:45 (как было до 06.08.2026). Отсрочка в 15 минут совпадала с
+// типичным отставанием фида, и поток сделок регулярно не успевал довезти хвост окна:
+// заморозка происходила по этой ветке, а не по реально пришедшей сделке ≥15:30.
+// Проверено на 06.08.2026: наша нога USDRUBF = 81.51676 против эталонной 81.51729 по
+// сырым сделкам ISS — ровно окно, обрезанное на 15:25 (потеряно 2520 из 244789
+// контрактов). В фандинге это дало −0.00053 против биржевого SWAPRATE. Полнота по
+// объёму (tradeFeedMinCompleteness) такую потерю не ловит: 5 минут — это ~1% дня.
 func afterSettlGrace(t time.Time) bool {
-	h, m, _ := t.In(msk).Clock()
-	return h > 15 || (h == 15 && m >= 45)
+	h, _, _ := t.In(msk).Clock()
+	return h >= 17
 }
 
 // FundingSnapshot holds the latest computed values for all tracked instruments.
@@ -65,7 +73,6 @@ type FundingSnapshot struct {
 type InstrumentFunding struct {
 	VWAP             float64
 	LastPrice        float64
-	ForexFunding     *float64 // nil until USDCNH and CNYRUBF last price are both ingested
 	MOEXFunding      *float64 // swap_rate from MOEX ISS; nil until first ISS poll returns SWAPRATE
 	CBFunding        *float64 // clamp(settle_price − CBR_rate, K1, K2); non-nil once both settlement and CBR rate are available
 	OfficialRate     *float64 // most recent CBR rate; nil until published
@@ -139,16 +146,13 @@ type Engine struct {
 	lastPriceAt  map[string]time.Time       // timestamp of the newest KindLastPrice tick per symbol
 	sessionAccs  map[string]*sessionAcc     // cumulative session VWAP (reset at MSK midnight)
 	spotTOMWAP     map[string]float64       // WAPRICE for spot TOM frozen at 10:00–15:30 → best CB-fixing predictor
-	spotTOMWAPDate map[string]string        // MSK date the frozen spotTOMWAP belongs to (daily reset, like eurUSDFixDate)
+	spotTOMWAPDate map[string]string        // MSK date the frozen spotTOMWAP belongs to (суточный сброс)
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
 	settlDate        string                     // MSK date for which settlement was recorded
 	vwapLastVol      map[string]float64         // last VOLTODAY per symbol, to weight the rolling VWAP by ΔVOLTODAY
 	lastPrice        map[string]float64
 	swapRate         map[string]float64
-	forexRates       map[string]float64
-	eurUSDFix        float64 // EUR/USD «по состоянию на 15:30 МСК» — фиксинг ЕЦБ для расчёта курса EUR ЦБ (методика с 08.06.2026)
-	eurUSDFixDate    string  // MSK-дата, за которую накоплен eurUSDFix (для суточного сброса)
 	prevSettle          map[string]float64 // PREVSETTLEPRICE ISS: расчётная цена предыдущего вечернего клиринга
 	prevSettleAtSettl   map[string]float64 // та же цена, замороженная на 15:30 (вечерний клиринг её перезапишет)
 	officialRate        map[string]float64
@@ -158,37 +162,16 @@ type Engine struct {
 	rateEffectiveDate   string             // MSK-дата, на которую действителен rateEffectiveToday
 	cbLoggedDate        map[string]string  // sym -> MSK-дата, за которую уже напечатана диагностика CBFunding (раз в сутки)
 	log                 zerolog.Logger
-	mu               sync.Mutex
-
-	// settlCh fires once per trading day when the first settlVWAP is frozen (~15:30).
-	settlCh         chan SettlementSignal
-	settlFiredDate  string // MSK date on which the settlement signal was already sent
-	// startedAt — момент запуска процесса. По нему (и только по нему) отличается
-	// штатный клиринг от восстановления данных после рестарта: см. SettlementSignal.
-	startedAt time.Time
-}
-
-// SettlementSignal — событие «нога фьючерса заморожена». Restored=true означает,
-// что процесс поднялся уже ПОСЛЕ 15:30 и заморозка произошла на бэкфилле, то есть
-// это восстановление после перезапуска, а не живой клиринг.
-//
-// Раньше это различал получатель, сравнивая At с окном 15:30–15:45 МСК. С 29.07.2026
-// такая эвристика сломалась: движок ждёт, пока поток сделок сам перешагнёт 15:30
-// своим рыночным временем (см. maybeFreezeSettl), а публичный фид ISS отстаёт ~15 мин —
-// штатная заморозка приходится на настенные ~15:45+ и выпадала из окна, из-за чего
-// в Telegram каждый день улетало ложное «Сервис перезапущен».
-type SettlementSignal struct {
-	At       time.Time // настенное время сигнала
-	Restored bool      // true — данные восстановлены после рестарта, а не посчитаны вживую
+	mu                  sync.Mutex
 }
 
 // NewEngine creates an Engine with a 6-hour rolling VWAP window.
-func NewEngine() *Engine { return NewEngineAt(time.Now()) }
-
-// NewEngineAt is NewEngine with an explicit process start time. Only the settlement
-// signal uses it (see SettlementSignal.Restored); tests pass a fixed moment so the
-// «live clearing vs. restart» verdict does not depend on when the suite runs.
-func NewEngineAt(startedAt time.Time) *Engine {
+//
+// Заморозка ноги фьючерса (~15:30) наружу больше не сигналит: единственным
+// потребителем был Telegram-диспетчер, славший служебное «Сервис перезапущен».
+// Сообщение убрано (06.08.2026) — клиринг сам по себе не новость для подписчика,
+// а вердикт по фандингу приходит отдельным сообщением после публикации курса ЦБ.
+func NewEngine() *Engine {
 	futures := []string{source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF}
 	vwaps := make(map[string]*VWAPCalculator, len(futures))
 	tradeVWAPs := make(map[string]*VWAPCalculator, len(futures))
@@ -209,7 +192,6 @@ func NewEngineAt(startedAt time.Time) *Engine {
 		vwapLastVol:      make(map[string]float64),
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
-		forexRates:       make(map[string]float64),
 		prevSettle:          make(map[string]float64),
 		prevSettleAtSettl:   make(map[string]float64),
 		officialRate:        make(map[string]float64),
@@ -218,8 +200,6 @@ func NewEngineAt(startedAt time.Time) *Engine {
 		rateEffectiveToday:  make(map[string]float64),
 		cbLoggedDate:        make(map[string]string),
 		log:                 zerolog.Nop(),
-		settlCh:             make(chan SettlementSignal, 1),
-		startedAt:           startedAt,
 	}
 }
 
@@ -229,38 +209,6 @@ func (e *Engine) SetLogger(l zerolog.Logger) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.log = l
-}
-
-// SettlementCh returns a channel that receives one signal per trading day, when
-// the first settlement VWAP is frozen (~15:30 MSK market time, i.e. ~15:45+ by the
-// wall clock — the public ISS feed lags). The signal says whether the freeze was
-// live or restored after a restart.
-func (e *Engine) SettlementCh() <-chan SettlementSignal { return e.settlCh }
-
-// tryFireSettlSignal sends to settlCh once per MSK trading day.
-// Must be called while holding e.mu.
-func (e *Engine) tryFireSettlSignal(mskDate string) {
-	if e.settlFiredDate == mskDate {
-		return
-	}
-	e.settlFiredDate = mskDate
-	select {
-	case e.settlCh <- SettlementSignal{At: time.Now(), Restored: e.restoredAfterRestart(mskDate)}:
-	default:
-	}
-}
-
-// restoredAfterRestart сообщает, что заморозка ноги фьючерса за mskDate — это
-// восстановление на бэкфилле, а не живой расчёт: процесс поднялся в тот же торговый
-// день и уже после 15:30 МСК. Запуск до 15:30 (или в любой предыдущий день) означает,
-// что движок сам прошёл окно фандинга — это штатный клиринг.
-// Must be called while holding e.mu.
-func (e *Engine) restoredAfterRestart(mskDate string) bool {
-	started := e.startedAt.In(msk)
-	if started.Format("2006-01-02") != mskDate {
-		return false
-	}
-	return atOrAfterSettl(started)
 }
 
 // Ingest routes a tick to the appropriate internal cache or VWAP calculator.
@@ -319,7 +267,7 @@ func (e *Engine) Ingest(tick source.Tick) {
 			// за свой торговый день. Без сброса вчерашний фиксинг переживал бы полночь и
 			// предпочитался бы живому WAPRICE (spotTOMWAP выигрывает у spotTOMWAPLive в
 			// Snapshot), давая ложную «ошибку прогноза» на новом дне до наполнения окна —
-			// именно это ломало предсказанный курс. Логика симметрична eurUSDFix/eurUSDFixDate.
+			// именно это ломало предсказанный курс.
 			mskDate := tick.Timestamp.In(msk).Format("2006-01-02")
 			if e.spotTOMWAPDate[tick.Symbol] != mskDate {
 				e.spotTOMWAPDate[tick.Symbol] = mskDate
@@ -328,12 +276,6 @@ func (e *Engine) Ingest(tick source.Tick) {
 			if inFundingWindow(tick.Timestamp) {
 				e.spotTOMWAP[tick.Symbol] = tick.Price
 			}
-		}
-
-	case source.SymbolEURUSD, source.SymbolUSDCNH:
-		e.forexRates[tick.Symbol] = tick.Price
-		if tick.Symbol == source.SymbolEURUSD {
-			e.freezeEURUSDFixing(tick)
 		}
 
 	case source.SymbolUSDRubOfficial, source.SymbolEURRubOfficial:
@@ -499,6 +441,18 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 		return
 	}
 
+	// Заморозка по отсрочке — аварийная: поток сделок так и не перешагнул 15:30, и
+	// хвост окна мог не доехать (именно так набегало расхождение с биржей). Пишем в
+	// лог, чтобы такие дни было видно при сверке, а не искать их снова по фандингу.
+	if !tradeCrossed {
+		e.log.Warn().
+			Str("sym", sym).
+			Str("date", mskDate).
+			Float64("settl_vwap", v).
+			Bool("trade_vwap_used", tradeReady && (e.tradeFeedFresh(sym) || !sessOK)).
+			Msg("нога фьючерса заморожена по отсрочке: поток сделок не дошёл до 15:30, окно может быть обрезано")
+	}
+
 	e.settlVWAP[sym] = ptr(v)
 	e.settlDate = mskDate
 	e.freezeOfficialRateAtSettl(sym)
@@ -508,7 +462,6 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	if base, ok := e.prevSettle[sym]; ok && base > 0 {
 		e.prevSettleAtSettl[sym] = base
 	}
-	e.tryFireSettlSignal(mskDate)
 }
 
 // tradeFeedFresh reports whether the trade feed has captured essentially all of
@@ -646,40 +599,12 @@ func (e *Engine) freezeOfficialRateAtSettl(sym string) {
 	}
 }
 
-// freezeEURUSDFixing держит EUR/USD «по состоянию на 15:30 МСК» — курс ЕЦБ, который ЦБ РФ
-// с 08.06.2026 использует для расчёта официального курса: EUR/RUB = USD/RUB(ЦБ) × EUR/USD@15:30.
-// Значение обновляется каждым тиком EUR/USD до 15:30 МСК; в 15:30 обновления прекращаются, поэтому
-// поле фиксирует курс ровно на этот момент (последний тик перед 15:30). Сбрасывается при смене
-// торгового дня МСК. До 15:30 поле равно последнему живому курсу — прогноз EUR сходится к
-// фактическому фиксингу ЦБ к моменту клиринга.
-func (e *Engine) freezeEURUSDFixing(tick source.Tick) {
-	mskTime := tick.Timestamp.In(msk)
-	mskDate := mskTime.Format("2006-01-02")
-	if e.eurUSDFixDate != mskDate {
-		e.eurUSDFixDate = mskDate
-		e.eurUSDFix = 0
-	}
-	h, m, _ := mskTime.Clock()
-	if h < 15 || (h == 15 && m < 30) {
-		e.eurUSDFix = tick.Price
-	}
-}
-
 // Snapshot computes and returns current funding values for all instruments.
 func (e *Engine) Snapshot() FundingSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	now := time.Now()
-
-	// Spot USD/RUB via CNY cross: USDCNH × CNY/RUB (using CNYRUBF last price as proxy).
-	// EUR/RUB spot: EURUSD × USDCNH × CNY/RUB.
-	// Zero values mean the respective rate has not been ingested yet.
-	usdcnh := e.forexRates[source.SymbolUSDCNH]
-	eurusd := e.forexRates[source.SymbolEURUSD]
-	cnyRub := e.lastPrice[source.SymbolCNYRUBF]
-	usdRubSpot := usdcnh * cnyRub
-	eurRubSpot := eurusd * usdcnh * cnyRub
 
 	// Predicted CB rates. USD: VWAP спот TOM за 10:00–15:30 МСК (методика ЦБ для USD/RUB).
 	// EUR: с 08.06.2026 ЦБ считает курс как USD/RUB(ЦБ) × EUR/USD(ЕЦБ) по состоянию на 15:30 МСК,
@@ -691,19 +616,15 @@ func (e *Engine) Snapshot() FundingSnapshot {
 	if usdPredictedCBRate == 0 {
 		usdPredictedCBRate = e.spotTOMWAPLive[source.SymbolUSDRubTOM]
 	}
-	// EUR/USD, зафиксированный на 15:30 МСК (см. freezeEURUSDFixing). До 15:30 равен живому курсу.
-	eurUSD := e.eurUSDFix
-	if eurUSD == 0 {
-		// Фиксинг ещё не накоплен сегодня (старт сервиса после 15:30 или нет тиков) — живой курс.
-		eurUSD = eurusd
-	}
-	if eurUSD == 0 {
-		// Форекс-фид недоступен вовсе — оцениваем EUR/USD из отношения официальных курсов ЦБ.
-		usdCBR := e.officialRate[source.SymbolUSDRubOfficial]
-		eurCBR := e.officialRate[source.SymbolEURRubOfficial]
-		if usdCBR > 0 && eurCBR > 0 {
-			eurUSD = eurCBR / usdCBR
-		}
+	// EUR/USD оцениваем из отношения последних официальных курсов ЦБ: они посчитаны
+	// самим ЦБ по фиксингу ЕЦБ на 15:30, то есть по той же ноге, что нужна прогнозу.
+	// Прямого форекс-фида у сервиса нет (источник TwelveData убран 06.08.2026 вместе
+	// с Forex funding — на бесплатном тарифе он всё равно не был подключён в проде).
+	eurUSD := 0.0
+	usdCBR := e.officialRate[source.SymbolUSDRubOfficial]
+	eurCBR := e.officialRate[source.SymbolEURRubOfficial]
+	if usdCBR > 0 && eurCBR > 0 {
+		eurUSD = eurCBR / usdCBR
 	}
 	eurPredictedCBRate := 0.0
 	if eurUSD > 0 && usdPredictedCBRate > 0 {
@@ -712,25 +633,25 @@ func (e *Engine) Snapshot() FundingSnapshot {
 
 	return FundingSnapshot{
 		Timestamp:    now,
-		USDRUBF:      e.buildFunding(source.SymbolUSDRUBF, source.SymbolUSDRubOfficial, usdRubSpot, usdPredictedCBRate, now),
-		EURRUBF:      e.buildFunding(source.SymbolEURRUBF, source.SymbolEURRubOfficial, eurRubSpot, eurPredictedCBRate, now),
+		USDRUBF:      e.buildFunding(source.SymbolUSDRUBF, source.SymbolUSDRubOfficial, usdPredictedCBRate, now),
+		EURRUBF:      e.buildFunding(source.SymbolEURRUBF, source.SymbolEURRubOfficial, eurPredictedCBRate, now),
 		CNYRUBF:      e.buildCNYFunding(now),
 		USDTRUBPrice: e.lastPrice[source.SymbolUSDTRUB],
 	}
 }
 
 // buildFunding produces InstrumentFunding for USD/RUB and EUR/RUB futures.
-// spotRate and predictedCBRate are pre-computed by the caller; zero means unavailable.
+// predictedCBRate is pre-computed by the caller; zero means unavailable.
 // predictedCBRate for USD comes from USDRUB_TOM WAPRICE; for EUR via EUR/USD × USD cross.
-func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate float64, now time.Time) InstrumentFunding {
-	// Rolling VWAP (6-hour window) for live display and ForexFunding:
-	// exact trade-based feed preferred, ΔVOLTODAY approximation as fallback.
+func (e *Engine) buildFunding(sym, officialSym string, predictedCBRate float64, now time.Time) InstrumentFunding {
+	// Rolling VWAP (6-hour window) for live display: exact trade-based feed
+	// preferred, ΔVOLTODAY approximation as fallback.
 	// После 15:30 показываем ЗАМОРОЖЕННУЮ ногу фьючерса (settlement VWAP): именно на
 	// ней зафиксирован сегодняшний фандинг, и «живое» число, продолжающее ползти
 	// вечером, только вводило в заблуждение при сверке с биржей.
-	vwap, hasVWAP := e.displayVWAP(sym, now)
+	vwap, _ := e.displayVWAP(sym, now)
 	if settl := e.settlVWAP[sym]; settl != nil {
-		vwap, hasVWAP = *settl, true
+		vwap = *settl
 	}
 	last := e.lastPrice[sym]
 
@@ -746,11 +667,6 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 	// MOEXFunding: official swap_rate published by MOEX ISS every minute.
 	if rate, ok := e.swapRate[sym]; ok {
 		inf.MOEXFunding = ptr(rate)
-	}
-
-	// ForexFunding: raw deviation via CNY cross (market-based estimate).
-	if spotRate > 0 && hasVWAP {
-		inf.ForexFunding = ptr(vwap - spotRate)
 	}
 
 	// cbPublishedToday: ЦБ опубликовал новый курс именно сегодня (МСК).
@@ -855,7 +771,7 @@ func (e *Engine) buildFunding(sym, officialSym string, spotRate, predictedCBRate
 }
 
 // buildCNYFunding produces InstrumentFunding for CNY/RUB futures.
-// MOEXFunding comes from MOEX ISS swap_rate; no ForexFunding or CBFunding for CNYRUBF.
+// MOEXFunding comes from MOEX ISS swap_rate; no CBFunding for CNYRUBF.
 func (e *Engine) buildCNYFunding(now time.Time) InstrumentFunding {
 	vwap, _ := e.displayVWAP(source.SymbolCNYRUBF, now)
 	if settl := e.settlVWAP[source.SymbolCNYRUBF]; settl != nil {

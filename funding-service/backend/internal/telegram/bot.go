@@ -13,24 +13,28 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+
+	"github.com/funding-service/backend/internal/storage"
 )
 
 // Bot wraps a Telegram bot and handles user registration via link tokens.
 type Bot struct {
-	api  *tgbotapi.BotAPI
-	pool *pgxpool.Pool
-	log  zerolog.Logger
+	api    *tgbotapi.BotAPI
+	pool   *pgxpool.Pool
+	store  *storage.Store
+	admins AdminList
+	log    zerolog.Logger
 }
 
 // New creates a Bot, optionally routing Telegram traffic through one of proxyURLs.
 // Returns an error if the token is empty/invalid or no proxy could authorise.
-func New(token string, proxyURLs []string, pool *pgxpool.Pool, log zerolog.Logger) (*Bot, error) {
+func New(token string, proxyURLs []string, pool *pgxpool.Pool, store *storage.Store, admins AdminList, log zerolog.Logger) (*Bot, error) {
 	api, err := newAPI(token, proxyURLs, log)
 	if err != nil {
 		return nil, err
 	}
-	log.Info().Str("username", api.Self.UserName).Msg("telegram bot authorised")
-	return &Bot{api: api, pool: pool, log: log}, nil
+	log.Info().Str("username", api.Self.UserName).Int("admins", len(admins)).Msg("telegram bot authorised")
+	return &Bot{api: api, pool: pool, store: store, admins: admins, log: log}, nil
 }
 
 // newAPI authorises the bot, directly or through the first working proxy.
@@ -137,60 +141,65 @@ func (b *Bot) handle(ctx context.Context, msg *tgbotapi.Message) {
 	}
 }
 
+// handleStart привязывает чат к сессии браузера, из которой пришла ссылка.
+//
+// Повторный /start из уже подписанного чата — это НЕ ошибка: человек открыл сайт
+// в другом браузере (или почистил его хранилище), там завелась новая сессия, и он
+// жмёт «Привязать Telegram» ещё раз. Раньше бот отвечал «вы уже подписаны», а тот
+// браузер так и оставался анонимным и вечно показывал виджет привязки. Теперь
+// сессия переезжает на существующий аккаунт (storage.LinkedMerged).
 func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-
-	// A chat subscribes once (telegram_chat_id is UNIQUE). If it is already linked,
-	// confirm that instead of failing the re-link with a confusing "token not found".
-	var linked bool
-	if err := b.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM users WHERE telegram_chat_id = $1)`, chatID,
-	).Scan(&linked); err != nil {
-		b.log.Warn().Err(err).Msg("telegram start: linked check failed")
-	} else if linked {
-		b.send(chatID, "Вы уже подписаны на уведомления ✓")
-		return
-	}
+	isAdmin := b.admins.Has(chatID, msg.From.UserName)
 
 	token := strings.TrimSpace(msg.CommandArguments())
 	if token == "" {
+		// Голый /start: ссылки нет — привязывать нечего, но роль по списку
+		// админов освежим, если чат уже подписан.
+		if err := b.store.SetAdminByChat(ctx, chatID, isAdmin); err != nil {
+			b.log.Warn().Err(err).Msg("telegram start: admin refresh failed")
+		}
 		b.send(chatID, "Зайдите на сайт и нажмите «Привязать Telegram», чтобы получить ссылку для регистрации.")
 		return
 	}
 
-	tag, err := b.pool.Exec(ctx,
-		`UPDATE users
-		 SET telegram_chat_id = $1, telegram_username = $2
-		 WHERE link_token = $3 AND telegram_chat_id IS NULL`,
-		chatID, msg.From.UserName, token,
-	)
+	res, err := b.store.LinkTelegramChat(ctx, token, chatID, msg.From.UserName, isAdmin)
+	if errors.Is(err, storage.ErrLinkTokenNotFound) {
+		b.send(chatID, "Ссылка устарела. Откройте сайт и нажмите «Привязать Telegram» ещё раз.")
+		return
+	}
 	if err != nil {
 		b.log.Warn().Err(err).Msg("telegram start: db error")
 		b.send(chatID, "Внутренняя ошибка. Попробуйте позже.")
 		return
 	}
 
-	if tag.RowsAffected() == 0 {
-		b.send(chatID, "Токен не найден или уже использован. Получите новую ссылку на сайте.")
-		return
-	}
+	b.log.Info().
+		Int64("chat_id", chatID).
+		Str("username", msg.From.UserName).
+		Bool("admin", isAdmin).
+		Int("result", int(res)).
+		Msg("telegram user linked")
 
-	b.log.Info().Int64("chat_id", msg.Chat.ID).Str("username", msg.From.UserName).Msg("telegram user linked")
-	b.send(msg.Chat.ID, "Привет! Уведомления подключены ✓")
+	switch res {
+	case storage.LinkedMerged:
+		b.send(chatID, "Этот браузер подключён к вашей подписке ✓")
+	case storage.LinkedSameUser:
+		b.send(chatID, "Вы уже подписаны на уведомления ✓")
+	default:
+		b.send(chatID, "Привет! Уведомления подключены ✓")
+	}
 }
 
 func (b *Bot) handleStop(ctx context.Context, msg *tgbotapi.Message) {
-	tag, err := b.pool.Exec(ctx,
-		`UPDATE users SET telegram_chat_id = NULL WHERE telegram_chat_id = $1`,
-		msg.Chat.ID,
-	)
+	was, err := b.store.UnlinkTelegramChat(ctx, msg.Chat.ID)
 	if err != nil {
 		b.log.Warn().Err(err).Msg("telegram stop: db error")
 		b.send(msg.Chat.ID, "Внутренняя ошибка. Попробуйте позже.")
 		return
 	}
 
-	if tag.RowsAffected() == 0 {
+	if !was {
 		b.send(msg.Chat.ID, "Аккаунт не был привязан.")
 		return
 	}

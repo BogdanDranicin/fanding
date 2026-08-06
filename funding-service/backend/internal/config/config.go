@@ -23,8 +23,11 @@ type Config struct {
 	// Each entry is user:pass@host:port or a full scheme URL; the bot tries them in
 	// order until one authorises. Empty = connect directly.
 	TelegramProxyURLs []string `envconfig:"TELEGRAM_PROXY_URL"`
-	TwelveDataAPIKey string `envconfig:"TWELVEDATA_API_KEY"`
-	MOEXPollMs       int    `envconfig:"MOEX_POLL_INTERVAL_MS" default:"250"`
+	// TelegramAdmins — кому доступны админские вкладки «Журнал» и «Скорость».
+	// Список записей вида 123456789 (chat_id) или @username, через запятую.
+	// Роль выдаётся при /start в боте и пересчитывается при каждом /start.
+	TelegramAdmins []string `envconfig:"TELEGRAM_ADMINS"`
+	MOEXPollMs     int      `envconfig:"MOEX_POLL_INTERVAL_MS" default:"250"`
 	Port             int    `envconfig:"BACKEND_PORT"          default:"8080"`
 	LogLevel         string `envconfig:"LOG_LEVEL"             default:"info"`
 }

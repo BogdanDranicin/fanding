@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { CBPublication } from '../types/funding';
-
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
+import { authFetch } from '../api/auth';
 
 const fmtRate = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 const fmtFund = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
@@ -166,7 +165,7 @@ export function JournalPage() {
   // after the fetch resolves, so it is safe to call directly from an effect.
   const load = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_BASE}/api/v1/cb-publications?days=90`);
+      const resp = await authFetch('/api/v1/cb-publications?days=90');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as CBPublication[] | null;
       setRows(data ?? []);
