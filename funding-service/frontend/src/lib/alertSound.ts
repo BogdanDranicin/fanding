@@ -69,14 +69,25 @@ function ctx(): AudioContext {
   return audioCtx;
 }
 
-// Браузеры блокируют звук до первого жеста пользователя. Разово подписываемся
-// на pointerdown/keydown и «разогреваем» AudioContext, чтобы сигнал, пришедший
+// Браузеры блокируют звук до первого жеста пользователя. Подписываемся на
+// pointerdown/keydown и «разогреваем» AudioContext, чтобы сигнал, пришедший
 // позже по WebSocket, уже мог прозвучать.
+//
+// Слушатели НЕ снимаются после первого жеста: браузер может приостановить
+// контекст и позже (долго скрытая вкладка, спящий ноутбук), и тогда единственный
+// шанс поднять его — следующий жест пользователя. resume() на уже запущенном
+// контексте бесплатен, так что держать подписку дешевле, чем ловить немой сигнал.
+let unlockBound = false;
+
 export function initAlertUnlock(): void {
+  if (unlockBound) return;
+  unlockBound = true;
   const unlock = () => {
-    ctx().resume().catch(() => {});
-    window.removeEventListener('pointerdown', unlock);
-    window.removeEventListener('keydown', unlock);
+    try {
+      ctx().resume().catch(() => {});
+    } catch {
+      // WebAudio недоступен — молча выходим
+    }
   };
   window.addEventListener('pointerdown', unlock);
   window.addEventListener('keydown', unlock);
@@ -102,7 +113,18 @@ function playChime(): void {
   } catch {
     return; // WebAudio недоступен
   }
-  c.resume().catch(() => {});
+  // resume() асинхронный, а у приостановленного контекста currentTime стоит на
+  // месте. Раньше ноты планировались сразу после вызова resume — от замороженного
+  // currentTime, — и к моменту реального запуска оказывались в прошлом: сигнал
+  // глох или сминался в один щелчок. Планируем только на запущенном контексте.
+  if (c.state === 'suspended') {
+    c.resume().then(() => scheduleChime(c)).catch(() => {});
+    return;
+  }
+  scheduleChime(c);
+}
+
+function scheduleChime(c: AudioContext): void {
   const vol = getAlertVolume();
   const note = (freq: number, at: number) => {
     const osc = c.createOscillator();
