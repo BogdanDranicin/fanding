@@ -206,8 +206,12 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 			//
 			//   rateIsFresh    — курс в ответе новее того, что знал движок. На холодном
 			//                    старте это дата ЦБ из будущего (публикация уже прошла),
-			//                    в рабочем режиме — смена даты. По нему тик помечается
-			//                    KindNewOfficialRate, чтобы движок пересчитал фандинг.
+			//                    в рабочем режиме — смена САМИХ курсов. По нему тик
+			//                    помечается KindNewOfficialRate, чтобы движок пересчитал
+			//                    фандинг. Одной смены даты недостаточно — на этом мы уже
+			//                    горели: 10.08.2026 сайт показывал CBFunding с полуночи,
+			//                    посчитанный от курса, действующего с 08.08, потому что
+			//                    голая смена даты помечала тик как новую публикацию.
 			//
 			//   livePublication — настоящее «событие публикации» для журнала и Telegram.
 			//                    Требуем ДВА условия: (1) мы работаем не с холодного
@@ -221,8 +225,11 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 			//                    они не менялись).
 			wasCold := s.lastDate == ""
 			ratesChanged := res.USD != s.lastUSD || res.EUR != s.lastEUR || res.CNY != s.lastCNY
-			rateIsFresh := !wasCold || isFutureDate(res.Date)
 			livePublication := !wasCold && ratesChanged
+			// Дата из будущего оставлена как самостоятельный признак: она покрывает и
+			// холодный старт после публикации, и редкий случай, когда ЦБ установил на
+			// завтра ровно те же курсы (ratesChanged == false, а публикация настоящая).
+			rateIsFresh := livePublication || isFutureDate(res.Date)
 			s.lastDate = res.Date
 			s.lastUSD, s.lastEUR, s.lastCNY = res.USD, res.EUR, res.CNY
 			s.emitTicks(res, symbols, ch, rateIsFresh)

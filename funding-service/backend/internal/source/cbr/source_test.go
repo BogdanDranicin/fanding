@@ -333,6 +333,96 @@ func TestSource_OnNewPublication_NotFiredOnColdStartFutureDate(t *testing.T) {
 	}
 }
 
+// TestSource_TickKind_NotNewOnDateEchoSameRates — регрессия на баг 10.08.2026.
+// Смена одной только даты помечала тик как KindNewOfficialRate, движок ставил
+// officialRateDate = сегодня и с полуночи считал «ЦБ уже опубликовал». В 15:30,
+// когда замерзает нога фьючерса, на сайте появлялся CBFunding, посчитанный от
+// ВЧЕРАШНЕГО курса — и упирался ровно в кап K2 (USD +0.123255 = 0.0015×82.1665).
+// Публикации при этом не было: курсы те же, Telegram и журнал молчали.
+func TestSource_TickKind_NotNewOnDateEchoSameRates(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		date := "19.05.2026"
+		if n >= 2 {
+			date = "20.05.2026" // дата уехала, курсы прежние
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, validXMLRates(date, "82,5000", "90,3000"))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	for {
+		select {
+		case tick, ok := <-ch:
+			if !ok {
+				return
+			}
+			if tick.Kind == source.KindNewOfficialRate {
+				t.Fatal("смена даты без смены курсов не должна помечаться KindNewOfficialRate: движок примет её за публикацию ЦБ и посчитает фандинг от старого курса")
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// TestSource_TickKind_NewOnRealPublication — обратная сторона: настоящая
+// публикация (курсы изменились) обязана дойти до движка как KindNewOfficialRate,
+// иначе фандинг не пересчитается вообще.
+func TestSource_TickKind_NewOnRealPublication(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		body := validXMLRates("19.05.2026", "82,5000", "90,3000")
+		if n >= 2 {
+			body = validXMLRates("20.05.2026", "83,0000", "91,0000")
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	for {
+		select {
+		case tick, ok := <-ch:
+			if !ok {
+				t.Fatal("публикация не доставлена как KindNewOfficialRate")
+			}
+			if tick.Kind == source.KindNewOfficialRate {
+				if tick.Price != 83.0 {
+					t.Errorf("ожидали новый курс 83.0, got %v", tick.Price)
+				}
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("публикация не доставлена как KindNewOfficialRate")
+		}
+	}
+}
+
 // TestSource_LogsDetectionAtWarn проверяет, что обнаружение новой публикации курсов
 // логируется на уровне Warn — иначе при проде с LOG_LEVEL=warn событие не видно,
 // и нельзя диагностировать задержку «публикация→детект».

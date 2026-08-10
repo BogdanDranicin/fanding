@@ -195,6 +195,14 @@ func FetchXMLMirror(ctx context.Context, client *http.Client) (ChannelResult, er
 // publishes next-day rates around 16:30 MSK, so we request tomorrow and accept
 // it only when USD differs from today (otherwise the service echoed today's
 // values for a future date — pre-publication behaviour).
+//
+// Дата в результате — та, что вернул ЦБ (msprop:OnDate), а НЕ та, что мы
+// запросили: до публикации сервис отдаёт действующий курс на любую запрошенную
+// дату. Раньше канал подписывался датой запроса, из-за чего в гонке «побеждает
+// самая свежая дата» SOAP каждую полночь обыгрывал официальный XML фиктивно
+// свежей датой. Движок принимал это за публикацию и считал CBFunding от
+// ВЧЕРАШНЕГО курса (10.08.2026: USD +0.123255 = ровно кап K2, при том что ЦБ
+// в тот момент ещё не публиковал).
 func FetchSOAP(ctx context.Context, client *http.Client) (ChannelResult, error) {
 	msk := time.FixedZone("MSK", mskOffset)
 	now := time.Now().In(msk)
@@ -252,13 +260,27 @@ func soapOnDate(ctx context.Context, client *http.Client, date time.Time) (Chann
 
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	var dg diffgram
+	onDate := ""
 	for {
 		tok, terr := dec.Token()
 		if terr != nil {
 			break
 		}
 		se, ok := tok.(xml.StartElement)
-		if !ok || se.Name.Local != "diffgram" {
+		if !ok {
+			continue
+		}
+		// Дата, на которую ЦБ реально отдал курс: атрибут msprop:OnDate
+		// ("20260808") на элементе схемы, идущей в ответе ПЕРЕД diffgram.
+		if onDate == "" {
+			for _, a := range se.Attr {
+				if a.Name.Local == "OnDate" {
+					onDate = strings.TrimSpace(a.Value)
+					break
+				}
+			}
+		}
+		if se.Name.Local != "diffgram" {
 			continue
 		}
 		if err = dec.DecodeElement(&dg, &se); err != nil {
@@ -270,7 +292,7 @@ func soapOnDate(ctx context.Context, client *http.Client, date time.Time) (Chann
 		return ChannelResult{}, fmt.Errorf("нет данных за %s", date.Format("02.01.2006"))
 	}
 
-	res := ChannelResult{Date: date.Format("02.01.2006")}
+	res := ChannelResult{Date: soapDate(onDate, date)}
 	for _, v := range dg.Valutes {
 		nom := v.VNom
 		if nom <= 0 {
@@ -290,6 +312,17 @@ func soapOnDate(ctx context.Context, client *http.Client, date time.Time) (Chann
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// soapDate converts the msprop:OnDate attribute ("20060102") to DD.MM.YYYY.
+// Falls back to the requested date only if the attribute is missing or
+// unparseable — a fallback that must stay rare: the requested date is exactly
+// the fiction that made SOAP win the race with a date the CBR never published.
+func soapDate(onDate string, requested time.Time) string {
+	if t, err := time.Parse("20060102", onDate); err == nil {
+		return t.Format("02.01.2006")
+	}
+	return requested.Format("02.01.2006")
+}
 
 // normalizeDate converts ISO "2025-05-26T…" to "26.05.2025"; leaves DD.MM.YYYY as-is.
 func normalizeDate(s string) string {
