@@ -1,6 +1,7 @@
 import type { FundingSnapshot, InstrumentFunding } from '../types/funding';
 import { useFlashOnChange } from '../hooks/useFlashOnChange';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useAuthStore } from '../store/authStore';
 
 interface Props {
   current: FundingSnapshot | null;
@@ -75,6 +76,11 @@ interface Row {
   // (used by the prediction-error row: predicted_cb_rate − official_rate).
   compute?: (inst: InstrumentFunding) => number | undefined;
   skipCNY?: boolean;
+  // adminOnly — строка видна только админам (роль из TELEGRAM_ADMINS, как вкладки
+  // «Журнал» и «Скорость»). Всё, что относится к ПРОГНОЗУ, — служебная кухня:
+  // предсказанный курс ЦБ, ошибка прогноза и прогнозный фандинг нужны для сверки
+  // методики, а обычному пользователю показывают числа, которые ещё изменятся.
+  adminOnly?: boolean;
 }
 
 const predictionError = (inst: InstrumentFunding): number | undefined =>
@@ -85,10 +91,10 @@ const predictionError = (inst: InstrumentFunding): number | undefined =>
 const ROWS: Row[] = [
   { label: 'VWAP',                  field: 'vwap',              kind: 'rate'                                                  },
   { label: 'Last Price',            field: 'last_price',        kind: 'rate'                                                  },
-  { label: 'Предсказанный курс ЦБ', field: 'predicted_cb_rate', kind: 'rate',                              skipCNY: true       },
+  { label: 'Предсказанный курс ЦБ', field: 'predicted_cb_rate', kind: 'rate',                              skipCNY: true, adminOnly: true },
   { label: 'Курс ЦБ (факт)',        field: 'official_rate',     kind: 'rate',                              skipCNY: true       },
-  { label: 'Ошибка прогноза',       kind: 'delta',  compute: predictionError, refField: 'official_rate',  skipCNY: true       },
-  { label: 'Прогнозный фандинг',    field: 'predicted_funding', kind: 'funding', refField: 'predicted_cb_rate', skipCNY: true  },
+  { label: 'Ошибка прогноза',       kind: 'delta',  compute: predictionError, refField: 'official_rate',  skipCNY: true, adminOnly: true },
+  { label: 'Прогнозный фандинг',    field: 'predicted_funding', kind: 'funding', refField: 'predicted_cb_rate', skipCNY: true, adminOnly: true },
   { label: 'MOEX funding',          field: 'moex_funding',      kind: 'funding', refField: 'last_price'                       },
   { label: 'CB funding',            field: 'cb_funding',        kind: 'funding', refField: 'official_rate', skipCNY: true       },
 ];
@@ -125,7 +131,7 @@ function formatDeltaRow(value: number | undefined, ref: number | undefined): str
   return text;
 }
 
-function FundingTableMobile({ current }: Props) {
+function FundingTableMobile({ current, rows }: Props & { rows: Row[] }) {
   return (
     <div className="accordion">
       {SYMS.map((sym) => {
@@ -148,7 +154,7 @@ function FundingTableMobile({ current }: Props) {
               )}
             </summary>
             <div className="accordion-body">
-              {ROWS.map((row) => {
+              {rows.map((row) => {
                 const { label, kind, refField, skipCNY } = row;
                 if (skipCNY && sym === 'CNYRUBF') {
                   return (
@@ -186,7 +192,12 @@ function FundingTableMobile({ current }: Props) {
 
 export function FundingTable({ current, previous }: Props) {
   const isMobile = useIsMobile();
-  if (isMobile) return <FundingTableMobile current={current} previous={previous} />;
+  const isAdmin = useAuthStore((s) => s.me.is_admin);
+  // Пока права не загрузились, is_admin === false, то есть прогнозные строки не
+  // мелькают у обычного пользователя и появляются у админа, как только придёт /me.
+  const rows = isAdmin ? ROWS : ROWS.filter((r) => !r.adminOnly);
+
+  if (isMobile) return <FundingTableMobile current={current} previous={previous} rows={rows} />;
 
   return (
     <table className="funding-table">
@@ -197,7 +208,7 @@ export function FundingTable({ current, previous }: Props) {
         </tr>
       </thead>
       <tbody>
-        {ROWS.map((row) => (
+        {rows.map((row) => (
           <tr key={row.label}>
             <th className="row-label">{row.label}</th>
             {SYMS.map((sym) => {
