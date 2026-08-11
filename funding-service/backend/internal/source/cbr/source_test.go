@@ -333,6 +333,196 @@ func TestSource_OnNewPublication_NotFiredOnColdStartFutureDate(t *testing.T) {
 	}
 }
 
+// emptyXML — разбираемый ValCurs с датой, но БЕЗ валют: так выглядел ответ ЦБ,
+// породивший пустое уведомление 12.08.2026 в 16:26:16.
+func emptyXML(date string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
+		`<ValCurs Date=%q name="Foreign Currency Market"></ValCurs>`, date)
+}
+
+// TestSource_NoPublicationOnEmptyRates — регрессия на пустое «📢 Фандинг зафиксирован»
+// от 12.08.2026, 16:26:16. Ответ с НОВОЙ датой, но без курсов, разбирался без ошибки,
+// выигрывал гонку по свежести даты и поднимал публикацию: курсы «изменились» с
+// прежних на нули. В Telegram уходило сообщение без единой цифры (строки фандинга
+// считаются от курса ЦБ, а его нет), тиков при этом не было вовсе — emitTicks
+// пропускает цены ≤ 0, поэтому на сайте баг был не виден.
+func TestSource_NoPublicationOnEmptyRates(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "text/xml")
+		// Первый ответ — нормальная база, дальше пустышка с более свежей датой.
+		if n == 1 {
+			fmt.Fprint(w, validXMLRates("19.05.2026", "82,5000", "90,3000"))
+			return
+		}
+		fmt.Fprint(w, emptyXML("20.05.2026"))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+		t.Error("ответ без курсов не должен считаться публикацией")
+	case <-ctx.Done():
+		// корректно — пустышка проигнорирована
+	}
+}
+
+// Пустышка не должна и портить базу: если после неё канал отдаёт настоящую
+// публикацию, она обязана сработать. Раньше нули записывались в lastUSD/lastEUR,
+// и следующий нормальный ответ выглядел ВТОРОЙ публикацией — с тиками
+// KindNewOfficialRate, то есть движок пересчитывал CBFunding не в тот момент.
+func TestSource_PublicationDetectedAfterEmptyRates(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "text/xml")
+		switch {
+		case n == 1:
+			fmt.Fprint(w, validXMLRates("19.05.2026", "82,5000", "90,3000"))
+		case n == 2:
+			fmt.Fprint(w, emptyXML("20.05.2026"))
+		default:
+			fmt.Fprint(w, validXMLRates("20.05.2026", "83,0000", "91,0000"))
+		}
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+		// корректно — настоящая публикация после пустышки не потеряна
+	case <-ctx.Done():
+		t.Fatal("публикация после пустого ответа не обнаружена")
+	}
+
+	if got := s.LastPublicationInfo(); got.USD != 83 || got.EUR != 91 {
+		t.Errorf("PublicationInfo должен нести настоящие курсы, получено USD=%v EUR=%v", got.USD, got.EUR)
+	}
+}
+
+// Частичный ответ (есть USD, нет EUR) не должен затирать известный EUR нулём:
+// иначе вернувшийся на следующем опросе прежний EUR выглядел бы ВТОРОЙ публикацией.
+// Здесь после частичного ответа приходит полный с новой датой, но БЕЗ смены самих
+// курсов — публикация должна быть ровно одна, за частичным ответом.
+func TestSource_PartialResponseKeepsKnownRate(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "text/xml")
+		switch {
+		case n == 1: // база
+			fmt.Fprint(w, validXMLRates("19.05.2026", "82,5000", "90,3000"))
+		case n == 2: // настоящая публикация, но EUR в ответе не доехал
+			fmt.Fprint(w, fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
+				`<ValCurs Date="20.05.2026" name="Foreign Currency Market">`+
+				`<Valute ID="R01235"><CharCode>USD</CharCode><Nominal>1</Nominal><Value>83,0000</Value></Valute>`+
+				`</ValCurs>`))
+		default: // EUR вернулся прежним, курсы не менялись
+			fmt.Fprint(w, validXMLRates("21.05.2026", "83,0000", "90,3000"))
+		}
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+		// публикация по смене USD — корректно
+	case <-ctx.Done():
+		t.Fatal("публикация по частичному ответу не обнаружена")
+	}
+
+	// Второй публикации быть не должно: EUR вернулся тем же, что и был до пропажи.
+	select {
+	case <-s.OnNewPublication:
+		t.Error("возврат пропавшего курса не должен считаться новой публикацией")
+	case <-time.After(150 * time.Millisecond):
+		// корректно
+	}
+}
+
+// Откат даты назад (канал с самой свежей датой отвалился, гонку выиграл отставший)
+// публикацией не считается: иначе курсы «менялись» бы обратно на вчерашние — и это
+// уходило бы и подписчикам, и в движок как новая официальная котировка.
+func TestSource_NoPublicationOnDateRollback(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "text/xml")
+		if n == 1 {
+			fmt.Fprint(w, validXMLRates("20.05.2026", "83,0000", "91,0000"))
+			return
+		}
+		fmt.Fprint(w, validXMLRates("19.05.2026", "82,5000", "90,3000"))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(srv)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	ch, err := s.Subscribe(ctx, []string{source.SymbolUSDRubOfficial})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-s.OnNewPublication:
+		t.Error("откат даты назад не должен считаться публикацией")
+	case <-ctx.Done():
+		// корректно
+	}
+}
+
 // TestSource_TickKind_NotNewOnDateEchoSameRates — регрессия на баг 10.08.2026.
 // Смена одной только даты помечала тик как KindNewOfficialRate, движок ставил
 // officialRateDate = сегодня и с полуночи считал «ЦБ уже опубликовал». В 15:30,

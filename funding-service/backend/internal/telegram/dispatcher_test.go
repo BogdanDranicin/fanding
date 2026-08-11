@@ -196,6 +196,46 @@ func TestBroadcast_sendsInParallel(t *testing.T) {
 	}
 }
 
+// Второй заслон против пустого «📢 Фандинг зафиксирован» (12.08.2026, 16:26:16):
+// публикация без курсов не даёт в сообщении ничего, кроме заголовка и времени, —
+// такое не отправляем вообще. Заодно проверяется, что до базы дело не доходит:
+// pool у диспетчера nil, и любой поход в неё уронил бы тест паникой.
+func TestRun_skipsPublicationWithoutRates(t *testing.T) {
+	fs := &fakeSender{}
+	d := &Dispatcher{
+		api:        fs,
+		log:        zerolog.Nop(),
+		pubInfoFn:  func() cbr.PublicationInfo { return cbr.PublicationInfo{Date: "13.08.2026"} },
+		snapshotFn: func() funding.FundingSnapshot { return funding.FundingSnapshot{} },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pubCh := make(chan time.Time, 1)
+	pubCh <- time.Now()
+
+	done := make(chan struct{})
+	go func() {
+		d.Run(ctx, pubCh)
+		close(done)
+	}()
+
+	// Диспетчер обязан отбросить сигнал сразу, не заходя в awaitCBFunding на 10 с.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run не завершился — сигнал без курсов не был отброшен сразу")
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.sent) != 0 {
+		t.Errorf("отправлено %d сообщений, ожидалось 0", len(fs.sent))
+	}
+}
+
 // Отмена контекста прекращает рассылку и не оставляет висящих горутин-воркеров
 // (иначе broadcast зависнет на wg.Wait и тест не завершится).
 func TestBroadcast_stopsOnContextCancel(t *testing.T) {

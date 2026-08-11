@@ -199,9 +199,32 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 		}
 
 		failures = 0
-		if res.Date == s.lastDate {
+		switch {
+		case !res.hasAnyMajor():
+			// Ответ есть, а курсов в нём нет. Ни тиков, ни публикации, и — главное —
+			// база lastUSD/lastEUR остаётся прежней, иначе следующий нормальный ответ
+			// выглядел бы публикацией. См. hasAnyMajor: отсюда росло пустое уведомление.
+			log.Warn().
+				Str("date", res.Date).
+				Float64("usd", res.USD).
+				Float64("eur", res.EUR).
+				Str("winner", info.winner).
+				Msg("cbr: ответ без курсов USD/EUR — игнорируем")
+
+		case s.dateWentBack(res.Date):
+			// Канал с самой свежей датой отвалился, и гонку выиграл отставший. Принять
+			// это за событие нельзя: курсы «поменялись» бы назад, на вчерашние, и ушли
+			// бы и в движок (KindNewOfficialRate), и подписчикам как публикация.
+			log.Warn().
+				Str("date", res.Date).
+				Str("last_date", s.lastDate).
+				Str("winner", info.winner).
+				Msg("cbr: дата ответа старее известной — игнорируем")
+
+		case res.Date == s.lastDate:
 			log.Debug().Str("date", res.Date).Msg("no new publication")
-		} else {
+
+		default:
 			// Различаем ДВА разных события, которые раньше смешивались в одном флаге:
 			//
 			//   rateIsFresh    — курс в ответе новее того, что знал движок. На холодном
@@ -224,14 +247,29 @@ func (s *Source) pollLoop(ctx context.Context, symbols []string, ch chan<- sourc
 			//                    же курсами (баг: строка в журнале «курсы пришли», хотя
 			//                    они не менялись).
 			wasCold := s.lastDate == ""
-			ratesChanged := res.USD != s.lastUSD || res.EUR != s.lastEUR || res.CNY != s.lastCNY
+			// Сравниваем только те курсы, что в ответе ЕСТЬ. Отсутствующий курс —
+			// это «неизвестно», а не «изменился на ноль»: иначе частичный ответ
+			// сначала объявлял бы публикацию сам, а потом делал бы публикацией и
+			// следующий нормальный ответ, где валюта вернулась на прежнее значение.
+			ratesChanged := (res.USD > 0 && res.USD != s.lastUSD) ||
+				(res.EUR > 0 && res.EUR != s.lastEUR) ||
+				(res.CNY > 0 && res.CNY != s.lastCNY)
 			livePublication := !wasCold && ratesChanged
 			// Дата из будущего оставлена как самостоятельный признак: она покрывает и
 			// холодный старт после публикации, и редкий случай, когда ЦБ установил на
 			// завтра ровно те же курсы (ratesChanged == false, а публикация настоящая).
 			rateIsFresh := livePublication || isFutureDate(res.Date)
 			s.lastDate = res.Date
-			s.lastUSD, s.lastEUR, s.lastCNY = res.USD, res.EUR, res.CNY
+			// База обновляется только по присутствующим курсам — ноль в базу не пишем.
+			if res.USD > 0 {
+				s.lastUSD = res.USD
+			}
+			if res.EUR > 0 {
+				s.lastEUR = res.EUR
+			}
+			if res.CNY > 0 {
+				s.lastCNY = res.CNY
+			}
 			s.emitTicks(res, symbols, ch, rateIsFresh)
 
 			// Реальную публикацию логируем на Warn, чтобы событие было видно в проде
@@ -325,6 +363,14 @@ func (s *Source) fetchRace(ctx context.Context) (ChannelResult, fetchInfo, error
 			}
 			continue
 		}
+		// Канал без единого главного курса в гонке не участвует: пусть победит тот,
+		// у кого данные есть, а не тот, у кого свежее дата на пустом ответе.
+		if !o.res.hasAnyMajor() {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: ответ без курсов USD/EUR (date %q)", o.id, o.res.Date)
+			}
+			continue
+		}
 		d := parseRateDate(o.res.Date)
 		if !found || d.After(bestDate) {
 			found, bestDate, best, info.winner = true, d, o.res, o.id
@@ -410,6 +456,21 @@ func parseRateDate(s string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// dateWentBack сообщает, что ответ подписан датой СТАРЕЕ уже известной. Вызывается
+// только из pollLoop, откуда пишется lastDate, — дополнительная синхронизация не нужна.
+// Неразбираемую дату откатом не считаем: она и так проигрывает гонку (parseRateDate
+// возвращает нулевое время).
+func (s *Source) dateWentBack(date string) bool {
+	if s.lastDate == "" {
+		return false
+	}
+	got, last := parseRateDate(date), parseRateDate(s.lastDate)
+	if got.IsZero() || last.IsZero() {
+		return false
+	}
+	return got.Before(last)
 }
 
 // isFutureDate reports whether the CBR date string ("DD.MM.YYYY") is strictly after today MSK.

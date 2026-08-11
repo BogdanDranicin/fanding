@@ -26,6 +26,27 @@ type ChannelResult struct {
 	Timestamp string  // channel-provided timestamp, if any (mirrors expose one)
 }
 
+// hasAnyMajor сообщает, что в ответе есть хотя бы один главный курс. Ответ, в
+// котором нет ни USD, ни EUR, — это сбой канала, а не публикация.
+//
+// Проверка появилась 12.08.2026 после пустого уведомления в 16:26:16 — «📢 Фандинг
+// зафиксирован» без единой цифры. Канал вернул разбираемый ответ с датой, но с
+// нулевыми курсами (пустой/обрезанный ValCurs парсится без ошибки, а FetchSOAP
+// отдаёт результат с USD == 0 тоже без ошибки), и такой ответ:
+//   - выигрывал гонку по самой свежей дате;
+//   - поднимал ratesChanged (0 ≠ прежнего) → publication → пустое сообщение;
+//   - записывал нули в lastUSD/lastEUR, из-за чего СЛЕДУЮЩИЙ опрос с настоящими
+//     курсами снова выглядел публикацией — уже с тиками KindNewOfficialRate, то
+//     есть движок пересчитывал CBFunding не в тот момент (ровно класс бага 07f128b).
+//
+// Тиков такой ответ при этом не давал вовсе (emitTicks пропускает цены ≤ 0),
+// поэтому на сайте он был не виден — только в боте.
+//
+// Требовать ОБА курса нельзя: тогда одна отсутствующая валюта выбросила бы
+// настоящую публикацию целиком. Частичный ответ обрабатывается мягче — курс,
+// которого в нём нет, просто сохраняет прежнее значение (см. pollLoop).
+func (r ChannelResult) hasAnyMajor() bool { return r.USD > 0 || r.EUR > 0 }
+
 // Channel describes one pollable CBR publication endpoint. Fetch returns the
 // channel's current rates; callers compare Date against a known last date to
 // detect a fresh publication. SOAP queries the next-day rate internally.
