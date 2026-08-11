@@ -3,9 +3,13 @@ package telegram
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/funding-service/backend/internal/funding"
 	"github.com/funding-service/backend/internal/source/cbr"
@@ -132,6 +136,84 @@ func TestAwaitCBFunding_returnsWhenEngineCatchesUp(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("took %v — should return well before the 10s timeout", elapsed)
+	}
+}
+
+// fakeSender имитирует поход в Telegram: каждая отправка занимает delay и
+// запоминается вместе с пиком одновременных запросов.
+type fakeSender struct {
+	delay time.Duration
+
+	mu   sync.Mutex
+	sent []int64
+
+	inflight, peak atomic.Int64
+}
+
+func (f *fakeSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	n := f.inflight.Add(1)
+	for {
+		peak := f.peak.Load()
+		if n <= peak || f.peak.CompareAndSwap(peak, n) {
+			break
+		}
+	}
+	defer f.inflight.Add(-1)
+
+	time.Sleep(f.delay)
+
+	msg := c.(tgbotapi.MessageConfig)
+	f.mu.Lock()
+	f.sent = append(f.sent, msg.ChatID)
+	f.mu.Unlock()
+	return tgbotapi.Message{}, nil
+}
+
+// Рассылка идёт параллельно: последовательная отправка восьми сообщений по 100 мс
+// с паузой 40 мс между ними заняла бы больше секунды, а подписчик №8 столько же и
+// ждал бы. Проверяем, что запросы летят внахлёст и доходят до всех.
+func TestBroadcast_sendsInParallel(t *testing.T) {
+	fs := &fakeSender{delay: 100 * time.Millisecond}
+	d := &Dispatcher{api: fs, log: zerolog.Nop()}
+
+	ids := []int64{1, 2, 3, 4, 5, 6, 7, 8}
+	start := time.Now()
+	d.broadcast(context.Background(), "текст", ids, start, 0)
+	elapsed := time.Since(start)
+
+	fs.mu.Lock()
+	got := len(fs.sent)
+	fs.mu.Unlock()
+	if got != len(ids) {
+		t.Errorf("доставлено %d сообщений, ожидалось %d", got, len(ids))
+	}
+	if peak := fs.peak.Load(); peak < 2 {
+		t.Errorf("пик одновременных отправок %d — рассылка осталась последовательной", peak)
+	}
+	// Последовательный вариант: 8 × (100 мс + 40 мс) ≈ 1.12 с.
+	if elapsed > 700*time.Millisecond {
+		t.Errorf("рассылка заняла %v — похоже на последовательную отправку", elapsed)
+	}
+}
+
+// Отмена контекста прекращает рассылку и не оставляет висящих горутин-воркеров
+// (иначе broadcast зависнет на wg.Wait и тест не завершится).
+func TestBroadcast_stopsOnContextCancel(t *testing.T) {
+	fs := &fakeSender{delay: 10 * time.Millisecond}
+	d := &Dispatcher{api: fs, log: zerolog.Nop()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		d.broadcast(ctx, "текст", []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, time.Now(), 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast не завершился после отмены контекста")
 	}
 }
 

@@ -74,6 +74,14 @@ func newAPI(token string, proxyURLs []string, log zerolog.Logger) (*tgbotapi.Bot
 // proxyClient builds an HTTP client that tunnels through the given proxy.
 // A bare "user:pass@host:port" (no scheme) is treated as http://. No overall
 // client Timeout is set: Telegram long-polling holds a request open ~30 s.
+//
+// Пул соединений расширен и держится долго намеренно. Долгий поллинг GetUpdates
+// занимает своё соединение постоянно (оно НЕ idle, переиспользовать его нельзя),
+// поэтому рассылка всегда идёт по отдельному; при дефолтных настройках оно
+// протухало между публикациями, и первое сообщение дня платило полный дозвон
+// через прокси плюс TLS-handshake — сотни миллисекунд. keepWarm держит это
+// соединение живым, а MaxIdleConnsPerHost позволяет параллельным отправкам
+// не дозваниваться заново.
 func proxyClient(raw string) (*http.Client, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
@@ -84,8 +92,11 @@ func proxyClient(raw string) (*http.Client, error) {
 	}
 	tr := &http.Transport{
 		Proxy:               http.ProxyURL(u),
-		DialContext:         (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		DialContext:         (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout: 15 * time.Second,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 12,
+		IdleConnTimeout:     5 * time.Minute,
 	}
 	return &http.Client{Transport: tr}, nil
 }
@@ -109,8 +120,34 @@ func nonEmpty(ss []string) []string {
 	return out
 }
 
+// keepWarmInterval — как часто пинговать api.telegram.org, чтобы в пуле всегда
+// лежало готовое соединение. Должно быть заметно меньше IdleConnTimeout.
+const keepWarmInterval = 60 * time.Second
+
+// keepWarm раз в минуту дёргает getMe. Смысл не в ответе, а в соединении:
+// публикация ЦБ случается раз в сутки, и без пинга рассылка каждый раз начиналась
+// с холодного дозвона через прокси и TLS-handshake — это и была основная часть
+// отставания Telegram от сайта. Один дешёвый запрос в минуту (лимитов Telegram
+// не касается) держит соединение горячим, так что Send уходит сразу.
+func (b *Bot) keepWarm(ctx context.Context) {
+	t := time.NewTicker(keepWarmInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := b.api.GetMe(); err != nil {
+				b.log.Debug().Err(err).Msg("telegram: keep-warm ping failed")
+			}
+		}
+	}
+}
+
 // Run starts long-polling and blocks until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) {
+	go b.keepWarm(ctx)
+
 	cfg := tgbotapi.NewUpdate(0)
 	cfg.Timeout = 30
 	updates := b.api.GetUpdatesChan(cfg)

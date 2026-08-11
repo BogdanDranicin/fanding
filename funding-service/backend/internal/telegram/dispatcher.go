@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -15,11 +17,23 @@ import (
 	"github.com/funding-service/backend/internal/source/cbr"
 )
 
-const sendRateLimit = 40 * time.Millisecond // 25 msg/sec max
+const (
+	sendRateLimit = 40 * time.Millisecond // 25 msg/sec max
+	// sendWorkers — сколько отправок идёт одновременно. Каждый Send — это HTTPS-запрос
+	// через прокси (200–500 мс), поэтому последовательная рассылка добавляла подписчику
+	// №N почти N × RTT задержки. Параллелим, а темп раздачи держим на sendRateLimit.
+	sendWorkers = 8
+)
+
+// sender — то, что умеет отправлять сообщение в Telegram (*tgbotapi.BotAPI в проде).
+// Вынесено в интерфейс, чтобы рассылку можно было проверить в тестах без сети.
+type sender interface {
+	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
+}
 
 // Dispatcher listens to settlement and publication signals and sends Telegram alerts.
 type Dispatcher struct {
-	api        *tgbotapi.BotAPI
+	api        sender
 	pool       *pgxpool.Pool
 	snapshotFn func() funding.FundingSnapshot
 	pubInfoFn  func() cbr.PublicationInfo
@@ -54,10 +68,20 @@ func (d *Dispatcher) Run(ctx context.Context, pubCh <-chan time.Time) {
 			if !ok {
 				return
 			}
+			signalAt := time.Now()
 			info := d.pubInfoFn()
+
+			// Список получателей тянем ПАРАЛЛЕЛЬНО ожиданию пересчёта: поход в базу
+			// (Postgres на Render — десятки мс, на холодном пуле больше) раньше стоял
+			// последовательно ПОСЛЕ ожидания и целиком ложился в задержку первого
+			// сообщения. К моменту готовности текста список уже готов.
+			recipients := make(chan []int64, 1)
+			go func() { recipients <- d.recipients(ctx) }()
+
 			snap := d.awaitCBFunding(ctx, info)
+			waitDur := time.Since(signalAt)
 			text := formatCBRAlert(t, info, snap)
-			d.broadcast(ctx, text)
+			d.broadcast(ctx, text, <-recipients, signalAt, waitDur)
 		}
 	}
 }
@@ -67,9 +91,14 @@ func (d *Dispatcher) Run(ctx context.Context, pubCh <-chan time.Time) {
 // содержит вчерашние курсы (наблюдалось 16.07: сообщение со старыми курсами и без
 // USD/EUR фандингов). Возвращает снапшот, как только курсы в нём совпали с публикацией
 // и CBFunding посчитан, либо последний снапшот по таймауту/отмене.
+// Шаг опроса — 20 мс, а не 200: движок съедает тики публикации за десятки мс, но
+// первая проверка почти всегда попадает ДО этого, и на грубом шаге сообщение ждало
+// лишний тик впустую (сайт при этом обновлялся по своему WS-циклу в 250 мс и уходил
+// вперёд). Snapshot() — это захват мьютекса и арифметика по мапам, 500 вызовов за
+// 10 с таймаута ничего не стоят.
 func (d *Dispatcher) awaitCBFunding(ctx context.Context, info cbr.PublicationInfo) funding.FundingSnapshot {
 	const timeout = 10 * time.Second
-	const step = 200 * time.Millisecond
+	const step = 20 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 	for {
 		snap := d.snapshotFn()
@@ -90,12 +119,13 @@ func rateEq(got *float64, want float64) bool {
 	return got != nil && math.Abs(*got-want) < 1e-9
 }
 
-func (d *Dispatcher) broadcast(ctx context.Context, text string) {
+// recipients возвращает chat_id всех привязанных пользователей.
+func (d *Dispatcher) recipients(ctx context.Context) []int64 {
 	rows, err := d.pool.Query(ctx,
 		`SELECT telegram_chat_id FROM users WHERE telegram_chat_id IS NOT NULL`)
 	if err != nil {
 		d.log.Warn().Err(err).Msg("dispatcher: query users failed")
-		return
+		return nil
 	}
 	defer rows.Close()
 
@@ -106,21 +136,78 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string) {
 			chatIDs = append(chatIDs, id)
 		}
 	}
+	return chatIDs
+}
 
-	for _, id := range chatIDs {
-		msg := tgbotapi.NewMessage(id, text)
-		msg.ParseMode = "HTML"
-		if _, err := d.api.Send(msg); err != nil {
-			d.log.Warn().Err(err).Int64("chat_id", id).Msg("dispatcher: send failed")
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(sendRateLimit):
-		}
+// broadcast рассылает text всем получателям параллельно, до sendWorkers отправок
+// одновременно. Раньше рассылка была строго последовательной, и подписчик ждал
+// не только свой запрос к Telegram, но и все предыдущие: при N получателях
+// задержка последнего росла как N × (RTT + пауза). Теперь по паузе sendRateLimit
+// расходятся только ЗАДАНИЯ (чтобы не пробить лимит Telegram ~30 сообщений/с),
+// а сами запросы летят внахлёст.
+//
+// signalAt/waitDur — только для лога задержки: видно, сколько ушло на ожидание
+// пересчёта фандинга, а сколько на саму отправку.
+func (d *Dispatcher) broadcast(ctx context.Context, text string, chatIDs []int64, signalAt time.Time, waitDur time.Duration) {
+	if len(chatIDs) == 0 {
+		d.log.Info().Dur("wait_funding", waitDur).Msg("alert skipped: no recipients")
+		return
 	}
 
-	d.log.Info().Int("recipients", len(chatIDs)).Msg("alert sent")
+	workers := sendWorkers
+	if len(chatIDs) < workers {
+		workers = len(chatIDs)
+	}
+
+	var (
+		jobs   = make(chan int64)
+		wg     sync.WaitGroup
+		failed atomic.Int64
+		firstN atomic.Int64 // задержка первого доставленного сообщения, нс
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				msg := tgbotapi.NewMessage(id, text)
+				msg.ParseMode = "HTML"
+				if _, err := d.api.Send(msg); err != nil {
+					failed.Add(1)
+					d.log.Warn().Err(err).Int64("chat_id", id).Msg("dispatcher: send failed")
+					continue
+				}
+				firstN.CompareAndSwap(0, int64(time.Since(signalAt)))
+			}
+		}()
+	}
+
+	func() {
+		defer close(jobs)
+		for i, id := range chatIDs {
+			if i > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sendRateLimit):
+				}
+			}
+			select {
+			case jobs <- id:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	d.log.Info().
+		Int("recipients", len(chatIDs)).
+		Int64("failed", failed.Load()).
+		Dur("wait_funding", waitDur).
+		Dur("first_delivered", time.Duration(firstN.Load())).
+		Dur("total", time.Since(signalAt)).
+		Msg("alert sent")
 }
 
 // indicatorEmoji подбирает цветовой индикатор по величине фандинга в процентах
