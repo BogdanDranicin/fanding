@@ -164,7 +164,7 @@ func (d *Dispatcher) recipients(ctx context.Context) []int64 {
 // пересчёта фандинга, а сколько на саму отправку.
 func (d *Dispatcher) broadcast(ctx context.Context, text string, chatIDs []int64, signalAt time.Time, waitDur time.Duration) {
 	if len(chatIDs) == 0 {
-		d.log.Info().Dur("wait_funding", waitDur).Msg("alert skipped: no recipients")
+		d.log.Warn().Dur("wait_funding", waitDur).Msg("alert skipped: no recipients")
 		return
 	}
 
@@ -215,7 +215,11 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string, chatIDs []int64
 	}()
 	wg.Wait()
 
-	d.log.Info().
+	// Warn, а не Info: рассылка — событие раз в сутки, а прод крутится с
+	// LOG_LEVEL=warn (та же причина, по которой на Warn логируется сама
+	// публикация, «cbr rates emitted»). На Info эта строка в проде не видна —
+	// а именно по ней сверяется задержка доставки.
+	d.log.Warn().
 		Int("recipients", len(chatIDs)).
 		Int64("failed", failed.Load()).
 		Dur("wait_funding", waitDur).
