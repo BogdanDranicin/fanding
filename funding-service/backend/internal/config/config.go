@@ -28,8 +28,18 @@ type Config struct {
 	// Роль выдаётся при /start в боте и пересчитывается при каждом /start.
 	TelegramAdmins []string `envconfig:"TELEGRAM_ADMINS"`
 	MOEXPollMs     int      `envconfig:"MOEX_POLL_INTERVAL_MS" default:"250"`
-	Port             int    `envconfig:"BACKEND_PORT"          default:"8080"`
-	LogLevel         string `envconfig:"LOG_LEVEL"             default:"info"`
+	// RobotsEnabled включает поиск роботов в ленте сделок (страница «Роботы»).
+	RobotsEnabled bool `envconfig:"ROBOTS_ENABLED" default:"true"`
+	// RobotsSymbols — за какими тикерами следить, через запятую. Запись без префикса
+	// это акция основного режима (TQBR), с префиксом futures: — контракт FORTS.
+	// Пусто — список по умолчанию (ликвидные бумаги + валютные фьючерсы).
+	RobotsSymbols string `envconfig:"ROBOTS_SYMBOLS"`
+	// RobotsPollMs — как часто опрашивается лента каждого тикера. На точность
+	// тайминга не влияет (период считается по биржевым меткам сделок), влияет
+	// только на скорость появления робота на странице и на нагрузку на ISS.
+	RobotsPollMs int    `envconfig:"ROBOTS_POLL_MS" default:"3000"`
+	Port         int    `envconfig:"BACKEND_PORT"          default:"8080"`
+	LogLevel     string `envconfig:"LOG_LEVEL"             default:"info"`
 }
 
 func Load() (*Config, error) {

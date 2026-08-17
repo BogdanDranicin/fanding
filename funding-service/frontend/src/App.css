@@ -1469,3 +1469,132 @@ details[open] > .accordion-summary::before {
   color: var(--accent-down);
   border-color: var(--accent-down);
 }
+
+/* ── Роботы: строки-карточки ────────────────────────────────────────────────
+   Тот же приём, что и в журнале: в свёрнутом виде строка читается как таблица
+   (тикер, направление, лотовка, тайминг), подробности раскрываются по клику.
+   Горизонтального скролла нет — на узком экране колонки переносятся. */
+.rb-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.rb-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.rb-tab {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.rb-tab:hover { color: var(--text-primary); }
+
+.rb-tab-active {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.rb-filter,
+.rb-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rb-filter select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+.rb-watching {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.rb-summary {
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.rb-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 84px;
+}
+
+.rb-caption {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rb-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rb-symbol { min-width: 96px; }
+
+.rb-symbol-val {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+/* Период — главная величина на странице, выделяем его. */
+.rb-period { color: var(--accent-up); }
+
+.rb-side {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.rb-long { color: var(--accent-up); }
+.rb-short { color: var(--accent-down); }
+
+.rb-status-col {
+  min-width: 140px;
+  margin-left: auto;
+}
+
+.rb-status {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rb-active {
+  color: var(--accent-up);
+  font-weight: 600;
+}
+
+.rb-stopped { color: var(--text-muted); }
+
+/* На узком экране шапка-подпись у каждой колонки как раз и спасает: строка
+   переносится, но остаётся читаемой без горизонтального скролла. */
+@media (max-width: 640px) {
+  .rb-summary { gap: 12px 16px; }
+  .rb-status-col { margin-left: 0; }
+}

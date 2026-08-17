@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -18,13 +19,24 @@ var ErrNotModified = errors.New("not modified")
 const (
 	defaultBaseURL = "https://iss.moex.com/iss"
 	requestTimeout = time.Second
-	maxRetries     = 3
+	// tailRequestTimeout — для запроса хвоста ленты сделок: ISS отдаёт по нему
+	// тысячи строк, и секунды на это не хватает.
+	tailRequestTimeout = 20 * time.Second
+	maxRetries         = 3
 )
+
+// tradeColumns — единственные колонки ленты, которые нам нужны. ISS умеет резать
+// ответ на своей стороне; на ликвидной бумаге это уменьшает ответ в разы.
+const tradeColumns = "TRADENO,TRADEDATE,TRADETIME,SYSTIME,PRICE,QUANTITY,BUYSELL,OFFMARKETDEAL,TRADE_SESSION_DATE"
 
 // Client is a low-level MOEX ISS HTTP client with ETag caching and retry.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	// tailClient обслуживает единственный тяжёлый запрос — снятие хвоста ленты
+	// сделок. Он отдаёт сотни килобайт и в общий секундный таймаут не укладывается,
+	// а трогать таймаут остальных запросов нельзя: на нём висит точность фандинга.
+	tailClient *http.Client
 	etags      sync.Map // url -> etag string
 }
 
@@ -39,15 +51,14 @@ func NewClientWithBaseURL(baseURL string) *Client {
 }
 
 func newClient(baseURL string) *Client {
+	transport := &http.Transport{
+		MaxIdleConns:    10,
+		IdleConnTimeout: 90 * time.Second,
+	}
 	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: requestTimeout,
-			Transport: &http.Transport{
-				MaxIdleConns:    10,
-				IdleConnTimeout: 90 * time.Second,
-			},
-		},
+		baseURL:    baseURL,
+		httpClient: &http.Client{Timeout: requestTimeout, Transport: transport},
+		tailClient: &http.Client{Timeout: tailRequestTimeout, Transport: transport},
 	}
 }
 
@@ -169,6 +180,10 @@ type Trade struct {
 	Quantity  float64
 	Timestamp time.Time // trade moment (TRADEDATE+TRADETIME MSK, falls back to SYSTIME)
 	OffMarket bool      // OFFMARKETDEAL != 0 — адресная сделка, исключается из VWAP
+	// Side — сторона агрессора (BUYSELL): "B" сделка по оферу, "S" по биду.
+	// Пустая, если биржа не отдала колонку. Нужна поиску роботов: направление —
+	// такой же признак робота, как размер и период.
+	Side string
 	// Backdated: TRADEDATE не совпадает с TRADE_SESSION_DATE — сделка чужого
 	// календарного дня, которую биржа приписала к текущей сессии (см. Tick.Backdated).
 	Backdated bool
@@ -182,15 +197,30 @@ type tradesResponse struct {
 // (e.g. one that keeps returning the same page) cannot spin us forever.
 const tradesMaxPages = 200
 
+// TradeFeed identifies a security's trade tape on ISS. Board is optional: futures
+// are addressed at market level, while stock boards (TQBR and friends) must be
+// named explicitly or the tape comes back mixed across boards.
+type TradeFeed struct {
+	Engine string
+	Market string
+	Board  string
+	SecID  string
+}
+
 // FetchTradesSince returns all trades with TRADENO greater than sinceTradeNo,
 // in ascending TRADENO order. It follows ISS pagination (?tradeno=N&next_trade=1)
 // until an empty page is returned, so a call with sinceTradeNo=0 backfills the
 // whole current session. No ETag caching: each call is an explicit increment.
 func (c *Client) FetchTradesSince(ctx context.Context, engine, market, secid string, sinceTradeNo int64) ([]Trade, error) {
+	return c.FetchTradesOn(ctx, TradeFeed{Engine: engine, Market: market, SecID: secid}, sinceTradeNo)
+}
+
+// FetchTradesOn is FetchTradesSince for an explicitly addressed feed (with board).
+func (c *Client) FetchTradesOn(ctx context.Context, feed TradeFeed, sinceTradeNo int64) ([]Trade, error) {
 	var all []Trade
 	last := sinceTradeNo
 	for page := 0; page < tradesMaxPages; page++ {
-		batch, err := c.fetchTradesPage(ctx, engine, market, secid, last)
+		batch, err := c.fetchTradesPage(ctx, feed, last)
 		if err != nil {
 			// Return what we already have: partial progress is still valid
 			// (TRADENO is strictly increasing, the caller resumes from the last one).
@@ -210,15 +240,64 @@ func (c *Client) FetchTradesSince(ctx context.Context, engine, market, secid str
 	return all, fmt.Errorf("trades pagination exceeded %d pages", tradesMaxPages)
 }
 
-func (c *Client) fetchTradesPage(ctx context.Context, engine, market, secid string, sinceTradeNo int64) ([]Trade, error) {
-	url := fmt.Sprintf("%s/engines/%s/markets/%s/securities/%s/trades.json?tradeno=%d&next_trade=1",
-		c.baseURL, engine, market, secid, sinceTradeNo)
+// tailPageSize — сколько сделок ISS отдаёт на одну страницу ленты.
+const tailPageSize = 5000
 
+// FetchTradeTail returns the last pages*5000 trades of the tape, in ascending
+// TRADENO order. Used to join a tape mid-session without backfilling the whole day:
+// a liquid stock prints six figures of deals a day, while a consumer of the tape
+// (the robot detector) only needs the last few minutes. On a busy name one page
+// covers barely a quarter of an hour, hence pages > 1.
+//
+// Paging goes backwards from the newest trade (reversed=1&start=N); a short page
+// means the tape ended and the loop stops.
+func (c *Client) FetchTradeTail(ctx context.Context, feed TradeFeed, pages int) ([]Trade, error) {
+	if pages < 1 {
+		pages = 1
+	}
+	var all []Trade
+	for i := 0; i < pages; i++ {
+		url := fmt.Sprintf("%s?reversed=1&start=%d&%s", c.tradesURL(feed), i*tailPageSize, tradeQuery)
+		batch, err := c.fetchTradesURL(ctx, url, c.tailClient)
+		if err != nil {
+			// Частичный хвост тоже годится: это лишь затравка ленты.
+			break
+		}
+		all = append(all, batch...)
+		if len(batch) < tailPageSize {
+			break
+		}
+	}
+	if len(all) == 0 {
+		return nil, fmt.Errorf("trades tail for %s is empty", feed.SecID)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].TradeNo < all[j].TradeNo })
+	return all, nil
+}
+
+func (c *Client) tradesURL(feed TradeFeed) string {
+	if feed.Board != "" {
+		return fmt.Sprintf("%s/engines/%s/markets/%s/boards/%s/securities/%s/trades.json",
+			c.baseURL, feed.Engine, feed.Market, feed.Board, feed.SecID)
+	}
+	return fmt.Sprintf("%s/engines/%s/markets/%s/securities/%s/trades.json",
+		c.baseURL, feed.Engine, feed.Market, feed.SecID)
+}
+
+func (c *Client) fetchTradesPage(ctx context.Context, feed TradeFeed, sinceTradeNo int64) ([]Trade, error) {
+	url := fmt.Sprintf("%s?tradeno=%d&next_trade=1&%s", c.tradesURL(feed), sinceTradeNo, tradeQuery)
+	return c.fetchTradesURL(ctx, url, c.httpClient)
+}
+
+// tradeQuery ограничивает ответ ISS одной секцией trades и нужными колонками.
+var tradeQuery = "iss.only=trades&trades.columns=" + tradeColumns
+
+func (c *Client) fetchTradesURL(ctx context.Context, url string, hc *http.Client) ([]Trade, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -291,6 +370,9 @@ func parseTrades(cd columnData) ([]Trade, error) {
 		}
 		if v, ok := numToFloat64(cell("OFFMARKETDEAL")); ok && v != 0 {
 			t.OffMarket = true
+		}
+		if s, ok := cell("BUYSELL").(string); ok {
+			t.Side = s
 		}
 		t.Timestamp = parseTradeTime(cell("TRADEDATE"), cell("TRADETIME"), cell("SYSTIME"))
 		t.Backdated = isBackdated(cell("TRADEDATE"), cell("TRADE_SESSION_DATE"))

@@ -28,7 +28,8 @@ var instruments = []instrumentMeta{
 }
 
 // NewRouter builds and returns the chi router for the HTTP API.
-func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec) http.Handler {
+// robotSrc может быть nil — тогда страница «Роботы» работает по одной истории из базы.
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec, robotSrc RobotSource) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(allowedOrigin))
@@ -45,6 +46,11 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	r.Get("/api/v1/prices", handlePrices)
 	r.Get("/api/v1/swap-rates", handleSwapRates)
 	r.Get("/api/v1/snapshots/recent", handleRecentSnapshots(store))
+
+	// Поиск роботов — обычная страница сервиса, не служебная диагностика:
+	// доступна всем, как и таблица фандинга.
+	r.Get("/api/v1/robots", handleRobots(robotSrc))
+	r.Get("/api/v1/robots/history", handleRobotsHistory(store))
 
 	// Сессия браузера: анонимная при создании, становится аккаунтом после /start в боте.
 	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute)).

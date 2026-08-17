@@ -108,12 +108,26 @@ func main() {
 
 	hub := appws.NewHub(log.Logger)
 
+	// Поиск роботов в ленте сделок — независимый от фандинга сбор: свои тикеры,
+	// свои курсоры TRADENO. Выключается пустым ROBOTS_SYMBOLS.
+	robotCollector, err := newRobotCollector(cfg, store, log.Logger)
+	if err != nil {
+		log.Fatal().Err(err).Msg("robots: некорректный ROBOTS_SYMBOLS")
+	}
+	if robotCollector != nil {
+		go robotCollector.Run(ctx)
+		log.Info().Int("feeds", len(robotCollector.Feeds())).Msg("robots: сбор запущен")
+	} else {
+		log.Info().Msg("robots: сбор выключен (ROBOTS_SYMBOLS пуст)")
+	}
+
 	apiRouter := api.NewRouter(
 		store,
 		cfg.TelegramBotName,
 		cfg.AllowedOrigin,
 		log.Logger,
 		moexSrc.GetSpecs,
+		robotSource(robotCollector),
 	)
 
 	router := http.NewServeMux()

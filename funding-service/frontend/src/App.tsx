@@ -10,14 +10,15 @@ import { SettingsPage } from './components/SettingsPage';
 import { CalculatorPage } from './components/CalculatorPage';
 import { RacePage } from './components/RacePage';
 import { JournalPage } from './components/JournalPage';
+import { RobotsPage } from './components/RobotsPage';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
   ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
-type Page = 'main' | 'settings' | 'calculator' | 'race' | 'journal';
+type Page = 'main' | 'settings' | 'calculator' | 'race' | 'journal' | 'robots';
 
-const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race', 'journal'];
+const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race', 'journal', 'robots'];
 
 // Страницы только для админов: «Журнал» и «Скорость» — служебная диагностика,
 // остальным их не показываем вовсе (и бэкенд отдаёт по ним 403).
@@ -77,6 +78,7 @@ export default function App() {
   const links = ([
     { page: 'main', label: 'Фандинг' },
     { page: 'calculator', label: 'Калькулятор' },
+    { page: 'robots', label: 'Роботы' },
     { page: 'race', label: 'Скорость' },
     { page: 'journal', label: 'Журнал' },
     { page: 'settings', label: 'Настройки' },
@@ -120,6 +122,7 @@ export default function App() {
           <SettingsPage onBack={() => navigate('main')} />
         )}
         {shownPage === 'calculator' && <CalculatorPage />}
+        {shownPage === 'robots' && <RobotsPage />}
         {shownPage === 'race' && <RacePage />}
         {shownPage === 'journal' && <JournalPage />}
         {shownPage === 'main' && (

@@ -187,9 +187,11 @@ func TestFetchTradesSince_ParsesAndPaginates(t *testing.T) {
 		t.Errorf("timestamp zone: want MSK, got %s", trades[0].Timestamp.Location())
 	}
 
+	// Курсор — существенная часть запроса; список колонок к нему дописан и может
+	// меняться, поэтому сверяем префикс, а не строку целиком.
 	wantFirst := "/engines/futures/markets/forts/securities/USDRUBF/trades.json?tradeno=0&next_trade=1"
-	if paths[0] != wantFirst {
-		t.Errorf("first request: want %s, got %s", wantFirst, paths[0])
+	if !strings.HasPrefix(paths[0], wantFirst) {
+		t.Errorf("first request: want prefix %s, got %s", wantFirst, paths[0])
 	}
 }
 
