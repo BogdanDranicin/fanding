@@ -123,6 +123,56 @@ function beep(ctx: AudioContext, freq: number, durationSec: number) {
   osc.stop(t0 + durationSec + 0.02);
 }
 
+// Range — границы фильтра по графе. Держим строками, а не числами: пустое поле
+// означает «без ограничения», и отличить его от осмысленного нуля можно только так.
+interface Range { min: string; max: string }
+
+const EMPTY_RANGE: Range = { min: '', max: '' };
+
+// inRange — проходит ли значение границы. Незаполненная граница не ограничивает,
+// как и та, где ввели не число (пользователь ещё печатает).
+function inRange(value: number, r: Range): boolean {
+  const lo = Number(r.min);
+  const hi = Number(r.max);
+  if (r.min !== '' && Number.isFinite(lo) && value < lo) return false;
+  if (r.max !== '' && Number.isFinite(hi) && value > hi) return false;
+  return true;
+}
+
+function rangeActive(r: Range): boolean {
+  return r.min !== '' || r.max !== '';
+}
+
+// RangeFilter — пара полей «от» и «до» для одной графы.
+function RangeFilter({ label, unit, value, onChange }: {
+  label: string;
+  unit: string;
+  value: Range;
+  onChange: (r: Range) => void;
+}) {
+  return (
+    <label className={`rb-range${rangeActive(value) ? ' rb-range-on' : ''}`}>
+      <span className="rb-range-label">{label}</span>
+      <input
+        type="number"
+        className="rb-range-input"
+        placeholder="от"
+        value={value.min}
+        onChange={(e) => onChange({ ...value, min: e.target.value })}
+      />
+      <span className="rb-range-dash">–</span>
+      <input
+        type="number"
+        className="rb-range-input"
+        placeholder="до"
+        value={value.max}
+        onChange={(e) => onChange({ ...value, max: e.target.value })}
+      />
+      <span className="rb-range-unit">{unit}</span>
+    </label>
+  );
+}
+
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div className="jrn-detail">
@@ -271,6 +321,10 @@ interface GroupProps extends Omit<RowProps, 'r' | 'armed'> {
 }
 
 function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day }: GroupProps) {
+  // Одинокого робота показываем сразу раскрытым, но дальше решает пользователь:
+  // страница перерисовывается несколько раз в секунду из-за обратных отсчётов,
+  // и раскрытие, заданное выражением, было бы во власти этих перерисовок.
+  const [open, setOpen] = useState(rows.length === 1);
   const longs = rows.filter((r) => r.side === 'B');
   const shorts = rows.filter((r) => r.side === 'S');
   const sum = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + volumeOf(r), 0);
@@ -300,7 +354,11 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
   if (strong) classes.push(leadLong ? 'rb-strong-long' : 'rb-strong-short');
 
   return (
-    <details className={classes.join(' ')} open={rows.length === 1}>
+    <details
+      className={classes.join(' ')}
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
       <summary className="rb-group-summary">
         <div className="rb-col rb-symbol">
           <span className="rb-caption">тикер</span>
@@ -374,6 +432,14 @@ export function RobotsPage() {
   const [symbol, setSymbol] = useState('');
   const [activeOnly, setActiveOnly] = useState(false);
   const [confirmedOnly, setConfirmedOnly] = useState(false);
+  // Фильтры по графам таблицы. Намеренно не сохраняются между сеансами: пустая
+  // страница назавтра из-за забытого фильтра выглядит как сломанный сбор.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [dirFilter, setDirFilter] = useState<'' | 'B' | 'S'>('');
+  const [periodRange, setPeriodRange] = useState<Range>(EMPTY_RANGE);
+  const [qtyRange, setQtyRange] = useState<Range>(EMPTY_RANGE);
+  const [volumeRange, setVolumeRange] = useState<Range>(EMPTY_RANGE);
+  const [strengthRange, setStrengthRange] = useState<Range>(EMPTY_RANGE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [armedIds, setArmedIds] = useState<Set<number>>(new Set());
@@ -456,9 +522,30 @@ export function RobotsPage() {
   const shown = useMemo(
     () => rows.filter((r) => (!symbol || r.symbol === symbol)
       && (!activeOnly || r.active)
-      && (!confirmedOnly || !r.provisional)),
-    [rows, symbol, activeOnly, confirmedOnly],
+      && (!confirmedOnly || !r.provisional)
+      && (!dirFilter || r.side === dirFilter)
+      && inRange(r.period_sec, periodRange)
+      && inRange(r.qty_typical, qtyRange)
+      && inRange(volumeOf(r), volumeRange)
+      && inRange(r.strength_pct, strengthRange)),
+    [rows, symbol, activeOnly, confirmedOnly, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
   );
+
+  const filtersOn = Boolean(symbol) || activeOnly || confirmedOnly || Boolean(dirFilter)
+    || rangeActive(periodRange) || rangeActive(qtyRange)
+    || rangeActive(volumeRange) || rangeActive(strengthRange);
+
+  const resetFilters = () => {
+    setSymbol('');
+    setFiltersOpen(false);
+    setActiveOnly(false);
+    setConfirmedOnly(false);
+    setDirFilter('');
+    setPeriodRange(EMPTY_RANGE);
+    setQtyRange(EMPTY_RANGE);
+    setVolumeRange(EMPTY_RANGE);
+    setStrengthRange(EMPTY_RANGE);
+  };
 
   // Сколько предварительных сейчас скрыто/показано — чтобы низкий порог
   // обнаружения не выглядел как поломка: на валюте пара случайных сделок
@@ -608,6 +695,44 @@ export function RobotsPage() {
         </label>
       </div>
 
+      {/* Фильтры по графам таблицы: сужают список строк, не трогая сам поиск роботов. */}
+      <details
+        className="rb-colfilters"
+        open={filtersOpen}
+        onToggle={(e) => setFiltersOpen(e.currentTarget.open)}
+      >
+        <summary className="rb-colfilters-summary">
+          Фильтр по графам
+          {filtersOn && <span className="rb-badge">{shown.length} из {rows.length}</span>}
+          <span className="jrn-chevron" aria-hidden="true">▸</span>
+        </summary>
+
+        <div className="rb-colfilters-body">
+          <label className="rb-filter">
+            Направление
+            <select value={dirFilter} onChange={(e) => setDirFilter(e.target.value as '' | 'B' | 'S')}>
+              <option value="">все</option>
+              <option value="B">лонг</option>
+              <option value="S">шорт</option>
+            </select>
+          </label>
+
+          <RangeFilter label="Тайминг" unit="с" value={periodRange} onChange={setPeriodRange} />
+          <RangeFilter label="Лотовка" unit="л" value={qtyRange} onChange={setQtyRange} />
+          <RangeFilter label="Объём робота" unit="л" value={volumeRange} onChange={setVolumeRange} />
+          <RangeFilter label="Сила" unit="%" value={strengthRange} onChange={setStrengthRange} />
+
+          <button
+            type="button"
+            className="rb-reset"
+            onClick={resetFilters}
+            disabled={!filtersOn}
+          >
+            Сбросить
+          </button>
+        </div>
+      </details>
+
       {error && <p className="race-error">Ошибка загрузки: {error}</p>}
 
       {watching.length > 0 && (
@@ -616,9 +741,11 @@ export function RobotsPage() {
 
       {!error && groups.length === 0 && !loading && (
         <p className="race-empty">
-          {live
-            ? 'Сейчас закономерностей не видно. Роботы появляются в активные часы торгов; лента анализируется за последние 20 минут.'
-            : 'За неделю ничего не сохранено.'}
+          {rows.length > 0
+            ? 'Под фильтр не попал ни один робот — найдено ' + rows.length + ', показано 0.'
+            : live
+              ? 'Сейчас закономерностей не видно. Роботы появляются в активные часы торгов; лента анализируется за последние 20 минут.'
+              : 'За неделю ничего не сохранено.'}
         </p>
       )}
 
