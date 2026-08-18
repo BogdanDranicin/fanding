@@ -11,9 +11,17 @@ import (
 // Все методы безопасны для последовательного вызова из одной горутины —
 // синхронизацию обеспечивает вызывающий (см. Collector).
 type Detector struct {
-	cfg    Config
-	tapes  map[string][]Print // symbol -> лента, отсортированная по времени
-	maxLen int
+	cfg   Config
+	tapes map[string][]Print // symbol -> лента, отсортированная по времени
+	// currency — тикеры с пониженным порогом обнаружения (см. Config).
+	currency map[string]bool
+	maxLen   int
+}
+
+// thresholds — пороги длины серии для конкретного инструмента.
+type thresholds struct {
+	minPrints int
+	minBeats  int
 }
 
 // maxTapeLen — аварийный предел длины ленты, а не рабочий механизм: ленту режет по
@@ -24,7 +32,27 @@ const maxTapeLen = 20000
 
 // NewDetector создаёт детектор с заданными порогами.
 func NewDetector(cfg Config) *Detector {
-	return &Detector{cfg: cfg, tapes: make(map[string][]Print), maxLen: maxTapeLen}
+	return &Detector{
+		cfg:      cfg,
+		tapes:    make(map[string][]Print),
+		currency: make(map[string]bool),
+		maxLen:   maxTapeLen,
+	}
+}
+
+// MarkCurrency помечает тикеры как валютные: у них порог обнаружения ниже.
+func (d *Detector) MarkCurrency(symbols ...string) {
+	for _, s := range symbols {
+		d.currency[s] = true
+	}
+}
+
+// thresholdsFor — с какой длины серии заявлять робота по этому инструменту.
+func (d *Detector) thresholdsFor(symbol string) thresholds {
+	if d.currency[symbol] && d.cfg.MinPrintsCurrency > 0 {
+		return thresholds{minPrints: d.cfg.MinPrintsCurrency, minBeats: d.cfg.MinBeatsCurrency}
+	}
+	return thresholds{minPrints: d.cfg.MinPrints, minBeats: d.cfg.MinBeats}
 }
 
 // Add добавляет принты в ленту их тикера. Принты могут приходить пачкой и не
@@ -79,6 +107,38 @@ func (d *Detector) Trim(now time.Time) {
 // TapeLen возвращает число принтов в ленте тикера (для диагностики и тестов).
 func (d *Detector) TapeLen(symbol string) int { return len(d.tapes[symbol]) }
 
+// Heads — «часы ленты»: до какого момента дошла лента каждого тикера. По ним, а
+// не по стенным часам, считаются пропущенные роботом такты — стенные часы обгоняют
+// ленту на минуты запаздывания фида.
+//
+// Верхняя граница та же, что у окна анализа: принты свежее now детектор в разбор
+// не берёт, и засчитывать по ним пропуск нельзя — такт ещё не рассматривался.
+func (d *Detector) Heads(now time.Time) map[string]time.Time {
+	out := make(map[string]time.Time, len(d.tapes))
+	for sym, tape := range d.tapes {
+		w := d.window(tape, now)
+		if len(w) > 0 {
+			out[sym] = w[len(w)-1].Time
+		}
+	}
+	return out
+}
+
+// BeatTol — допуск на один такт: настолько принт может отстать от сетки периода,
+// оставаясь тем же роботом.
+func (d *Detector) BeatTol(periodSec float64) time.Duration {
+	return beatTol(d.cfg, periodSec)
+}
+
+// beatTol — тот же допуск, что fitPeriod применяет к отдельному интервалу.
+func beatTol(cfg Config, periodSec float64) time.Duration {
+	rel := time.Duration(cfg.PeriodTolRel * periodSec * float64(time.Second))
+	if rel > cfg.PeriodTolAbs {
+		return rel
+	}
+	return cfg.PeriodTolAbs
+}
+
 // Scan прогоняет детектор по всем лентам и возвращает найденных роботов,
 // отсортированных по убыванию уверенности.
 func (d *Detector) Scan(now time.Time) []Robot {
@@ -99,6 +159,7 @@ func (d *Detector) Scan(now time.Time) []Robot {
 // scanTape ищет роботов в ленте одного тикера: отдельно по покупкам и по продажам,
 // потому что противоположные направления — это разные роботы (или разные ноги одного).
 func (d *Detector) scanTape(symbol string, tape []Print) []Robot {
+	th := d.thresholdsFor(symbol)
 	bySide := map[Side][]Print{}
 	for _, p := range tape {
 		if p.Side != SideBuy && p.Side != SideSell {
@@ -108,14 +169,14 @@ func (d *Detector) scanTape(symbol string, tape []Print) []Robot {
 	}
 	var out []Robot
 	for side, prints := range bySide {
-		out = append(out, d.scanSide(symbol, side, prints)...)
+		out = append(out, d.scanSide(symbol, side, prints, th)...)
 	}
 	return out
 }
 
 // scanSide перебирает кластеры одинаковой лотовки и проверяет каждый на периодичность.
-func (d *Detector) scanSide(symbol string, side Side, prints []Print) []Robot {
-	if len(prints) < d.cfg.MinPrints {
+func (d *Detector) scanSide(symbol string, side Side, prints []Print, th thresholds) []Robot {
+	if len(prints) < th.minPrints {
 		return nil
 	}
 
@@ -131,9 +192,9 @@ func (d *Detector) scanSide(symbol string, side Side, prints []Print) []Robot {
 		if i > 0 && byQty[i].Qty == byQty[i-1].Qty {
 			continue // одинаковая лотовка даёт тот же кластер
 		}
-		limit := byQty[i].Qty + d.qtyTol(byQty[i].Qty)
+		limit := byQty[i].Qty + d.qtyWidth(byQty[i].Qty)
 		end := sort.Search(len(byQty), func(j int) bool { return byQty[j].Qty > limit }) - 1
-		if end-i+1 < d.cfg.MinPrints {
+		if end-i+1 < th.minPrints {
 			continue
 		}
 		if end == prevEnd {
@@ -141,19 +202,22 @@ func (d *Detector) scanSide(symbol string, side Side, prints []Print) []Robot {
 		}
 		prevEnd = end
 
-		if r, ok := d.analyzeCluster(symbol, side, byQty[i:end+1]); ok {
+		if r, ok := d.analyzeCluster(symbol, side, byQty[i:end+1], th); ok {
 			out = append(out, r)
 		}
 	}
 	return dedupe(out)
 }
 
-func (d *Detector) qtyTol(qty float64) float64 {
-	return math.Max(d.cfg.QtyTolAbs, qty*d.cfg.QtyTolRel)
+// qtyWidth — ширина кластера лотовки. Допуск двусторонний (±QtyTolAbs вокруг
+// размера робота), а кластер отсчитывается от своей нижней границы, поэтому в него
+// укладываются два допуска: серия 3011–3013 при допуске ±1 — это один робот.
+func (d *Detector) qtyWidth(qty float64) float64 {
+	return 2 * math.Max(d.cfg.QtyTolAbs, qty*d.cfg.QtyTolRel)
 }
 
 // analyzeCluster проверяет группу принтов одной лотовки на равномерность по времени.
-func (d *Detector) analyzeCluster(symbol string, side Side, cluster []Print) (Robot, bool) {
+func (d *Detector) analyzeCluster(symbol string, side Side, cluster []Print, th thresholds) (Robot, bool) {
 	byTime := append([]Print(nil), cluster...)
 	sort.Slice(byTime, func(i, j int) bool { return byTime[i].Time.Before(byTime[j].Time) })
 
@@ -162,7 +226,7 @@ func (d *Detector) analyzeCluster(symbol string, side Side, cluster []Print) (Ro
 		times[i] = p.Time.Sub(byTime[0].Time).Seconds()
 	}
 
-	fit, ok := d.estimatePeriod(times)
+	fit, ok := d.estimatePeriod(times, th)
 	if !ok {
 		return Robot{}, false
 	}
@@ -176,7 +240,15 @@ func (d *Detector) analyzeCluster(symbol string, side Side, cluster []Print) (Ro
 			series = append(series, p)
 		}
 	}
-	if len(series) < d.cfg.MinPrints {
+	if len(series) < th.minPrints {
+		return Robot{}, false
+	}
+
+	// На минимальной серии такт пропускать нельзя: «три повторяющихся принта» —
+	// это три подряд идущих такта. Разрешив короткой серии пропуски, детектор
+	// начинает собирать «роботов» из случайных сделок, раскладывая их по кратным
+	// тактам, — на случайной ленте так находился робот в трети прогонов.
+	if len(series) < ConfidentPrints && fit.beats != fit.matched {
 		return Robot{}, false
 	}
 
@@ -199,6 +271,8 @@ func (d *Detector) analyzeCluster(symbol string, side Side, cluster []Print) (Ro
 		Prints:     len(series),
 		Beats:      fit.beats,
 		Confidence: fit.confidence,
+		// Короткая серия показывается сразу, но честно помечается предварительной.
+		Provisional: len(series) < ConfidentPrints,
 		FirstSeen:  series[0].Time,
 		LastSeen:   series[len(series)-1].Time,
 		PriceFirst: series[0].Price,
@@ -227,8 +301,8 @@ type periodFit struct {
 //
 // Гипотезы периода берём из квартилей интервалов: медиана ломается, если внутри
 // кластера половина принтов — посторонний шум того же размера.
-func (d *Detector) estimatePeriod(times []float64) (periodFit, bool) {
-	if len(times) < d.cfg.MinPrints {
+func (d *Detector) estimatePeriod(times []float64, th thresholds) (periodFit, bool) {
+	if len(times) < th.minPrints {
 		return periodFit{}, false
 	}
 	deltas := make([]float64, 0, len(times)-1)
@@ -242,7 +316,7 @@ func (d *Detector) estimatePeriod(times []float64) (periodFit, bool) {
 			sorted = append(sorted, dt)
 		}
 	}
-	if len(sorted) < d.cfg.MinBeats {
+	if len(sorted) < th.minBeats {
 		return periodFit{}, false
 	}
 	sort.Float64s(sorted)
@@ -257,7 +331,7 @@ func (d *Detector) estimatePeriod(times []float64) (periodFit, bool) {
 		if seed < minP || seed > maxP {
 			continue
 		}
-		fit, ok := d.fitPeriod(deltas, seed)
+		fit, ok := d.fitPeriod(deltas, seed, th)
 		if !ok {
 			continue
 		}
@@ -270,7 +344,7 @@ func (d *Detector) estimatePeriod(times []float64) (periodFit, bool) {
 
 // fitPeriod уточняет период, стартуя с гипотезы seed. Два прохода: первый
 // раскладывает интервалы по тактам грубой гипотезы, второй — уже по уточнённой.
-func (d *Detector) fitPeriod(deltas []float64, seed float64) (periodFit, bool) {
+func (d *Detector) fitPeriod(deltas []float64, seed float64, th thresholds) (periodFit, bool) {
 	period := seed
 	var matched, beats, unitBeats int
 	var norms []float64
@@ -308,7 +382,7 @@ func (d *Detector) fitPeriod(deltas []float64, seed float64) (periodFit, bool) {
 		period = sumD / float64(beats)
 	}
 
-	if matched < d.cfg.MinBeats {
+	if matched < th.minBeats {
 		return periodFit{}, false
 	}
 	if float64(unitBeats) < d.cfg.MinUnitBeatRatio*float64(matched) {

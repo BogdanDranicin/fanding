@@ -1598,3 +1598,148 @@ details[open] > .accordion-summary::before {
   .rb-summary { gap: 12px 16px; }
   .rb-status-col { margin-left: 0; }
 }
+
+/* ── Роботы: группировка по бумаге, сила и таймер ─────────────────────────── */
+
+/* Группа — та же карточка, но на уровень выше: внутри неё лежат строки роботов
+   этой бумаги. Раскрывается кнопкой-шевроном, как и всё остальное на странице. */
+.rb-group {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.rb-group[open] { border-color: var(--border-strong); }
+
+.rb-group-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  flex-wrap: wrap;
+}
+
+.rb-group-summary::-webkit-details-marker { display: none; }
+.rb-group-summary::marker { content: none; }
+.rb-group[open] .rb-group-summary { border-bottom: 1px solid var(--border); }
+.rb-group[open] .jrn-chevron { transform: rotate(90deg); }
+
+.rb-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-primary);
+}
+
+/* Внутри группы карточка робота не должна спорить рамкой с рамкой группы. */
+.rb-group-body .rb-card { background: var(--bg-secondary); }
+
+/* Счётчик роботов на бумаге. */
+.rb-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.rb-mix { display: inline-flex; gap: 4px; }
+.rb-mix-sep { color: var(--text-dim); }
+.rb-dim { color: var(--text-muted); font-weight: 500; }
+
+/* Обратный отсчёт до удара. За три секунды до принта — та же граница, на которой
+   начинают звучать предупреждения, поэтому цифра меняет цвет вместе со звуком. */
+.rb-beat { color: var(--text-primary); }
+
+.rb-beat-soon {
+  color: var(--accent);
+  animation: rb-pulse 1s ease-in-out infinite;
+}
+
+@keyframes rb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rb-beat-soon { animation: none; }
+}
+
+/* Сила робота: подсвечивается, только когда перевалила заданный порог. */
+.rb-strength { color: var(--text-primary); }
+
+.rb-strength-long {
+  color: var(--accent-up);
+  background: var(--accent-up-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.rb-strength-short {
+  color: var(--accent-down);
+  background: var(--accent-down-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* Полоса слева — как быстрая метка строки: зелёная у сильного лонга, красная у
+   сильного шорта, жёлтая у пропустившего такт. Пропуск важнее силы и перекрывает
+   её: следующий несостоявшийся принт уберёт робота со страницы совсем. */
+.rb-strong-long { border-left: 3px solid var(--accent-up); }
+.rb-strong-short { border-left: 3px solid var(--accent-down); }
+
+.rb-missed {
+  border-left: 3px solid var(--accent-warn);
+  background: var(--accent-warn-soft);
+}
+
+.rb-warn {
+  color: var(--accent-warn);
+  font-weight: 600;
+}
+
+/* Кнопка звукового предупреждения о ближайшем ударе. */
+.rb-alarm {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  color: var(--text-muted);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.rb-alarm:hover { border-color: var(--border-strong); }
+
+.rb-alarm-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.rb-threshold {
+  width: 62px;
+  margin: 0 4px;
+  padding: 4px 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .rb-group-summary { gap: 12px 16px; }
+  .rb-group-body { padding: 6px; }
+}

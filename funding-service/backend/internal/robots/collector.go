@@ -75,19 +75,29 @@ type Collector struct {
 	mu  sync.Mutex
 	det *Detector
 	reg *registry
+	day *dayVolumes
 }
 
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
 // тогда роботы живут только в памяти и страница истории покажет текущую сессию сервиса.
 func NewCollector(client issClient, store Store, opts CollectorOptions, log zerolog.Logger) *Collector {
+	det := NewDetector(opts.Detector)
+	for _, f := range opts.Feeds {
+		if f.Currency {
+			det.MarkCurrency(f.Symbol)
+		}
+	}
 	return &Collector{
 		client: client,
 		store:  store,
 		opts:   opts,
 		log:    log.With().Str("component", "robots").Logger(),
 		now:    time.Now,
-		det:    NewDetector(opts.Detector),
-		reg:    newRegistry(opts.StaleAfter, opts.KeepClosed, maxSessions),
+		det:    det,
+		// Чёрный список снятых серий держим на длину окна анализа: ровно столько
+		// снятая серия ещё видна детектору.
+		reg: newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
+		day: newDayVolumes(),
 	}
 }
 
@@ -109,11 +119,24 @@ func (c *Collector) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// Snapshot — текущий срез роботов для API.
+// Snapshot — текущий срез роботов для API. Поля, зависящие от момента запроса
+// (время следующего удара, сила относительно дневного оборота), считаются здесь.
 func (c *Collector) Snapshot() []Session {
+	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.reg.snapshot()
+	out := c.reg.snapshot()
+	for i := range out {
+		out[i].fill(now, c.day.get(out[i].Symbol, out[i].LastSeen))
+	}
+	return out
+}
+
+// DayVolumes — дневной оборот по каждой ленте, база для оценки силы роботов.
+func (c *Collector) DayVolumes() []DayVolume {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.day.snapshot()
 }
 
 // Feeds — за какими тикерами следим (для диагностики на странице).
@@ -199,6 +222,9 @@ func (c *Collector) ingest(symbol string, trades []moexiss.Trade) {
 	}
 	c.mu.Lock()
 	c.det.Add(prints...)
+	for _, p := range prints {
+		c.day.add(p)
+	}
 	// Режем ленту сразу, а не только на сканах: на плотной бумаге между сканами
 	// набегают тысячи сделок, и лента упиралась бы в аварийный предел длины.
 	c.det.Trim(c.now())
@@ -225,7 +251,7 @@ func (c *Collector) scanOnce(ctx context.Context) {
 
 	c.mu.Lock()
 	found := c.det.Scan(now)
-	c.reg.observe(found, now)
+	c.reg.observe(found, now, c.det.Heads(now))
 	dirty := c.reg.takeDirty()
 	rows := make([]RobotRow, 0, len(dirty))
 	for _, s := range dirty {

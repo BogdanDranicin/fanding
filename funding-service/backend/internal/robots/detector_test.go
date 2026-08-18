@@ -140,16 +140,38 @@ func TestRobotWithSkippedBeats(t *testing.T) {
 	}
 }
 
-// Обычная лента без роботов не должна давать находок: главный фильтр — разброс
-// интервалов, у случайного потока он около единицы.
+// Обычная лента без роботов не должна давать подтверждённых находок.
+//
+// Полностью пустой результат здесь недостижим: порог обнаружения — три
+// повторяющихся принта, а три случайные сделки одного размера иногда встают через
+// равные промежутки сами по себе. Такое совпадение — всегда короткая серия, и
+// сторожим мы именно это: находки на случайной ленте обязаны быть предварительными
+// и редкими. Подтверждённый робот из шума — поломка детектора.
+//
+// Замер на этих двадцати сидах: два кандидата, оба на длинном периоде (>150 с),
+// где в окно анализа укладывается всего несколько тактов. Со страницы их снимает
+// правило пропущенных тактов — на первом же такте, который не состоялся.
 func TestNoFalsePositivesOnRandomTape(t *testing.T) {
+	const maxProvisional = 3
+
+	var provisional int
 	for seed := int64(0); seed < 20; seed++ {
 		rnd := rand.New(rand.NewSource(seed))
 		d := NewDetector(DefaultConfig())
 		d.Add(noisePrints("MOEX", base, 900, rnd)...)
-		if found := d.Scan(base.Add(20 * time.Minute)); len(found) != 0 {
-			t.Errorf("seed %d: на случайной ленте найдено %d роботов: %+v", seed, len(found), found)
+		for _, r := range d.Scan(base.Add(20 * time.Minute)) {
+			if !r.Provisional {
+				t.Errorf("seed %d: на случайной ленте подтверждённый робот: %+v", seed, r)
+				continue
+			}
+			if r.Prints >= ConfidentPrints {
+				t.Errorf("seed %d: предварительная находка длиной %d принтов", seed, r.Prints)
+			}
+			provisional++
 		}
+	}
+	if provisional > maxProvisional {
+		t.Errorf("на случайной ленте %d предварительных находок, порог %d", provisional, maxProvisional)
 	}
 }
 

@@ -13,6 +13,11 @@ type Feed struct {
 	Market string
 	Board  string
 	SecID  string
+	// Currency — валютный инструмент. Порог обнаружения у валюты ниже (робот
+	// заявляется со второго повторяющегося принта, а не с третьего): лента там
+	// реже, случайных совпадений размера меньше, и ждать третьего принта — значит
+	// увидеть робота на такт позже, чем он начал работать.
+	Currency bool
 }
 
 // Акции ходят через основной режим торгов TQBR, фьючерсы адресуются на уровне рынка.
@@ -32,7 +37,40 @@ func StockFeed(ticker string) Feed {
 
 // FuturesFeed — лента фьючерса на FORTS.
 func FuturesFeed(ticker string) Feed {
-	return Feed{Symbol: ticker, Engine: futEngine, Market: futMarket, SecID: ticker}
+	return Feed{Symbol: ticker, Engine: futEngine, Market: futMarket, SecID: ticker, Currency: IsCurrencyTicker(ticker)}
+}
+
+// Валютные инструменты MOEX опознаём двумя способами, потому что биржа называет
+// их по-разному: вечные контракты несут пару прямо в тикере (USDRUBF), а
+// квартальные — короткий код и дату экспирации (Si-9.26).
+var (
+	// currencyPairPrefixes — тикеры с парой в имени; сверяем префиксом, чтобы
+	// покрыть и вечный суффикс F, и прочие хвосты.
+	currencyPairPrefixes = []string{
+		"USDRUB", "EURRUB", "CNYRUB", "GBPRUB", "CHFRUB", "JPYRUB", "TRYRUB",
+		"HKDRUB", "KZTRUB", "BYNRUB", "AMDRUB", "EURUSD", "USDCNY",
+	}
+	// currencyFortsCodes — короткие коды срочного рынка. Сверяем точно или до
+	// дефиса перед экспирацией: префиксом нельзя, иначе серебро SILV уедет
+	// в валюту вслед за долларом Si.
+	currencyFortsCodes = []string{"SI", "EU", "CR", "ED", "UC", "GBPU", "CHF", "JP", "TR"}
+)
+
+// IsCurrencyTicker — валютный ли это инструмент. Влияет только на порог
+// обнаружения (см. Feed.Currency).
+func IsCurrencyTicker(ticker string) bool {
+	t := strings.ToUpper(strings.TrimSpace(ticker))
+	for _, p := range currencyPairPrefixes {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	for _, code := range currencyFortsCodes {
+		if t == code || strings.HasPrefix(t, code+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultFeeds — ликвидные бумаги основного режима плюс валютные фьючерсы, которые

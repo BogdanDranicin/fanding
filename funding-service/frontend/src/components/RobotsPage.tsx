@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { RobotSession, RobotsResponse } from '../types/robots';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DayVolume, RobotSession, RobotsResponse } from '../types/robots';
 import { authFetch } from '../api/auth';
 
 const fmtClock = new Intl.DateTimeFormat('ru-RU', {
@@ -10,6 +10,14 @@ const fmtDayClock = new Intl.DateTimeFormat('ru-RU', {
   hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
 const fmtLots = new Intl.NumberFormat('ru-RU');
+
+// TICK_MS — с этим шагом пересчитываются обратные отсчёты и проверяется, не пора
+// ли пикнуть. Мельче не нужно: предупреждения выдаются посекундно.
+const TICK_MS = 200;
+// ALARM_LEAD — за сколько секунд до удара начинают звучать предупреждения.
+const ALARM_LEAD = 3;
+const THRESHOLD_KEY = 'robots.strength-threshold';
+const DEFAULT_THRESHOLD = 5;
 
 function clock(iso: string): string {
   try { return fmtClock.format(new Date(iso)); } catch { return iso; }
@@ -50,11 +58,69 @@ function price(v: number): string {
   return v.toLocaleString('ru-RU', { maximumFractionDigits: 4 });
 }
 
+// volumeOf — объём робота. Живой срез считает его на сервере; строки истории
+// приходят из базы без досчитанных полей, там берём из лотовки и числа принтов.
+function volumeOf(r: RobotSession): number {
+  return r.volume_lots || r.qty_typical * r.prints;
+}
+
+function volumeLabel(lotsCount: number): string {
+  return `${fmtLots.format(Math.round(lotsCount))} л`;
+}
+
+// strengthLabel — сила робота: его доля в дневном обороте на своей стороне.
+function strengthLabel(pct: number): string {
+  if (!pct) return '—';
+  if (pct >= 10) return `${pct.toFixed(0)}%`;
+  return `${pct.toFixed(1)}%`;
+}
+
 // confidenceLabel — уверенность словами: цифра 0.62 читателю ничего не говорит.
 function confidenceLabel(c: number): string {
   if (c >= 0.75) return 'высокая';
   if (c >= 0.5) return 'средняя';
   return 'низкая';
+}
+
+// nextBeatAt — когда робот ударит в следующий раз, в миллисекундах.
+//
+// Фаза продолжается вперёд от последнего принта, а не берётся как «последний
+// принт плюс период»: лента ISS запаздывает на минуты, и к моменту отрисовки
+// робот успевает отработать несколько тактов, которых страница ещё не видела.
+function nextBeatAt(r: RobotSession, nowMs: number): number {
+  const periodMs = r.period_sec * 1000;
+  const last = new Date(r.last_seen).getTime();
+  if (!Number.isFinite(periodMs) || periodMs <= 0 || !Number.isFinite(last)) return 0;
+  const beats = Math.floor((nowMs - last) / periodMs) + 1;
+  return last + Math.max(1, beats) * periodMs;
+}
+
+// countdown — «через 7.4 с», «через 2:05».
+function countdown(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const sec = ms / 1000;
+  if (sec < 10) return `${sec.toFixed(1)} с`;
+  if (sec < 60) return `${Math.round(sec)} с`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// beep — короткий сигнал через WebAudio. Готовых звуковых файлов не держим:
+// страница отдаётся под строгим CSP, а осциллятор не требует внешних ресурсов.
+function beep(ctx: AudioContext, freq: number, durationSec: number) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = freq;
+  // Огибающая со сглаженными краями: прямоугольный импульс щёлкает в динамике.
+  const t0 = ctx.currentTime;
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + durationSec);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + durationSec + 0.02);
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
@@ -66,12 +132,32 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-// RobotCard — одна найденная закономерность. В свёрнутом виде — то, что и просили
-// видеть сразу: тикер, направление, лотовка и тайминг. Остальное раскрывается.
-function RobotCard({ r }: { r: RobotSession }) {
+interface RowProps {
+  r: RobotSession;
+  nowMs: number;
+  live: boolean;
+  threshold: number;
+  armed: boolean;
+  onToggleAlarm: (id: number) => void;
+  day?: DayVolume;
+}
+
+// RobotRow — один робот. В свёрнутом виде — графы таблицы, по клику раскрываются
+// подробности серии.
+function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowProps) {
   const long = r.side === 'B';
+  const volume = volumeOf(r);
+  const beatMs = live && r.active ? nextBeatAt(r, nowMs) : 0;
+  const left = beatMs ? beatMs - nowMs : NaN;
+
+  // Сильный робот подсвечивается в свою сторону: зелёный — набирает, красный — льёт.
+  const strong = r.strength_pct >= threshold && r.strength_pct > 0;
+  const classes = ['jrn-card', 'rb-card'];
+  if (r.misses > 0) classes.push('rb-missed');
+  if (strong) classes.push(long ? 'rb-strong-long' : 'rb-strong-short');
+
   return (
-    <details className="jrn-card rb-card">
+    <details className={classes.join(' ')}>
       <summary className="jrn-summary rb-summary">
         <div className="rb-col rb-symbol">
           <span className="rb-caption">тикер</span>
@@ -86,8 +172,8 @@ function RobotCard({ r }: { r: RobotSession }) {
         </div>
 
         <div className="rb-col">
-          <span className="rb-caption">лотовка</span>
-          <span className="rb-val">{lots(r)}</span>
+          <span className="rb-caption">объём робота</span>
+          <span className="rb-val">{volumeLabel(volume)}</span>
         </div>
 
         <div className="rb-col">
@@ -96,16 +182,39 @@ function RobotCard({ r }: { r: RobotSession }) {
         </div>
 
         <div className="rb-col">
-          <span className="rb-caption">повторов</span>
-          <span className="rb-val">{r.prints}</span>
+          <span className="rb-caption">до удара</span>
+          <span className={`rb-val rb-beat${Number.isFinite(left) && left <= ALARM_LEAD * 1000 ? ' rb-beat-soon' : ''}`}>
+            {live && r.active ? countdown(left) : '—'}
+          </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">сила</span>
+          <span className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}>
+            {strengthLabel(r.strength_pct)}
+          </span>
         </div>
 
         <div className="rb-col rb-status-col">
           <span className="rb-caption">статус</span>
-          {r.active
-            ? <span className="rb-status rb-active">работает</span>
-            : <span className="rb-status rb-stopped">замолчал в {clock(r.last_seen)}</span>}
+          {r.misses > 0
+            ? <span className="rb-status rb-warn">пропустил такт</span>
+            : r.active
+              ? <span className="rb-status rb-active">{r.provisional ? 'предварительно' : 'работает'}</span>
+              : <span className="rb-status rb-stopped">замолчал в {clock(r.last_seen)}</span>}
         </div>
+
+        {live && (
+          <button
+            type="button"
+            className={`rb-alarm${armed ? ' rb-alarm-on' : ''}`}
+            title={armed ? 'Выключить сигнал' : `Сигнал за ${ALARM_LEAD} с до удара`}
+            aria-pressed={armed}
+            onClick={(e) => { e.preventDefault(); onToggleAlarm(r.id); }}
+          >
+            {armed ? '🔔' : '🔕'}
+          </button>
+        )}
 
         <span className="jrn-chevron" aria-hidden="true">▸</span>
       </summary>
@@ -117,13 +226,21 @@ function RobotCard({ r }: { r: RobotSession }) {
           <Detail label="Последний принт" value={dayClock(r.last_seen)} />
           <Detail label="Работает" value={duration(r)} />
           <Detail label="Тактов периода" value={String(r.beats)} />
+          <Detail label="Пропущено тактов подряд" value={String(r.misses)} />
         </div>
 
         <div className="jrn-detail-group">
           <div className="jrn-detail-title">Лотовка и объём</div>
           <Detail label="Типичный размер" value={`${fmtLots.format(Math.round(r.qty_typical))} л`} />
           <Detail label="Границы размера" value={lots(r)} />
-          <Detail label="Объём серии" value={`≈ ${fmtLots.format(Math.round(r.qty_typical * r.prints))} л`} />
+          <Detail label="Объём робота" value={volumeLabel(volume)} />
+          {r.day_side_lots > 0 && (
+            <Detail
+              label={long ? 'Куплено за день' : 'Продано за день'}
+              value={volumeLabel(r.day_side_lots)}
+            />
+          )}
+          <Detail label="Доля в обороте" value={strengthLabel(r.strength_pct)} />
         </div>
 
         <div className="jrn-detail-group">
@@ -131,6 +248,7 @@ function RobotCard({ r }: { r: RobotSession }) {
           <Detail label="Период" value={period(r.period_sec)} />
           <Detail label="Разброс интервалов" value={`±${(r.jitter * 100).toFixed(1)}%`} />
           <Detail label="Уверенность" value={`${confidenceLabel(r.confidence)} (${r.confidence.toFixed(2)})`} />
+          {beatMs > 0 && <Detail label="Следующий удар" value={clock(new Date(beatMs).toISOString())} />}
         </div>
 
         <div className="jrn-detail-group">
@@ -138,7 +256,109 @@ function RobotCard({ r }: { r: RobotSession }) {
           <Detail label="На первом принте" value={price(r.price_first)} />
           <Detail label="На последнем" value={price(r.price_last)} />
           <Detail label="Замечен сервисом" value={dayClock(r.detected_at)} />
+          {day && <Detail label="Оборот считается с" value={`${day.since} МСК`} />}
         </div>
+      </div>
+    </details>
+  );
+}
+
+// SymbolGroup — все роботы одной бумаги под общей строкой-итогом.
+interface GroupProps extends Omit<RowProps, 'r' | 'armed'> {
+  symbol: string;
+  rows: RobotSession[];
+  armedIds: Set<number>;
+}
+
+function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day }: GroupProps) {
+  const longs = rows.filter((r) => r.side === 'B');
+  const shorts = rows.filter((r) => r.side === 'S');
+  const sum = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + volumeOf(r), 0);
+  const longVol = sum(longs);
+  const shortVol = sum(shorts);
+
+  // Итоговая сила считается по сторонам отдельно: у лонгов и шортов разные
+  // знаменатели — дневные покупки и дневные продажи, складывать их нельзя.
+  const longPct = day && day.buy > 0 ? (100 * longVol) / day.buy : 0;
+  const shortPct = day && day.sell > 0 ? (100 * shortVol) / day.sell : 0;
+  const leadLong = longPct >= shortPct;
+  const leadPct = Math.max(longPct, shortPct);
+
+  // Ближайший удар по бумаге — самый скорый среди работающих роботов.
+  const nextMs = live
+    ? rows
+      .filter((r) => r.active)
+      .map((r) => nextBeatAt(r, nowMs))
+      .filter((ms) => ms > 0)
+      .reduce((min, ms) => (min === 0 || ms < min ? ms : min), 0)
+    : 0;
+
+  const missed = rows.some((r) => r.misses > 0);
+  const strong = leadPct >= threshold && leadPct > 0;
+  const classes = ['rb-group'];
+  if (missed) classes.push('rb-missed');
+  if (strong) classes.push(leadLong ? 'rb-strong-long' : 'rb-strong-short');
+
+  return (
+    <details className={classes.join(' ')} open={rows.length === 1}>
+      <summary className="rb-group-summary">
+        <div className="rb-col rb-symbol">
+          <span className="rb-caption">тикер</span>
+          <span className="rb-symbol-val">
+            {symbol}
+            <span className="rb-badge">{rows.length}</span>
+          </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">направление</span>
+          <span className="rb-val rb-mix">
+            {longs.length > 0 && <span className="rb-long">{longs.length} Л</span>}
+            {longs.length > 0 && shorts.length > 0 && <span className="rb-mix-sep">/</span>}
+            {shorts.length > 0 && <span className="rb-short">{shorts.length} Ш</span>}
+          </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">объём роботов</span>
+          <span className="rb-val">{volumeLabel(longVol + shortVol)}</span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">оборот дня</span>
+          <span className="rb-val rb-dim">{day ? volumeLabel(day.buy + day.sell) : '—'}</span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">ближайший удар</span>
+          <span className={`rb-val rb-beat${nextMs > 0 && nextMs - nowMs <= ALARM_LEAD * 1000 ? ' rb-beat-soon' : ''}`}>
+            {nextMs > 0 ? countdown(nextMs - nowMs) : '—'}
+          </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">сила</span>
+          <span className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}>
+            {leadPct > 0 ? strengthLabel(leadPct) : '—'}
+          </span>
+        </div>
+
+        <span className="jrn-chevron" aria-hidden="true">▸</span>
+      </summary>
+
+      <div className="rb-group-body">
+        {rows.map((r) => (
+          <RobotRow
+            key={`${r.id}-${r.first_seen}`}
+            r={r}
+            nowMs={nowMs}
+            live={live}
+            threshold={threshold}
+            armed={armedIds.has(r.id)}
+            onToggleAlarm={onToggleAlarm}
+            day={day}
+          />
+        ))}
       </div>
     </details>
   );
@@ -150,10 +370,27 @@ export function RobotsPage() {
   const [tab, setTab] = useState<Tab>('live');
   const [rows, setRows] = useState<RobotSession[]>([]);
   const [watching, setWatching] = useState<string[]>([]);
+  const [days, setDays] = useState<DayVolume[]>([]);
   const [symbol, setSymbol] = useState('');
   const [activeOnly, setActiveOnly] = useState(false);
+  const [confirmedOnly, setConfirmedOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [armedIds, setArmedIds] = useState<Set<number>>(new Set());
+  const [threshold, setThreshold] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(THRESHOLD_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_THRESHOLD;
+  });
+
+  // Часы страницы: один таймер на всю таблицу вместо таймера в каждой строке.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  // skew — поправка на расхождение часов браузера и сервера. Без неё сбитые
+  // локальные часы сдвинули бы весь обратный отсчёт и звук вместе с ним.
+  const skewRef = useRef(0);
+  const audioRef = useRef<AudioContext | null>(null);
+  const firedRef = useRef<Set<string>>(new Set());
+
+  const live = tab === 'live';
 
   const load = useCallback(async (which: Tab) => {
     try {
@@ -164,8 +401,12 @@ export function RobotsPage() {
         const data = (await resp.json()) as RobotsResponse;
         setRows(data.robots ?? []);
         setWatching(data.watching ?? []);
+        setDays(data.day_volumes ?? []);
+        const asOf = Date.parse(data.as_of);
+        if (Number.isFinite(asOf)) skewRef.current = asOf - Date.now();
       } else {
         setRows(((await resp.json()) as RobotSession[] | null) ?? []);
+        setDays([]);
       }
       setError(null);
     } catch (e) {
@@ -182,15 +423,97 @@ export function RobotsPage() {
 
   // Живая вкладка обновляется сама: робот появляется и замолкает без перезагрузки.
   useEffect(() => {
-    if (tab !== 'live') return;
+    if (!live) return;
     const id = setInterval(() => { void load('live'); }, 15000);
     return () => clearInterval(id);
-  }, [load, tab]);
+  }, [load, live]);
+
+  // Ход часов: обратный отсчёт идёт между опросами сервера, а не рывками по ним.
+  useEffect(() => {
+    if (!live) return;
+    const id = setInterval(() => setNowMs(Date.now() + skewRef.current), TICK_MS);
+    return () => clearInterval(id);
+  }, [live]);
+
+  useEffect(() => { localStorage.setItem(THRESHOLD_KEY, String(threshold)); }, [threshold]);
+
+  const toggleAlarm = useCallback((id: number) => {
+    // Звук в браузере можно завести только из обработчика клика — поэтому
+    // контекст создаётся здесь, а не при загрузке страницы.
+    if (!audioRef.current) {
+      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (Ctor) audioRef.current = new Ctor();
+    }
+    void audioRef.current?.resume();
+    setArmedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const shown = useMemo(
-    () => rows.filter((r) => (!symbol || r.symbol === symbol) && (!activeOnly || r.active)),
-    [rows, symbol, activeOnly],
+    () => rows.filter((r) => (!symbol || r.symbol === symbol)
+      && (!activeOnly || r.active)
+      && (!confirmedOnly || !r.provisional)),
+    [rows, symbol, activeOnly, confirmedOnly],
   );
+
+  // Сколько предварительных сейчас скрыто/показано — чтобы низкий порог
+  // обнаружения не выглядел как поломка: на валюте пара случайных сделок
+  // одного размера заведомо попадает в список.
+  const provisionalCount = useMemo(
+    () => rows.filter((r) => r.provisional && (!symbol || r.symbol === symbol)).length,
+    [rows, symbol],
+  );
+
+  const dayBySymbol = useMemo(() => {
+    const m = new Map<string, DayVolume>();
+    days.forEach((d) => m.set(d.symbol, d));
+    return m;
+  }, [days]);
+
+  // Три предупреждения перед ударом, по одному на секунду. Проверяем на каждом
+  // тике часов и помним уже отыгранные, чтобы один и тот же такт не пикал дважды.
+  useEffect(() => {
+    const ctx = audioRef.current;
+    if (!live || !ctx || armedIds.size === 0) return;
+
+    const fired = firedRef.current;
+    for (const r of shown) {
+      if (!armedIds.has(r.id) || !r.active) continue;
+      const beatMs = nextBeatAt(r, nowMs);
+      if (!beatMs) continue;
+      const secLeft = Math.ceil((beatMs - nowMs) / 1000);
+      if (secLeft < 1 || secLeft > ALARM_LEAD) continue;
+      const key = `${r.id}:${beatMs}:${secLeft}`;
+      if (fired.has(key)) continue;
+      fired.add(key);
+      // Последнее предупреждение выше и длиннее — на слух отличимо от первых двух.
+      beep(ctx, secLeft === 1 ? 990 : 660, secLeft === 1 ? 0.18 : 0.08);
+    }
+    if (fired.size > 256) fired.clear();
+  }, [nowMs, armedIds, shown, live]);
+
+  // Группировка по бумаге: несколько роботов на одном тикере сводятся в строку-итог.
+  const groups = useMemo(() => {
+    const bySymbol = new Map<string, RobotSession[]>();
+    shown.forEach((r) => {
+      const list = bySymbol.get(r.symbol);
+      if (list) list.push(r);
+      else bySymbol.set(r.symbol, [r]);
+    });
+    return [...bySymbol.entries()]
+      .map(([sym, list]) => ({
+        symbol: sym,
+        rows: [...list].sort((a, b) => b.strength_pct - a.strength_pct || b.confidence - a.confidence),
+      }))
+      .sort((a, b) => {
+        const strength = (g: { rows: RobotSession[] }) => Math.max(...g.rows.map((r) => r.strength_pct), 0);
+        return strength(b) - strength(a) || a.symbol.localeCompare(b.symbol);
+      });
+  }, [shown]);
 
   const symbols = useMemo(() => {
     const set = new Set<string>(watching);
@@ -211,22 +534,24 @@ export function RobotsPage() {
 
       <p className="race-subtitle">
         Сервис пишет каждый принт по каждому тикеру и ищет повторы: если сделка одного
-        размера проходит через ровные промежутки времени — это робот. В таблице видно, на чём
-        он работает, в какую сторону, каким объёмом и с каким периодом. Период считается
-        по биржевым меткам сделок, поэтому доли секунды восстанавливаются даже там, где
-        биржа отдаёт время с точностью до секунды. Нажмите на строку, чтобы раскрыть подробности.
+        размера (±1 лот) проходит через ровные промежутки времени — это робот. На валюте
+        робот заявляется со второго повторяющегося принта, на остальных инструментах
+        с третьего; короткая серия помечается как предварительная. Пропустил такт —
+        строка желтеет, пропустил второй подряд — робот снимается со страницы.
+        Время до удара считается продолжением такта вперёд, потому что биржевая лента
+        приходит с задержкой в несколько минут.
       </p>
 
       <div className="rb-controls">
         <div className="rb-tabs">
           <button
-            className={`rb-tab${tab === 'live' ? ' rb-tab-active' : ''}`}
+            className={`rb-tab${live ? ' rb-tab-active' : ''}`}
             onClick={() => { setTab('live'); setLoading(true); }}
           >
             Сейчас
           </button>
           <button
-            className={`rb-tab${tab === 'history' ? ' rb-tab-active' : ''}`}
+            className={`rb-tab${!live ? ' rb-tab-active' : ''}`}
             onClick={() => { setTab('history'); setLoading(true); }}
           >
             История за неделю
@@ -241,7 +566,24 @@ export function RobotsPage() {
           </select>
         </label>
 
-        {tab === 'live' && (
+        <label className="rb-filter" title="Доля робота в дневном обороте, с которой он считается сильным">
+          Сильный робот от
+          <input
+            className="rb-threshold"
+            type="number"
+            min={0.1}
+            max={100}
+            step={0.5}
+            value={threshold}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v > 0) setThreshold(v);
+            }}
+          />
+          % оборота
+        </label>
+
+        {live && (
           <label className="rb-checkbox">
             <input
               type="checkbox"
@@ -251,6 +593,19 @@ export function RobotsPage() {
             только работающие
           </label>
         )}
+
+        <label
+          className="rb-checkbox"
+          title="Предварительная находка — серия короче шести принтов: периодичность в ней ещё не отличима от случайного совпадения"
+        >
+          <input
+            type="checkbox"
+            checked={confirmedOnly}
+            onChange={(e) => setConfirmedOnly(e.target.checked)}
+          />
+          только подтверждённые
+          {provisionalCount > 0 && <span className="rb-badge">{provisionalCount}</span>}
+        </label>
       </div>
 
       {error && <p className="race-error">Ошибка загрузки: {error}</p>}
@@ -259,17 +614,29 @@ export function RobotsPage() {
         <p className="rb-watching">Следим за лентой: {watching.join(', ')}</p>
       )}
 
-      {!error && shown.length === 0 && !loading && (
+      {!error && groups.length === 0 && !loading && (
         <p className="race-empty">
-          {tab === 'live'
+          {live
             ? 'Сейчас закономерностей не видно. Роботы появляются в активные часы торгов; лента анализируется за последние 20 минут.'
             : 'За неделю ничего не сохранено.'}
         </p>
       )}
 
-      {shown.length > 0 && (
-        <div className="jrn-list">
-          {shown.map((r) => <RobotCard key={`${r.id}-${r.symbol}-${r.first_seen}`} r={r} />)}
+      {groups.length > 0 && (
+        <div className="jrn-list rb-list">
+          {groups.map((g) => (
+            <SymbolGroup
+              key={g.symbol}
+              symbol={g.symbol}
+              rows={g.rows}
+              nowMs={nowMs}
+              live={live}
+              threshold={threshold}
+              armedIds={armedIds}
+              onToggleAlarm={toggleAlarm}
+              day={dayBySymbol.get(g.symbol)}
+            />
+          ))}
         </div>
       )}
     </div>

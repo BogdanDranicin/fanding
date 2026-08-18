@@ -39,6 +39,13 @@ func TestLiveScan(t *testing.T) {
 	}
 	client := moexiss.NewClient()
 	det := NewDetector(cfg)
+	// Порог обнаружения у валюты ниже, чем у акций, — живая проверка должна идти
+	// на тех же порогах, что и прод.
+	for _, f := range feeds {
+		if f.Currency {
+			det.MarkCurrency(f.Symbol)
+		}
+	}
 	// Разбор задним числом: аварийный предел длины ленты снимаем, иначе от
 	// многочасового хвоста останется только его конец и окно окажется пустым.
 	det.maxLen = 1 << 30
@@ -110,15 +117,28 @@ func TestLiveScan(t *testing.T) {
 	det2 := NewDetector(loose)
 	for _, f := range feeds {
 		det2.tapes[f.Symbol] = det.tapes[f.Symbol]
+		if f.Currency {
+			det2.MarkCurrency(f.Symbol)
+		}
 	}
 	report(t, "ослабленные пороги", det2.Scan(at))
 }
 
 func report(t *testing.T, title string, found []Robot) {
-	t.Logf("%s — найдено роботов: %d", title, len(found))
+	var provisional int
 	for _, r := range found {
-		t.Logf("  %-8s %-5s лотовка %.0f–%.0f (типично %.0f)  период %.2f с  принтов %d  разброс %.3f  уверенность %.2f  %s–%s",
-			r.Symbol, sideRu(r.Side), r.QtyMin, r.QtyMax, r.QtyTypical, r.PeriodSec,
+		if r.Provisional {
+			provisional++
+		}
+	}
+	t.Logf("%s — найдено роботов: %d (из них предварительных: %d)", title, len(found), provisional)
+	for _, r := range found {
+		mark := "подтв."
+		if r.Provisional {
+			mark = "предв."
+		}
+		t.Logf("  %-8s %-5s %s лотовка %.0f–%.0f (типично %.0f)  период %.2f с  принтов %d  разброс %.3f  уверенность %.2f  %s–%s",
+			r.Symbol, sideRu(r.Side), mark, r.QtyMin, r.QtyMax, r.QtyTypical, r.PeriodSec,
 			r.Prints, r.Jitter, r.Confidence,
 			r.FirstSeen.Format("15:04:05"), r.LastSeen.Format("15:04:05"))
 	}
@@ -160,10 +180,17 @@ func TestLiveCollector(t *testing.T) {
 	}
 	c.mu.Unlock()
 
+	for _, d := range c.DayVolumes() {
+		t.Logf("  оборот %-10s покупки %.0f  продажи %.0f  сделок %d  с %s",
+			d.Symbol, d.Buy, d.Sell, d.Trades, d.Since)
+	}
+
 	snap := c.Snapshot()
 	t.Logf("роботов в срезе: %d", len(snap))
 	for _, s := range snap {
-		t.Logf("  %-8s %-5s лотовка %.0f–%.0f  период %.2f с  принтов %d  уверенность %.2f  активен %v",
-			s.Symbol, sideRu(s.Side), s.QtyMin, s.QtyMax, s.PeriodSec, s.Prints, s.Confidence, s.Active)
+		t.Logf("  %-8s %-5s лотовка %.0f–%.0f  период %.2f с  принтов %d  объём %.0f л  сила %.2f%%  пропусков %d  уверенность %.2f  активен %v  удар в %s",
+			s.Symbol, sideRu(s.Side), s.QtyMin, s.QtyMax, s.PeriodSec, s.Prints,
+			s.VolumeLots, s.StrengthPct, s.Misses, s.Confidence, s.Active,
+			s.NextBeatAt.Format("15:04:05"))
 	}
 }

@@ -15,6 +15,7 @@ import (
 type RobotSource interface {
 	Snapshot() []robots.Session
 	Feeds() []robots.Feed
+	DayVolumes() []robots.DayVolume
 }
 
 // robotsResponse — ответ страницы «Роботы».
@@ -23,14 +24,23 @@ type robotsResponse struct {
 	// не отличить от неработающего сбора.
 	Watching []string         `json:"watching"`
 	Robots   []robots.Session `json:"robots"`
-	AsOf     time.Time        `json:"as_of"`
+	// DayVolumes — дневной оборот по каждой ленте, разложенный на покупки и
+	// продажи. Страница берёт отсюда базу для силы робота и показывает, с какого
+	// времени оборот считается: после перезапуска среди дня база неполная.
+	DayVolumes []robots.DayVolume `json:"day_volumes"`
+	AsOf       time.Time          `json:"as_of"`
 }
 
 // handleRobots отдаёт текущих роботов: тех, кто печатает прямо сейчас, и тех,
 // кто замолчал недавно.
 func handleRobots(src RobotSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := robotsResponse{Robots: []robots.Session{}, Watching: []string{}, AsOf: time.Now()}
+		resp := robotsResponse{
+			Robots:     []robots.Session{},
+			Watching:   []string{},
+			DayVolumes: []robots.DayVolume{},
+			AsOf:       time.Now(),
+		}
 		if src == nil {
 			writeJSON(w, http.StatusOK, resp)
 			return
@@ -38,6 +48,7 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 		for _, f := range src.Feeds() {
 			resp.Watching = append(resp.Watching, f.Symbol)
 		}
+		resp.DayVolumes = append(resp.DayVolumes, src.DayVolumes()...)
 
 		sessions := src.Snapshot()
 		symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))

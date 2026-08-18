@@ -13,15 +13,21 @@ import (
 type fakeRobotSource struct {
 	sessions []robots.Session
 	feeds    []robots.Feed
+	days     []robots.DayVolume
 }
 
-func (f fakeRobotSource) Snapshot() []robots.Session { return f.sessions }
-func (f fakeRobotSource) Feeds() []robots.Feed       { return f.feeds }
+func (f fakeRobotSource) Snapshot() []robots.Session     { return f.sessions }
+func (f fakeRobotSource) Feeds() []robots.Feed           { return f.feeds }
+func (f fakeRobotSource) DayVolumes() []robots.DayVolume { return f.days }
 
 func testSource() fakeRobotSource {
 	now := time.Date(2026, 8, 17, 15, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
 	return fakeRobotSource{
 		feeds: []robots.Feed{robots.StockFeed("SBER"), robots.StockFeed("GAZP")},
+		days: []robots.DayVolume{
+			{Symbol: "SBER", Date: "2026-08-17", Buy: 900000, Sell: 750000, Trades: 40000, Since: "09:59:58"},
+			{Symbol: "GAZP", Date: "2026-08-17", Buy: 300000, Sell: 310000, Trades: 15000, Since: "09:59:59"},
+		},
 		sessions: []robots.Session{
 			{
 				ID: 1, Active: true, DetectedAt: now, UpdatedAt: now,
@@ -123,5 +129,25 @@ func TestHandleRobotsWithoutCollector(t *testing.T) {
 	resp := getRobots(t, nil, "")
 	if len(resp.Robots) != 0 || len(resp.Watching) != 0 {
 		t.Errorf("хотим пустой ответ, получили %+v", resp)
+	}
+}
+
+// Дневной оборот едет вместе с роботами: без него страница не посчитает силу.
+func TestRobotsResponseCarriesDayVolumes(t *testing.T) {
+	resp := getRobots(t, testSource(), "")
+	if len(resp.DayVolumes) != 2 {
+		t.Fatalf("оборотов %d, хотим 2: %+v", len(resp.DayVolumes), resp.DayVolumes)
+	}
+	var sber robots.DayVolume
+	for _, d := range resp.DayVolumes {
+		if d.Symbol == "SBER" {
+			sber = d
+		}
+	}
+	if sber.Sell != 750000 {
+		t.Errorf("продажи SBER = %.0f, хотим 750000", sber.Sell)
+	}
+	if sber.Since != "09:59:58" {
+		t.Errorf("Since = %q: страница показывает, с какого времени считается база", sber.Since)
 	}
 }

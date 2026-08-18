@@ -9,6 +9,8 @@
   --accent-up-soft: rgba(46, 230, 110, 0.16);
   --accent-down: #ff5464;
   --accent-down-soft: rgba(255, 84, 100, 0.16);
+  --accent-warn: #ffc75a;
+  --accent-warn-soft: rgba(255, 199, 90, 0.16);
   --accent: #5b8cff;
   --accent-soft: rgba(91, 140, 255, 0.16);
   --border: #2b303d;

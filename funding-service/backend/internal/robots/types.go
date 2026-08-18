@@ -6,7 +6,10 @@
 // повторения). Пример: по SBER каждые 11.2 с проходит покупка 3011–3013 лотов.
 package robots
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Side — направление агрессора в сделке (колонка BUYSELL в ленте ISS).
 // Лента показывает сторону инициатора: B — робот берёт по оферу (лонг),
@@ -50,6 +53,12 @@ type Robot struct {
 	Beats      int     `json:"beats"`      // сколько тактов периода уложилось в серию
 	Confidence float64 `json:"confidence"` // 0..1, насколько уверенно это робот
 
+	// Provisional — серия ещё короче той, на которой периодичность отличима от
+	// случайного совпадения (см. ConfidentPrints). Такой робот показывается сразу,
+	// как просили, но помечен: подтвердит он себя или отвалится по пропущенному
+	// такту, станет ясно за следующие один-два такта.
+	Provisional bool `json:"provisional"`
+
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 
@@ -57,21 +66,62 @@ type Robot struct {
 	PriceLast  float64 `json:"price_last"`
 }
 
-// Volume — суммарный объём серии в лотах.
+// ConfidentPrints — длина серии, начиная с которой периодичность уже не объясняется
+// случайным совпадением размеров. Ниже неё робот считается предварительным.
+const ConfidentPrints = 6
+
+// Volume — суммарный объём серии в лотах: сколько робот уже напечатал.
 func (r Robot) Volume() float64 { return r.QtyTypical * float64(r.Prints) }
+
+// NextBeatAfter — когда робот ударит в следующий раз после момента t.
+//
+// Считается продолжением фазы серии вперёд, а не «последний принт плюс период»:
+// публичная лента ISS запаздывает на минуты, и к моменту вопроса робот успевает
+// отработать несколько тактов, которых мы ещё не видели. Период известен с
+// точностью до сотых долей секунды, поэтому фаза переносится вперёд без накопления
+// заметной ошибки.
+func (r Robot) NextBeatAfter(t time.Time) time.Time {
+	if r.PeriodSec <= 0 || r.LastSeen.IsZero() {
+		return time.Time{}
+	}
+	period := time.Duration(r.PeriodSec * float64(time.Second))
+	if period <= 0 {
+		return time.Time{}
+	}
+	elapsed := t.Sub(r.LastSeen)
+	beats := math.Floor(float64(elapsed)/float64(period)) + 1
+	if beats < 1 {
+		beats = 1
+	}
+	return r.LastSeen.Add(time.Duration(beats * float64(period)))
+}
 
 // Config — пороги детектора. Значения по умолчанию даёт DefaultConfig.
 type Config struct {
 	// Window — сколько последней ленты анализируем.
 	Window time.Duration
 
-	// MinPrints — минимум принтов в кластере одной лотовки.
+	// MinPrints/MinBeats — минимум принтов в кластере одной лотовки и минимум
+	// интервалов, легших в период. Это пороги для акций и товарных фьючерсов.
 	MinPrints int
-	// MinBeats — минимум интервалов, легших в найденный период.
-	MinBeats int
+	MinBeats  int
+
+	// MinPrintsCurrency/MinBeatsCurrency — то же для валютных инструментов, где
+	// робот заявляется со второго повторяющегося принта: лента реже, случайных
+	// совпадений размера меньше.
+	//
+	// На таком пороге серия — это один интервал, и статистические фильтры
+	// (разброс, доля совпавших интервалов) вырождаются: проверять period нечем,
+	// кроме того, что он попал в границы. Отсюда два следствия — такие находки
+	// помечаются Provisional, а отсев ложных ложится на правило пропущенных
+	// тактов в реестре сессий.
+	MinPrintsCurrency int
+	MinBeatsCurrency  int
 
 	// QtyTolRel/QtyTolAbs — допуск на «одинаковый размер»: робот дробит заявку и
-	// печатает не строго одну и ту же лотовку (3011 против 3013).
+	// печатает не строго одну и ту же лотовку. Допуск абсолютный, ±1 лот:
+	// относительный на крупной лотовке (±1% от 3000 — это ±30 лотов) склеивал
+	// в одного робота заведомо разные серии.
 	QtyTolRel float64
 	QtyTolAbs float64
 
@@ -108,18 +158,20 @@ type Config struct {
 // DefaultConfig — пороги, подобранные под ленту MOEX с секундной меткой времени.
 func DefaultConfig() Config {
 	return Config{
-		Window:           20 * time.Minute,
-		MinPrints:        6,
-		MinBeats:         5,
-		QtyTolRel:        0.01,
-		QtyTolAbs:        1,
-		MinPeriod:        2 * time.Second,
-		MaxPeriod:        5 * time.Minute,
-		PeriodTolAbs:     1200 * time.Millisecond,
-		PeriodTolRel:     0.02,
-		MaxSkip:          3,
-		MaxJitter:        0.15,
-		MinMatchRatio:    0.6,
-		MinUnitBeatRatio: 0.5,
+		Window:            20 * time.Minute,
+		MinPrints:         3,
+		MinBeats:          2,
+		MinPrintsCurrency: 2,
+		MinBeatsCurrency:  1,
+		QtyTolRel:         0,
+		QtyTolAbs:         1,
+		MinPeriod:         2 * time.Second,
+		MaxPeriod:         5 * time.Minute,
+		PeriodTolAbs:      1200 * time.Millisecond,
+		PeriodTolRel:      0.02,
+		MaxSkip:           3,
+		MaxJitter:         0.15,
+		MinMatchRatio:     0.6,
+		MinUnitBeatRatio:  0.5,
 	}
 }
