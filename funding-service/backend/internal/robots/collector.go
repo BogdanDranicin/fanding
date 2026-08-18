@@ -30,12 +30,25 @@ type Store interface {
 // internal/source/tinvest; здесь только интерфейс, чтобы коллектор тестировался
 // без сети и не зависел от конкретного брокера.
 type TradeStream interface {
-	// Symbols — инструменты, доступные источнику, тикерами биржи.
-	Symbols(ctx context.Context) ([]string, error)
+	// Symbols — инструменты, доступные источнику.
+	Symbols(ctx context.Context) ([]StreamInstrument, error)
 	// Run ведёт поток, пока не отменят контекст или не оборвётся соединение.
 	// Возврат означает обрыв: коллектор подождёт и попробует снова, а лента тем
 	// временем продолжит идти из ISS.
 	Run(ctx context.Context, symbols []string, out chan<- Print) error
+}
+
+// StreamInstrument — инструмент из каталога быстрого источника.
+//
+// Режим торгов обязателен, а не для красоты: правила отбора писались под ленту
+// ISS, где адрес уже сужен бордом, и «берём все акции» там означает именно акции
+// основного режима. Каталог брокера ничем не сужен — в нём и иностранные бумаги,
+// и весь товарный срочный рынок, — поэтому инструмент сначала сопоставляется с
+// лентой, для которой правило написано.
+type StreamInstrument struct {
+	Symbol string
+	// Board — режим торгов: TQBR у акций основного режима, SPBFUT у срочного.
+	Board string
 }
 
 // CollectorOptions — настройки сбора.
@@ -307,15 +320,30 @@ func (c *Collector) streamSymbols(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	out := make([]string, 0, len(available))
-	for _, sym := range available {
-		for _, tape := range c.opts.Tapes {
-			if c.opts.Watch.Keep(sym, tape) {
-				out = append(out, sym)
-				break
-			}
+	for _, in := range available {
+		tape, ok := c.tapeForBoard(in.Board)
+		if !ok {
+			continue // режим торгов, за которым мы не следим
+		}
+		if c.opts.Watch.Keep(in.Symbol, tape) {
+			out = append(out, in.Symbol)
 		}
 	}
 	return out, nil
+}
+
+// tapeForBoard сопоставляет режим торгов инструмента с лентой рынка, по правилам
+// которой этот инструмент отбирается.
+func (c *Collector) tapeForBoard(board string) (MarketTape, bool) {
+	for _, tape := range c.opts.Tapes {
+		switch {
+		case tape.Board != "" && tape.Board == board:
+			return tape, true
+		case tape.Engine == futEngine && board == fortsBoard:
+			return tape, true
+		}
+	}
+	return MarketTape{}, false
 }
 
 // ingestStream принимает принт быстрого источника и двигает водяную метку.

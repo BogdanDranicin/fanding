@@ -28,7 +28,7 @@ func newTInvestSource(c *tinvest.Client) *tinvestSource {
 
 // Symbols тянет каталог инструментов и запоминает соответствие тикеров и UID:
 // подписка в стриме идёт по UID, а весь сервис оперирует тикерами биржи.
-func (s *tinvestSource) Symbols(ctx context.Context) ([]string, error) {
+func (s *tinvestSource) Symbols(ctx context.Context) ([]robots.StreamInstrument, error) {
 	instruments, err := s.client.Instruments(ctx)
 	if err != nil {
 		return nil, err
@@ -36,7 +36,7 @@ func (s *tinvestSource) Symbols(ctx context.Context) ([]string, error) {
 
 	byUID := make(map[string]string, len(instruments))
 	byTic := make(map[string]string, len(instruments))
-	out := make([]string, 0, len(instruments))
+	out := make([]robots.StreamInstrument, 0, len(instruments))
 	for _, in := range instruments {
 		if in.Ticker == "" || in.UID == "" {
 			continue
@@ -48,7 +48,7 @@ func (s *tinvestSource) Symbols(ctx context.Context) ([]string, error) {
 		}
 		byUID[in.UID] = in.Ticker
 		byTic[in.Ticker] = in.UID
-		out = append(out, in.Ticker)
+		out = append(out, robots.StreamInstrument{Symbol: in.Ticker, Board: in.ClassCode})
 	}
 
 	s.mu.Lock()

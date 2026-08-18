@@ -13,14 +13,14 @@ import (
 
 // fakeStream отдаёт заранее подготовленные принты и умеет притворяться оборвавшимся.
 type fakeStream struct {
-	symbols []string
+	symbols []StreamInstrument
 	symErr  error
 	prints  []Print
 	runErr  error
 	runs    int
 }
 
-func (f *fakeStream) Symbols(context.Context) ([]string, error) {
+func (f *fakeStream) Symbols(context.Context) ([]StreamInstrument, error) {
 	return f.symbols, f.symErr
 }
 
@@ -100,27 +100,46 @@ func TestFrozenWatermarkLetsISSTakeOver(t *testing.T) {
 	}
 }
 
-// Из инструментов быстрого источника берём только те, за которыми следим.
+// Из каталога быстрого источника берём только то, за чем следим.
+//
+// Каталог брокера, в отличие от ленты ISS, ничем не сужен: в нём и иностранные
+// бумаги, и весь товарный срочный рынок. Без сопоставления с режимом торгов сюда
+// проходило всё подряд — подписка раздувалась с двух сотен инструментов до двух
+// с половиной тысяч.
 func TestStreamSymbolsIntersectWatchlist(t *testing.T) {
-	c := newTestCollector(&fakeISS{}, nil, base)
-	c.opts.Stream = &fakeStream{symbols: []string{"SBER", "SILV", "MXU6", "USDRUBF"}}
+	opts := DefaultCollectorOptions()
+	opts.Stream = &fakeStream{symbols: []StreamInstrument{
+		{Symbol: "SBER", Board: stockBoard},
+		{Symbol: "AKMP", Board: stockBoard},
+		{Symbol: "MXU6", Board: fortsBoard},
+		{Symbol: "USDRUBF", Board: fortsBoard},
+		{Symbol: "SVU6", Board: fortsBoard},   // серебро — не берём
+		{Symbol: "CCQ6", Board: fortsBoard},   // какао — не берём
+		{Symbol: "AAPL", Board: "SPBXM"},      // иностранная бумага не с нашей ленты
+		{Symbol: "SU26238RMFS4", Board: "TQOB"}, // облигация
+	}}
+	c := NewCollector(&fakeISS{}, nil, opts, zerolog.Nop())
 
 	got, err := c.streamSymbols(context.Background())
 	if err != nil {
 		t.Fatalf("streamSymbols: %v", err)
 	}
-	// testTape — лента акций, поэтому в ней проходит любой тикер; со срочного
-	// рынка правила пропускают индексный MXU6 и валютный USDRUBF, но не серебро.
-	want := map[string]bool{"SBER": true, "SILV": true, "MXU6": true, "USDRUBF": true}
+	want := []string{"SBER", "AKMP", "MXU6", "USDRUBF"}
 	if len(got) != len(want) {
-		t.Fatalf("отобрано %v, хотим %d инструментов", got, len(want))
+		t.Fatalf("отобрано %v, хотим %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("отобрано %v, хотим %v", got, want)
+			break
+		}
 	}
 }
 
 // Обрыв потока не должен ронять сбор: коллектор ждёт и подключается снова.
 func TestStreamLoopRetriesAfterBreak(t *testing.T) {
 	stream := &fakeStream{
-		symbols: []string{"SBER"},
+		symbols: []StreamInstrument{{Symbol: "SBER", Board: stockBoard}},
 		prints:  []Print{{Symbol: "SBER", Time: base, Price: 250, Qty: 10, Side: SideBuy}},
 		runErr:  errors.New("соединение закрыто"),
 	}
