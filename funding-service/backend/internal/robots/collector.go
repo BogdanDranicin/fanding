@@ -23,12 +23,32 @@ type Store interface {
 	UpsertRobot(ctx context.Context, in RobotRow) (int64, error)
 }
 
+// TradeStream — быстрый источник принтов, работающий постоянным потоком.
+//
+// Нужен потому, что публичная лента MOEX ISS приходит с задержкой ровно в
+// пятнадцать минут, а поиску роботов важна свежесть принта. Реализация живёт в
+// internal/source/tinvest; здесь только интерфейс, чтобы коллектор тестировался
+// без сети и не зависел от конкретного брокера.
+type TradeStream interface {
+	// Symbols — инструменты, доступные источнику, тикерами биржи.
+	Symbols(ctx context.Context) ([]string, error)
+	// Run ведёт поток, пока не отменят контекст или не оборвётся соединение.
+	// Возврат означает обрыв: коллектор подождёт и попробует снова, а лента тем
+	// временем продолжит идти из ISS.
+	Run(ctx context.Context, symbols []string, out chan<- Print) error
+}
+
 // CollectorOptions — настройки сбора.
 type CollectorOptions struct {
 	// Tapes — ленты рынков, которые опрашиваем целиком.
 	Tapes []MarketTape
 	// Watch — какие инструменты из этих лент берём в работу.
 	Watch *Watchlist
+	// Stream — быстрый источник принтов. nil означает работу только по ISS.
+	Stream TradeStream
+	// StreamRetry — пауза перед повторным подключением после обрыва потока.
+	// Функция, а не число, чтобы задержка могла расти от попытки к попытке.
+	StreamRetry func(attempt int) time.Duration
 	// PollInterval — как часто опрашиваем ленту каждого тикера. На точность
 	// тайминга не влияет: период считается по биржевым меткам TRADETIME, а не по
 	// моментам опроса. Влияет только на то, как быстро робот появится на странице.
@@ -64,6 +84,10 @@ const reseedAfter = 10 * time.Minute
 // maxSessions ограничивает реестр, чтобы память не росла на длинной сессии.
 const maxSessions = 500
 
+// streamBuffer — запас в канале принтов быстрого источника. На плотной ленте
+// сделки идут пачками, и разбор не должен подпирать чтение из сети.
+const streamBuffer = 8192
+
 // seedPages — сколько страниц ленты (по 5000 сделок) пробуем снять при старте.
 //
 // Одна страница ленты всего рынка акций накрывает около минуты торгов, так что
@@ -87,6 +111,15 @@ type Collector struct {
 	det *Detector
 	reg *registry
 	day *dayVolumes
+	// streamHead — до какого биржевого времени ленту каждого инструмента закрыл
+	// быстрый источник. Принты ISS не новее этой метки отбрасываются: их та же
+	// сделка, только пришедшая на пятнадцать минут позже.
+	//
+	// Метка по инструменту, а не общая: поток покрывает не всё, чем торгует биржа,
+	// и по бумаге вне подписки ISS обязан остаться единственным источником. Если
+	// поток обрывается, метка замирает — и ISS сам собой подхватывает всё, что
+	// после неё, без переключения режимов.
+	streamHead map[string]time.Time
 }
 
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
@@ -105,8 +138,9 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 		det:    det,
 		// Чёрный список снятых серий держим на длину окна анализа: ровно столько
 		// снятая серия ещё видна детектору.
-		reg: newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
-		day: newDayVolumes(),
+		reg:        newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
+		day:        newDayVolumes(),
+		streamHead: make(map[string]time.Time),
 	}
 }
 
@@ -119,6 +153,13 @@ func (c *Collector) Run(ctx context.Context) {
 			defer wg.Done()
 			c.pollTape(ctx, tape)
 		}(t)
+	}
+	if c.opts.Stream != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.streamLoop(ctx)
+		}()
 	}
 	wg.Add(1)
 	go func() {
@@ -215,6 +256,88 @@ func (c *Collector) pollTape(ctx context.Context, tape MarketTape) {
 	}
 }
 
+// streamLoop держит быстрый источник подключённым, переподключаясь после обрывов.
+// Пока он работает, лента ISS остаётся подключённой и молча подавляется водяной
+// меткой — так обрыв потока не оставляет сервис без данных вовсе.
+func (c *Collector) streamLoop(ctx context.Context) {
+	symbols, err := c.streamSymbols(ctx)
+	if err != nil {
+		c.log.Warn().Err(err).Msg("robots: не получил список инструментов быстрого источника, работаю по ISS")
+		return
+	}
+	if len(symbols) == 0 {
+		c.log.Warn().Msg("robots: быстрый источник не знает ни одного нужного инструмента, работаю по ISS")
+		return
+	}
+	c.log.Info().Int("symbols", len(symbols)).Msg("robots: быстрый источник подключается")
+
+	for attempt := 0; ctx.Err() == nil; attempt++ {
+		prints := make(chan Print, streamBuffer)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for p := range prints {
+				c.ingestStream(p)
+			}
+		}()
+
+		err := c.opts.Stream.Run(ctx, symbols, prints)
+		close(prints)
+		<-done
+
+		if ctx.Err() != nil {
+			return
+		}
+		delay := 5 * time.Second
+		if c.opts.StreamRetry != nil {
+			delay = c.opts.StreamRetry(attempt)
+		}
+		c.log.Warn().Err(err).Dur("retry_in", delay).Msg("robots: быстрый источник оборвался, лента идёт из ISS")
+		if !sleepCtx(ctx, delay) {
+			return
+		}
+	}
+}
+
+// streamSymbols — пересечение того, что умеет быстрый источник, с тем, за чем мы
+// следим. Инструменты вне пересечения остаются на ISS.
+func (c *Collector) streamSymbols(ctx context.Context) ([]string, error) {
+	available, err := c.opts.Stream.Symbols(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(available))
+	for _, sym := range available {
+		for _, tape := range c.opts.Tapes {
+			if c.opts.Watch.Keep(sym, tape) {
+				out = append(out, sym)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// ingestStream принимает принт быстрого источника и двигает водяную метку.
+func (c *Collector) ingestStream(p Print) {
+	if p.Symbol == "" || p.Qty <= 0 || p.Time.IsZero() {
+		return
+	}
+	if p.Side != SideBuy && p.Side != SideSell {
+		return
+	}
+	c.mu.Lock()
+	if IsCurrencyTicker(p.Symbol) {
+		c.det.MarkCurrency(p.Symbol)
+	}
+	c.det.Add(p)
+	c.day.add(p)
+	if p.Time.After(c.streamHead[p.Symbol]) {
+		c.streamHead[p.Symbol] = p.Time
+	}
+	c.mu.Unlock()
+}
+
 // ingest переводит сделки ленты рынка в принты и кладёт их в детектор, отбрасывая
 // инструменты вне списка наблюдения.
 func (c *Collector) ingest(tape MarketTape, trades []moexiss.Trade) {
@@ -256,8 +379,16 @@ func (c *Collector) ingest(tape MarketTape, trades []moexiss.Trade) {
 	// Порог обнаружения зависит от инструмента, а какие инструменты вообще есть
 	// в ленте, известно только по факту прихода сделок.
 	c.det.MarkCurrency(currency...)
-	c.det.Add(prints...)
+	kept := prints[:0]
 	for _, p := range prints {
+		// Ту же сделку быстрый источник принёс пятнадцатью минутами раньше.
+		if head, ok := c.streamHead[p.Symbol]; ok && !p.Time.After(head) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	c.det.Add(kept...)
+	for _, p := range kept {
 		c.day.add(p)
 	}
 	// Режем ленту сразу, а не только на сканах: на плотной бумаге между сканами

@@ -38,6 +38,9 @@ type Config struct {
 	// тайминга не влияет (период считается по биржевым меткам сделок), влияет
 	// только на скорость появления робота на странице и на нагрузку на ISS.
 	RobotsPollMs int    `envconfig:"ROBOTS_POLL_MS" default:"3000"`
+	// TInvestToken — токен T-Invest API. Пусто — поиск роботов работает по
+	// публичной ленте MOEX ISS, а она приходит с задержкой в 15 минут.
+	TInvestToken string `envconfig:"TINVEST_TOKEN"`
 	Port         int    `envconfig:"BACKEND_PORT"          default:"8080"`
 	LogLevel     string `envconfig:"LOG_LEVEL"             default:"info"`
 }

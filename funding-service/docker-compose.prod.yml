@@ -42,6 +42,7 @@ services:
       ROBOTS_ENABLED: ${ROBOTS_ENABLED:-true}
       ROBOTS_SYMBOLS: ${ROBOTS_SYMBOLS:-}
       ROBOTS_POLL_MS: ${ROBOTS_POLL_MS:-3000}
+      TINVEST_TOKEN: ${TINVEST_TOKEN:-}
       BACKEND_PORT: 8080
       LOG_LEVEL: ${LOG_LEVEL:-warn}
     depends_on:

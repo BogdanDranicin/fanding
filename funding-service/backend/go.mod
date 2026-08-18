@@ -12,8 +12,10 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/zerolog v1.35.1
+	github.com/russianinvestments/invest-api-go-sdk v1.40.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/text v0.37.0
+	google.golang.org/grpc v1.74.2
 )
 
 require (
@@ -32,7 +34,10 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250818200422-3122310a409c // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
