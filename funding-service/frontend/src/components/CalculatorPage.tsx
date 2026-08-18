@@ -139,7 +139,9 @@ async function fetchPrices(): Promise<Record<string, number>> {
 // fetchSwapRates pulls the MOEX funding rate (SWAPRATE) per perpetual future from
 // OUR backend (/api/v1/swap-rates), not directly from ISS: the site CSP allows
 // connect-src 'self' only, so a browser call to iss.moex.com is blocked. The
-// backend returns SECID→SWAPRATE, quarterly futures (null SWAPRATE) already dropped.
+// backend returns SECID→SWAPRATE for perpetuals only (quarterlies already dropped by
+// LASTTRADEDATE there — they report SWAPRATE 0.0, not null, so they can't be filtered
+// here; a symbol missing from this map must render a dash, never 0 ₽).
 // Funding per lot in ₽ = SWAPRATE × lot_size (validated: the backend's moex_funding
 // for CNYRUBF equals its SWAPRATE exactly, so this matches the existing currency path).
 async function fetchSwapRates(): Promise<Record<string, number>> {

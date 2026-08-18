@@ -192,6 +192,15 @@ func (c *allSpecsCache) fetch(ctx context.Context, url, marketType, lotField str
 	return result, nil
 }
 
+// columnIndex maps an ISS block's column names to their position in each data row.
+func columnIndex(cols []string) map[string]int {
+	idx := make(map[string]int, len(cols))
+	for i, col := range cols {
+		idx[col] = i
+	}
+	return idx
+}
+
 func strAt(row []any, idx map[string]int, col string) (string, bool) {
 	i, ok := idx[col]
 	if !ok || i >= len(row) {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -82,10 +83,7 @@ func fetchMoexPrices(ctx context.Context, url string) (map[string]float64, error
 		return nil, err
 	}
 
-	idx := make(map[string]int, len(raw.Marketdata.Columns))
-	for i, col := range raw.Marketdata.Columns {
-		idx[col] = i
-	}
+	idx := columnIndex(raw.Marketdata.Columns)
 
 	result := make(map[string]float64, len(raw.Marketdata.Data))
 	for _, row := range raw.Marketdata.Data {
@@ -137,9 +135,12 @@ func handlePrices(w http.ResponseWriter, r *http.Request) {
 var globalSwapRates = &pricesCache{}
 
 func (c *pricesCache) refreshSwapRates(ctx context.Context) error {
+	// Both ISS blocks in one request: `securities` says which contract is perpetual,
+	// `marketdata` carries the rate. See fetchMoexSwapRates for why both are needed.
 	rates, err := fetchMoexSwapRates(ctx,
 		"https://iss.moex.com/iss/engines/futures/markets/forts/securities.json"+
-			"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,SWAPRATE",
+			"?iss.meta=off&iss.only=securities,marketdata"+
+			"&securities.columns=SECID,LASTTRADEDATE&marketdata.columns=SECID,SWAPRATE",
 	)
 	if err != nil {
 		return err
@@ -151,8 +152,23 @@ func (c *pricesCache) refreshSwapRates(ctx context.Context) error {
 	return nil
 }
 
-// fetchMoexSwapRates returns SECID→SWAPRATE for every perpetual future. Rows whose
-// SWAPRATE is null (quarterly futures — no funding) are skipped; a genuine 0 is kept.
+// moexSwapResp carries both ISS blocks the SWAPRATE query needs.
+type moexSwapResp struct {
+	moexISSResp // securities: SECID, LASTTRADEDATE
+	moexMDResp  // marketdata: SECID, SWAPRATE
+}
+
+// perpLastTradeDate is the sentinel expiry MOEX gives perpetual futures — they never
+// expire, so LASTTRADEDATE is pinned far in the future. Quarterly contracts carry a
+// real date ("2026-08-28"), which is what tells the two kinds apart.
+const perpLastTradeDate = "2100-01-01"
+
+// fetchMoexSwapRates returns SECID→SWAPRATE for every perpetual future.
+//
+// Perpetuals are selected by LASTTRADEDATE, not by SWAPRATE being non-null: ISS now
+// reports SWAPRATE 0.0 (not null) for quarterly futures, so filtering on null let all
+// ~460 quarterlies through with a rate of 0 and the calculator showed them a funding
+// row of 0 ₽ instead of a dash. A genuine 0 on a perpetual is still kept.
 func fetchMoexSwapRates(ctx context.Context, url string) (map[string]float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -167,23 +183,39 @@ func fetchMoexSwapRates(ctx context.Context, url string) (map[string]float64, er
 	if err != nil {
 		return nil, err
 	}
-	var raw moexMDResp
+	var raw moexSwapResp
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
 
-	idx := make(map[string]int, len(raw.Marketdata.Columns))
-	for i, col := range raw.Marketdata.Columns {
-		idx[col] = i
-	}
-
-	result := make(map[string]float64, len(raw.Marketdata.Data))
-	for _, row := range raw.Marketdata.Data {
-		sym, _ := strAt(row, idx, "SECID")
+	secIdx := columnIndex(raw.Securities.Columns)
+	perpetual := make(map[string]struct{}, 16)
+	for _, row := range raw.Securities.Data {
+		sym, _ := strAt(row, secIdx, "SECID")
 		if sym == "" {
 			continue
 		}
-		if v, ok := floatAtOK(row, idx, "SWAPRATE"); ok {
+		if d, _ := strAt(row, secIdx, "LASTTRADEDATE"); d == perpLastTradeDate {
+			perpetual[sym] = struct{}{}
+		}
+	}
+
+	// FORTS always lists perpetuals, so an empty set means the sentinel date moved and
+	// the filter no longer matches anything. Fail instead of returning an empty map —
+	// handleSwapRates then keeps serving the last known rates rather than silently
+	// dropping funding from every position.
+	if len(perpetual) == 0 {
+		return nil, errors.New("moex iss: no perpetual futures matched LASTTRADEDATE " + perpLastTradeDate)
+	}
+
+	mdIdx := columnIndex(raw.Marketdata.Columns)
+	result := make(map[string]float64, len(perpetual))
+	for _, row := range raw.Marketdata.Data {
+		sym, _ := strAt(row, mdIdx, "SECID")
+		if _, ok := perpetual[sym]; !ok {
+			continue
+		}
+		if v, ok := floatAtOK(row, mdIdx, "SWAPRATE"); ok {
 			result[sym] = v
 		}
 	}
