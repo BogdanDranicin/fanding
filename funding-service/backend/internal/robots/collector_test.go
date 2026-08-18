@@ -194,6 +194,8 @@ func TestWatchlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatchlist(\"\"): %v", err)
 	}
+	// SECID даны в том виде, в каком их отдаёт биржа: срочный рынок адресуется
+	// короткими кодами, а не человеческими именами — MIX-9.26 приходит как MXU6.
 	cases := []struct {
 		secid string
 		tape  MarketTape
@@ -205,14 +207,21 @@ func TestWatchlist(t *testing.T) {
 		{"SBERF", forts, true, "вечный контракт на акцию"},
 		{"GAZPF", forts, true, "вечный контракт на акцию"},
 		{"USDRUBF", forts, true, "валютный вечный"},
-		{"Si-9.26", forts, true, "валютный квартальный"},
-		{"MIX-9.26", forts, true, "индексный фьючерс"},
-		{"MXI-9.26", forts, true, "индексный фьючерс"},
-		{"IMOEXF", forts, true, "индексный вечный"},
-		{"SILV", forts, false, "товарный контракт не берём"},
-		{"CCQ6", forts, false, "прочий квартальный не берём"},
+		{"CNYRUBF", forts, true, "валютный вечный"},
+		{"SiU6", forts, true, "Si-9.26, доллар к рублю"},
+		{"CRU6", forts, true, "CNY-9.26, юань к рублю"},
+		{"EuU6", forts, true, "Eu-9.26, евро к рублю"},
+		{"MXU6", forts, true, "MIX-9.26, индекс МосБиржи"},
+		{"MMU6", forts, true, "MXI-9.26, тот же индекс мини"},
+		{"RIU6", forts, true, "RTS-9.26"},
+		{"IMOEXF", forts, true, "вечный на индекс"},
+		{"SILV", forts, false, "серебро: не валюта, хотя и начинается на Si"},
+		{"SVU6", forts, false, "серебро квартальное"},
+		{"BRV6", forts, false, "нефть не берём"},
+		{"CCQ6", forts, false, "какао не берём"},
 		{"", shares, false, "пустой тикер"},
 	}
+
 	for _, tc := range cases {
 		if got := byRules.Keep(tc.secid, tc.tape); got != tc.want {
 			t.Errorf("Keep(%q) = %v, хотим %v: %s", tc.secid, got, tc.want, tc.why)

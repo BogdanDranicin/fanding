@@ -38,13 +38,30 @@ func DefaultTapes() []MarketTape {
 	}
 }
 
-// indexFutureRoots — фьючерсы на индексы, которые нужны в поиске роботов.
-var indexFutureRoots = []string{"MIX", "MXI", "IMOEXF", "RTS", "RGBI"}
+// Срочный рынок адресуется короткими кодами, а не человеческими именами: контракт
+// MIX-9.26 приходит в ленте как SECID «MXU6», Si-9.26 — как «SiU6». Поэтому отбор
+// идёт по коду базового актива (первые две буквы) плюс месяц и год экспирации.
+var fortsQuarterlyRe = regexp.MustCompile(`^([A-Za-z]{2})[FGHJKMNQUVXZ]\d$`)
 
-// perpetualRe — вечный контракт FORTS: тикер из одних букв, оканчивающийся на F
-// (SBERF, GAZPF, USDRUBF, IMOEXF). Квартальные несут дефис и код экспирации
-// (Si-9.26), поэтому под правило не попадают.
+// perpetualRe — вечный контракт: SECID из одних букв с F на конце (SBERF, GAZPF,
+// USDRUBF, IMOEXF). У квартальных в SECID есть цифра года, так что они не пройдут.
 var perpetualRe = regexp.MustCompile(`^[A-Z]+F$`)
+
+// Коды базовых активов срочного рынка, которые нас интересуют. Ключи в верхнем
+// регистре: биржа пишет коды вперемешку («SiU6», «MXU6»).
+var (
+	currencyFortsCodes = map[string]bool{
+		"SI": true, // доллар к рублю
+		"EU": true, // евро к рублю
+		"CR": true, // юань к рублю
+		"ED": true, // евро к доллару
+	}
+	indexFortsCodes = map[string]bool{
+		"MX": true, // MIX, индекс МосБиржи
+		"MM": true, // MXI, тот же индекс мини
+		"RI": true, // RTS
+	}
+)
 
 // Watchlist решает, какие инструменты из лент рынков брать в работу.
 //
@@ -103,7 +120,7 @@ func (w *Watchlist) Keep(secid string, tape MarketTape) bool {
 	if tape.Engine == stockEngine {
 		return true
 	}
-	return IsCurrencyTicker(sym) || isIndexFuture(sym) || perpetualRe.MatchString(sym)
+	return IsCurrencyTicker(secid) || isIndexFuture(secid) || perpetualRe.MatchString(sym)
 }
 
 // Describe — чем сейчас ограничен сбор; показывается на странице, чтобы пустой
@@ -120,18 +137,27 @@ func (w *Watchlist) Describe() string {
 	return "только " + strings.Join(out, ", ")
 }
 
-func isIndexFuture(sym string) bool {
-	for _, root := range indexFutureRoots {
-		if sym == root || strings.HasPrefix(sym, root+"-") {
-			return true
-		}
+// fortsCode возвращает код базового актива квартального контракта в верхнем
+// регистре: «SiU6» → «SI». Для вечных и прочих имён — пустая строка.
+func fortsCode(secid string) string {
+	m := fortsQuarterlyRe.FindStringSubmatch(secid)
+	if m == nil {
+		return ""
 	}
-	return false
+	return strings.ToUpper(m[1])
 }
 
-// Валютные инструменты MOEX опознаём двумя способами, потому что биржа называет
-// их по-разному: вечные контракты несут пару прямо в тикере (USDRUBF), а
-// квартальные — короткий код и дату экспирации (Si-9.26).
+// isIndexFuture — фьючерс на индекс: и квартальный MIX/MXI/RTS, и вечный IMOEXF.
+func isIndexFuture(secid string) bool {
+	if code := fortsCode(secid); code != "" {
+		return indexFortsCodes[code]
+	}
+	return strings.ToUpper(secid) == "IMOEXF"
+}
+
+// Вечные контракты несут валютную пару прямо в SECID (USDRUBF, CNYRUBF), поэтому
+// их ловим префиксом. Квартальные приходят коротким кодом (SiU6), и для них
+// работает разбор через fortsCode.
 var (
 	// currencyPairPrefixes — тикеры с парой в имени; сверяем префиксом, чтобы
 	// покрыть и вечный суффикс F, и прочие хвосты.
@@ -139,25 +165,22 @@ var (
 		"USDRUB", "EURRUB", "CNYRUB", "GBPRUB", "CHFRUB", "JPYRUB", "TRYRUB",
 		"HKDRUB", "KZTRUB", "BYNRUB", "AMDRUB", "EURUSD", "USDCNY",
 	}
-	// currencyFortsCodes — короткие коды срочного рынка. Сверяем точно или до
-	// дефиса перед экспирацией: префиксом нельзя, иначе серебро SILV уедет
-	// в валюту вслед за долларом Si.
-	currencyFortsCodes = []string{"SI", "EU", "CR", "ED", "UC", "GBPU", "CHF", "JP", "TR"}
 )
 
 // IsCurrencyTicker — валютный ли это инструмент. Влияет на порог обнаружения:
-// у валюты робот заявляется со второго повторяющегося принта, а не с третьего.
+// у валюты робот заявляется с третьего повторяющегося принта, а не с шестого.
 func IsCurrencyTicker(ticker string) bool {
 	t := strings.ToUpper(strings.TrimSpace(ticker))
+	// Вечные контракты несут пару прямо в имени: USDRUBF, CNYRUBF.
 	for _, p := range currencyPairPrefixes {
 		if strings.HasPrefix(t, p) {
 			return true
 		}
 	}
-	for _, code := range currencyFortsCodes {
-		if t == code || strings.HasPrefix(t, code+"-") {
-			return true
-		}
+	// Квартальные — только по коду базового актива. Префиксом сверять нельзя:
+	// серебро SILV уехало бы в валюту вслед за долларом Si.
+	if code := fortsCode(strings.TrimSpace(ticker)); code != "" {
+		return currencyFortsCodes[code]
 	}
 	return false
 }
