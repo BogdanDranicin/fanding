@@ -25,7 +25,10 @@ type Store interface {
 
 // CollectorOptions — настройки сбора.
 type CollectorOptions struct {
-	Feeds []Feed
+	// Tapes — ленты рынков, которые опрашиваем целиком.
+	Tapes []MarketTape
+	// Watch — какие инструменты из этих лент берём в работу.
+	Watch *Watchlist
 	// PollInterval — как часто опрашиваем ленту каждого тикера. На точность
 	// тайминга не влияет: период считается по биржевым меткам TRADETIME, а не по
 	// моментам опроса. Влияет только на то, как быстро робот появится на странице.
@@ -41,8 +44,10 @@ type CollectorOptions struct {
 
 // DefaultCollectorOptions — рабочие значения по умолчанию.
 func DefaultCollectorOptions() CollectorOptions {
+	watch, _ := NewWatchlist("")
 	return CollectorOptions{
-		Feeds:        DefaultFeeds(),
+		Tapes:        DefaultTapes(),
+		Watch:        watch,
 		PollInterval: 3 * time.Second,
 		ScanInterval: 15 * time.Second,
 		StaleAfter:   3 * time.Minute,
@@ -59,9 +64,15 @@ const reseedAfter = 10 * time.Minute
 // maxSessions ограничивает реестр, чтобы память не росла на длинной сессии.
 const maxSessions = 500
 
-// seedPages — сколько страниц ленты (по 5000 сделок) снимаем при входе в тикер.
-// Две страницы накрывают окно анализа даже на самых плотных бумагах.
-const seedPages = 2
+// seedPages — сколько страниц ленты (по 5000 сделок) пробуем снять при старте.
+//
+// Одна страница ленты всего рынка акций накрывает около минуты торгов, так что
+// двадцатиминутное окно затравкой целиком не закрыть: ISS отдаёт хвост лишь на
+// несколько страниц вглубь, дальше идут пустые ответы. Это не беда — окно
+// дозаполняется инкрементальным опросом за первые двадцать минут работы. Просить
+// больше, чем биржа отдаёт, смысла нет: FetchTradeTail оборвётся на первой же
+// неудачной странице.
+const seedPages = 6
 
 // Collector опрашивает ленты сделок, кормит ими детектор и держит текущий срез
 // найденных роботов. Один экземпляр обслуживает все тикеры сразу.
@@ -81,12 +92,10 @@ type Collector struct {
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
 // тогда роботы живут только в памяти и страница истории покажет текущую сессию сервиса.
 func NewCollector(client issClient, store Store, opts CollectorOptions, log zerolog.Logger) *Collector {
-	det := NewDetector(opts.Detector)
-	for _, f := range opts.Feeds {
-		if f.Currency {
-			det.MarkCurrency(f.Symbol)
-		}
+	if opts.Watch == nil {
+		opts.Watch = &Watchlist{}
 	}
+	det := NewDetector(opts.Detector)
 	return &Collector{
 		client: client,
 		store:  store,
@@ -104,12 +113,12 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 // Run ведёт сбор до отмены контекста: горутина на ленту плюс общий цикл сканирования.
 func (c *Collector) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	for _, f := range c.opts.Feeds {
+	for _, t := range c.opts.Tapes {
 		wg.Add(1)
-		go func(feed Feed) {
+		go func(tape MarketTape) {
 			defer wg.Done()
-			c.pollFeed(ctx, feed)
-		}(f)
+			c.pollTape(ctx, tape)
+		}(t)
 	}
 	wg.Add(1)
 	go func() {
@@ -139,16 +148,27 @@ func (c *Collector) DayVolumes() []DayVolume {
 	return c.day.snapshot()
 }
 
-// Feeds — за какими тикерами следим (для диагностики на странице).
-func (c *Collector) Feeds() []Feed { return c.opts.Feeds }
+// Tapes — ленты, которые опрашиваем (для диагностики на странице).
+func (c *Collector) Tapes() []MarketTape { return c.opts.Tapes }
 
-// pollFeed тянет ленту одного тикера инкрементально по курсору TRADENO.
-func (c *Collector) pollFeed(ctx context.Context, feed Feed) {
-	tf := moexiss.TradeFeed{Engine: feed.Engine, Market: feed.Market, Board: feed.Board, SecID: feed.SecID}
-	log := c.log.With().Str("symbol", feed.Symbol).Logger()
+// WatchDescription — чем ограничен отбор инструментов.
+func (c *Collector) WatchDescription() string { return c.opts.Watch.Describe() }
 
-	// Стартовое смещение разводит запросы по тикерам во времени: иначе все ленты
-	// уходят в ISS одной пачкой каждые PollInterval.
+// Symbols — инструменты, по которым сейчас есть лента. Именно они, а не список
+// правил, наполняют выбор тикера на странице.
+func (c *Collector) Symbols() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.det.Symbols()
+}
+
+// pollTape тянет ленту рынка инкрементально по курсору TRADENO.
+func (c *Collector) pollTape(ctx context.Context, tape MarketTape) {
+	tf := moexiss.TradeFeed{Engine: tape.Engine, Market: tape.Market, Board: tape.Board}
+	log := c.log.With().Str("tape", tape.Name).Logger()
+
+	// Стартовое смещение разводит запросы по лентам во времени: иначе они уходят
+	// в ISS одной пачкой каждые PollInterval.
 	if !sleepCtx(ctx, time.Duration(rand.Int63n(int64(c.opts.PollInterval)+1))) {
 		return
 	}
@@ -162,10 +182,10 @@ func (c *Collector) pollFeed(ctx context.Context, feed Feed) {
 			err    error
 		)
 		if cursor == 0 {
-			// В ленту входим с хвоста: бэкфилл всей сессии по ликвидной бумаге —
-			// это сотни тысяч сделок, а детектору нужны последние минуты. Берём
-			// столько страниц, чтобы затравка накрыла окно анализа сразу, а не
-			// через двадцать минут работы сервиса.
+			// В ленту входим с хвоста: бэкфилл всей сессии — это миллионы сделок,
+			// а детектору нужны последние минуты. Берём столько страниц, чтобы
+			// затравка накрыла окно анализа сразу, а не через двадцать минут
+			// работы сервиса.
 			trades, err = c.client.FetchTradeTail(ctx, tf, seedPages)
 		} else {
 			trades, err = c.client.FetchTradesOn(ctx, tf, cursor)
@@ -181,7 +201,7 @@ func (c *Collector) pollFeed(ctx context.Context, feed Feed) {
 		if len(trades) > 0 {
 			cursor = trades[len(trades)-1].TradeNo
 			lastNew = now
-			c.ingest(feed.Symbol, trades)
+			c.ingest(tape, trades)
 		} else if cursor != 0 && now.Sub(lastNew) > reseedAfter {
 			// Курсор больше не догоняет ленту (обычно — сменился торговый день).
 			log.Debug().Int64("cursor", cursor).Msg("robots: пересеиваю курсор с хвоста ленты")
@@ -195,9 +215,12 @@ func (c *Collector) pollFeed(ctx context.Context, feed Feed) {
 	}
 }
 
-// ingest переводит сделки ISS в принты и кладёт их в детектор.
-func (c *Collector) ingest(symbol string, trades []moexiss.Trade) {
+// ingest переводит сделки ленты рынка в принты и кладёт их в детектор, отбрасывая
+// инструменты вне списка наблюдения.
+func (c *Collector) ingest(tape MarketTape, trades []moexiss.Trade) {
 	prints := make([]Print, 0, len(trades))
+	currency := make([]string, 0, 8)
+	seen := make(map[string]bool, 16)
 	for _, t := range trades {
 		// Адресные сделки идут мимо стакана и к роботам в ленте отношения не имеют;
 		// сделки чужого дня биржа приписывает к текущей сессии и они ломают тайминг.
@@ -208,9 +231,18 @@ func (c *Collector) ingest(symbol string, trades []moexiss.Trade) {
 		if side != SideBuy && side != SideSell {
 			continue
 		}
+		if !c.opts.Watch.Keep(t.SecID, tape) {
+			continue
+		}
+		if !seen[t.SecID] {
+			seen[t.SecID] = true
+			if IsCurrencyTicker(t.SecID) {
+				currency = append(currency, t.SecID)
+			}
+		}
 		prints = append(prints, Print{
 			TradeNo: t.TradeNo,
-			Symbol:  symbol,
+			Symbol:  t.SecID,
 			Time:    t.Timestamp,
 			Price:   t.Price,
 			Qty:     t.Quantity,
@@ -221,6 +253,9 @@ func (c *Collector) ingest(symbol string, trades []moexiss.Trade) {
 		return
 	}
 	c.mu.Lock()
+	// Порог обнаружения зависит от инструмента, а какие инструменты вообще есть
+	// в ленте, известно только по факту прихода сделок.
+	c.det.MarkCurrency(currency...)
 	c.det.Add(prints...)
 	for _, p := range prints {
 		c.day.add(p)

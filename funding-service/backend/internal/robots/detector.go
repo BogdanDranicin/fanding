@@ -107,6 +107,16 @@ func (d *Detector) Trim(now time.Time) {
 // TapeLen возвращает число принтов в ленте тикера (для диагностики и тестов).
 func (d *Detector) TapeLen(symbol string) int { return len(d.tapes[symbol]) }
 
+// Symbols — инструменты, по которым сейчас есть лента, по алфавиту.
+func (d *Detector) Symbols() []string {
+	out := make([]string, 0, len(d.tapes))
+	for sym := range d.tapes {
+		out = append(out, sym)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Heads — «часы ленты»: до какого момента дошла лента каждого тикера. По ним, а
 // не по стенным часам, считаются пропущенные роботом такты — стенные часы обгоняют
 // ленту на минуты запаздывания фида.

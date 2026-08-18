@@ -9,6 +9,7 @@ package robots
 import (
 	"context"
 	"flag"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,8 +20,8 @@ import (
 )
 
 var (
-	liveSymbols = flag.String("symbols", "SBER,GAZP,LKOH,VTBR,futures:USDRUBF",
-		"тикеры для живой проверки, формат ROBOTS_SYMBOLS")
+	liveSymbols = flag.String("symbols", "SBER,GAZP,LKOH,VTBR,USDRUBF",
+		"тикеры для живой проверки, формат ROBOTS_SYMBOLS; пусто — правила по умолчанию")
 	livePages  = flag.Int("pages", 4, "сколько страниц ленты (по 5000 сделок) снимать с хвоста")
 	liveWindow = flag.Duration("window", 0, "окно анализа; 0 — как в DefaultConfig")
 	liveAt     = flag.String("at", "", "конец окна анализа, MSK ЧЧ:ММ; пусто — конец ленты")
@@ -28,9 +29,9 @@ var (
 )
 
 func TestLiveScan(t *testing.T) {
-	feeds, err := ParseFeeds(*liveSymbols)
+	watch, err := NewWatchlist(*liveSymbols)
 	if err != nil {
-		t.Fatalf("ParseFeeds: %v", err)
+		t.Fatalf("NewWatchlist: %v", err)
 	}
 
 	cfg := DefaultConfig()
@@ -39,28 +40,22 @@ func TestLiveScan(t *testing.T) {
 	}
 	client := moexiss.NewClient()
 	det := NewDetector(cfg)
-	// Порог обнаружения у валюты ниже, чем у акций, — живая проверка должна идти
-	// на тех же порогах, что и прод.
-	for _, f := range feeds {
-		if f.Currency {
-			det.MarkCurrency(f.Symbol)
-		}
-	}
 	// Разбор задним числом: аварийный предел длины ленты снимаем, иначе от
 	// многочасового хвоста останется только его конец и окно окажется пустым.
 	det.maxLen = 1 << 30
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	var newest time.Time
-	for _, f := range feeds {
+	kept := map[string]int{}
+	for _, tape := range DefaultTapes() {
 		trades, err := client.FetchTradeTail(ctx, moexiss.TradeFeed{
-			Engine: f.Engine, Market: f.Market, Board: f.Board, SecID: f.SecID,
+			Engine: tape.Engine, Market: tape.Market, Board: tape.Board,
 		}, *livePages)
 		if err != nil {
-			t.Fatalf("%s: FetchLatestTrades: %v", f.Symbol, err)
+			t.Fatalf("%s: FetchTradeTail: %v", tape.Name, err)
 		}
-		var kept int
+		var used int
 		for _, tr := range trades {
 			if tr.OffMarket || tr.Backdated || tr.Timestamp.IsZero() {
 				continue
@@ -69,11 +64,18 @@ func TestLiveScan(t *testing.T) {
 			if side != SideBuy && side != SideSell {
 				continue
 			}
+			if !watch.Keep(tr.SecID, tape) {
+				continue
+			}
+			if IsCurrencyTicker(tr.SecID) {
+				det.MarkCurrency(tr.SecID)
+			}
 			det.Add(Print{
-				TradeNo: tr.TradeNo, Symbol: f.Symbol, Time: tr.Timestamp,
+				TradeNo: tr.TradeNo, Symbol: tr.SecID, Time: tr.Timestamp,
 				Price: tr.Price, Qty: tr.Quantity, Side: side,
 			})
-			kept++
+			kept[tr.SecID]++
+			used++
 			if tr.Timestamp.After(newest) {
 				newest = tr.Timestamp
 			}
@@ -82,8 +84,9 @@ func TestLiveScan(t *testing.T) {
 		if len(trades) > 0 {
 			span = trades[0].Timestamp.Format("15:04:05") + "–" + trades[len(trades)-1].Timestamp.Format("15:04:05")
 		}
-		t.Logf("%-10s принтов %5d (в работу %5d) %s", f.Symbol, len(trades), kept, span)
+		t.Logf("%-22s сделок %6d (в работу %6d) %s", tape.Name, len(trades), used, span)
 	}
+	t.Logf("инструментов в работе: %d", len(kept))
 
 	at := newest
 	if *liveAt != "" {
@@ -98,13 +101,26 @@ func TestLiveScan(t *testing.T) {
 	t.Logf("окно анализа: %s, конец %s", cfg.Window, at.Format("15:04:05"))
 
 	found := det.Scan(at)
-	for _, f := range feeds {
-		w := det.window(det.tapes[f.Symbol], at)
+	// Самые плотные ленты — по ним видно, накрыла ли затравка окно анализа.
+	type load struct {
+		sym string
+		n   int
+	}
+	loads := make([]load, 0, len(kept))
+	for sym, n := range kept {
+		loads = append(loads, load{sym, n})
+	}
+	sort.Slice(loads, func(i, j int) bool { return loads[i].n > loads[j].n })
+	for i, l := range loads {
+		if i >= 5 {
+			break
+		}
+		w := det.window(det.tapes[l.sym], at)
 		var span string
 		if len(w) > 0 {
 			span = w[0].Time.Format("15:04:05") + "–" + w[len(w)-1].Time.Format("15:04:05")
 		}
-		t.Logf("  в окне %-10s %5d принтов %s", f.Symbol, len(w), span)
+		t.Logf("  в окне %-12s %6d принтов %s", l.sym, len(w), span)
 	}
 	report(t, "боевые пороги", found)
 
@@ -115,10 +131,11 @@ func TestLiveScan(t *testing.T) {
 	loose.MaxJitter = 0.30
 	loose.MinMatchRatio = 0.40
 	det2 := NewDetector(loose)
-	for _, f := range feeds {
-		det2.tapes[f.Symbol] = det.tapes[f.Symbol]
-		if f.Currency {
-			det2.MarkCurrency(f.Symbol)
+	det2.maxLen = 1 << 30
+	for sym, tape := range det.tapes {
+		det2.tapes[sym] = tape
+		if IsCurrencyTicker(sym) {
+			det2.MarkCurrency(sym)
 		}
 	}
 	report(t, "ослабленные пороги", det2.Scan(at))
@@ -156,13 +173,13 @@ func sideRu(s Side) string {
 //
 //	go test -tags livescan -run TestLiveCollector -v ./internal/robots/ -live 90s
 func TestLiveCollector(t *testing.T) {
-	feeds, err := ParseFeeds(*liveSymbols)
+	watch, err := NewWatchlist(*liveSymbols)
 	if err != nil {
-		t.Fatalf("ParseFeeds: %v", err)
+		t.Fatalf("NewWatchlist: %v", err)
 	}
 
 	opts := DefaultCollectorOptions()
-	opts.Feeds = feeds
+	opts.Watch = watch
 	opts.ScanInterval = 10 * time.Second
 
 	// store = nil: живая проверка не должна ничего писать в базу.
@@ -174,11 +191,7 @@ func TestLiveCollector(t *testing.T) {
 	go func() { c.Run(ctx); close(done) }()
 	<-done
 
-	c.mu.Lock()
-	for _, f := range feeds {
-		t.Logf("  лента %-10s %d принтов", f.Symbol, c.det.TapeLen(f.Symbol))
-	}
-	c.mu.Unlock()
+	t.Logf("инструментов в ленте: %d", len(c.Symbols()))
 
 	for _, d := range c.DayVolumes() {
 		t.Logf("  оборот %-10s покупки %.0f  продажи %.0f  сделок %d  с %s",

@@ -12,18 +12,22 @@ import (
 
 type fakeRobotSource struct {
 	sessions []robots.Session
-	feeds    []robots.Feed
+	tapes    []robots.MarketTape
+	symbols  []string
 	days     []robots.DayVolume
 }
 
-func (f fakeRobotSource) Snapshot() []robots.Session     { return f.sessions }
-func (f fakeRobotSource) Feeds() []robots.Feed           { return f.feeds }
-func (f fakeRobotSource) DayVolumes() []robots.DayVolume { return f.days }
+func (f fakeRobotSource) Snapshot() []robots.Session      { return f.sessions }
+func (f fakeRobotSource) Tapes() []robots.MarketTape      { return f.tapes }
+func (f fakeRobotSource) Symbols() []string               { return f.symbols }
+func (f fakeRobotSource) WatchDescription() string        { return "тестовый отбор" }
+func (f fakeRobotSource) DayVolumes() []robots.DayVolume  { return f.days }
 
 func testSource() fakeRobotSource {
 	now := time.Date(2026, 8, 17, 15, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
 	return fakeRobotSource{
-		feeds: []robots.Feed{robots.StockFeed("SBER"), robots.StockFeed("GAZP")},
+		tapes:   []robots.MarketTape{{Name: "акции TQBR"}},
+		symbols: []string{"SBER", "GAZP"},
 		days: []robots.DayVolume{
 			{Symbol: "SBER", Date: "2026-08-17", Buy: 900000, Sell: 750000, Trades: 40000, Since: "09:59:58"},
 			{Symbol: "GAZP", Date: "2026-08-17", Buy: 300000, Sell: 310000, Trades: 15000, Since: "09:59:59"},
@@ -66,13 +70,24 @@ func getRobots(t *testing.T, src RobotSource, query string) robotsResponse {
 	return resp
 }
 
-func TestHandleRobotsReturnsAllWithWatchlist(t *testing.T) {
+// Живой срез отдаёт только работающих роботов: замолчавший уходит в историю,
+// иначе за день список копит сотни отработавших серий.
+func TestHandleRobotsReturnsOnlyActive(t *testing.T) {
 	resp := getRobots(t, testSource(), "")
-	if len(resp.Robots) != 2 {
-		t.Errorf("роботов %d, хотим 2", len(resp.Robots))
+	if len(resp.Robots) != 1 {
+		t.Fatalf("роботов %d, хотим 1 (замолчавший GAZP не показывается)", len(resp.Robots))
+	}
+	if resp.Robots[0].Symbol != "SBER" || !resp.Robots[0].Active {
+		t.Errorf("в срезе %+v, хотим работающего SBER", resp.Robots[0])
 	}
 	if len(resp.Watching) != 2 || resp.Watching[0] != "SBER" {
 		t.Errorf("Watching = %v, хотим [SBER GAZP]", resp.Watching)
+	}
+	if len(resp.Tapes) != 1 || resp.Tapes[0] != "акции TQBR" {
+		t.Errorf("Tapes = %v, хотим [акции TQBR]", resp.Tapes)
+	}
+	if resp.WatchRule == "" {
+		t.Error("правило отбора должно быть описано: пустой список роботов иначе не отличить от неработающего сбора")
 	}
 }
 
@@ -84,8 +99,8 @@ func TestHandleRobotsFilters(t *testing.T) {
 		want  int
 	}{
 		{"по тикеру", "?symbol=sber", 1},
-		{"только работающие", "?active=1", 1},
 		{"по уверенности", "?min_confidence=0.6", 1},
+		{"замолчавший не отдаётся", "?symbol=GAZP", 0},
 		{"несуществующий тикер", "?symbol=LKOH", 0},
 	}
 	for _, tt := range tests {

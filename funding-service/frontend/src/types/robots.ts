@@ -55,8 +55,12 @@ export interface DayVolume {
 }
 
 export interface RobotsResponse {
-  /** Тикеры, за лентой которых сервис следит. */
+  /** Инструменты, по которым сейчас идёт лента. */
   watching: string[];
+  /** Ленты рынков, которые опрашиваются целиком. */
+  tapes: string[];
+  /** Чем сужен отбор инструментов внутри лент. */
+  watch_rule: string;
   robots: RobotSession[];
   day_volumes: DayVolume[];
   as_of: string;

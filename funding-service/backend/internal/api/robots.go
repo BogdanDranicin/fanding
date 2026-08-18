@@ -14,16 +14,22 @@ import (
 // Может быть nil: тогда страница работает только по сохранённой истории.
 type RobotSource interface {
 	Snapshot() []robots.Session
-	Feeds() []robots.Feed
+	Tapes() []robots.MarketTape
+	WatchDescription() string
+	Symbols() []string
 	DayVolumes() []robots.DayVolume
 }
 
 // robotsResponse — ответ страницы «Роботы».
 type robotsResponse struct {
-	// Watching — за какими тикерами сейчас следим: без этого пустой список роботов
-	// не отличить от неработающего сбора.
-	Watching []string         `json:"watching"`
-	Robots   []robots.Session `json:"robots"`
+	// Watching — инструменты, по которым сейчас идёт лента. Без этого пустой список
+	// роботов не отличить от неработающего сбора.
+	Watching []string `json:"watching"`
+	// Tapes — какие ленты рынков опрашиваются, WatchRule — чем сужен отбор
+	// инструментов внутри них.
+	Tapes     []string         `json:"tapes"`
+	WatchRule string           `json:"watch_rule"`
+	Robots    []robots.Session `json:"robots"`
 	// DayVolumes — дневной оборот по каждой ленте, разложенный на покупки и
 	// продажи. Страница берёт отсюда базу для силы робота и показывает, с какого
 	// времени оборот считается: после перезапуска среди дня база неполная.
@@ -38,6 +44,7 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 		resp := robotsResponse{
 			Robots:     []robots.Session{},
 			Watching:   []string{},
+			Tapes:      []string{},
 			DayVolumes: []robots.DayVolume{},
 			AsOf:       time.Now(),
 		}
@@ -45,21 +52,25 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		for _, f := range src.Feeds() {
-			resp.Watching = append(resp.Watching, f.Symbol)
+		for _, t := range src.Tapes() {
+			resp.Tapes = append(resp.Tapes, t.Name)
 		}
+		resp.Watching = append(resp.Watching, src.Symbols()...)
+		resp.WatchRule = src.WatchDescription()
 		resp.DayVolumes = append(resp.DayVolumes, src.DayVolumes()...)
 
 		sessions := src.Snapshot()
 		symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))
-		activeOnly := r.URL.Query().Get("active") == "1"
 		minConf := floatParam(r, "min_confidence", 0)
 
 		for _, s := range sessions {
-			if symbol != "" && s.Symbol != symbol {
+			// Замолчавший робот со страницы «Сейчас» уходит совсем: его место —
+			// в истории, которая читается из базы. Иначе список копит за день
+			// сотни отработавших серий и живых в нём не найти.
+			if !s.Active {
 				continue
 			}
-			if activeOnly && !s.Active {
+			if symbol != "" && s.Symbol != symbol {
 				continue
 			}
 			if s.Confidence < minConf {

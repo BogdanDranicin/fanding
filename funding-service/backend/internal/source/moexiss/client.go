@@ -27,7 +27,7 @@ const (
 
 // tradeColumns — единственные колонки ленты, которые нам нужны. ISS умеет резать
 // ответ на своей стороне; на ликвидной бумаге это уменьшает ответ в разы.
-const tradeColumns = "TRADENO,TRADEDATE,TRADETIME,SYSTIME,PRICE,QUANTITY,BUYSELL,OFFMARKETDEAL,TRADE_SESSION_DATE"
+const tradeColumns = "TRADENO,SECID,TRADEDATE,TRADETIME,SYSTIME,PRICE,QUANTITY,BUYSELL,OFFMARKETDEAL,TRADE_SESSION_DATE"
 
 // Client is a low-level MOEX ISS HTTP client with ETag caching and retry.
 type Client struct {
@@ -175,7 +175,10 @@ func (c *Client) doRequest(ctx context.Context, url string) (*RawResponse, error
 
 // Trade is a single executed deal from the MOEX ISS trades endpoint.
 type Trade struct {
-	TradeNo   int64
+	TradeNo int64
+	// SecID — инструмент сделки. Заполнен всегда, но нужен прежде всего ленте
+	// рынка целиком: там в одном ответе идут сделки по всем бумагам сразу.
+	SecID     string
 	Price     float64
 	Quantity  float64
 	Timestamp time.Time // trade moment (TRADEDATE+TRADETIME MSK, falls back to SYSTIME)
@@ -193,13 +196,29 @@ type tradesResponse struct {
 	Trades columnData `json:"trades"`
 }
 
+// describe — человекочитаемое имя ленты для ошибок и логов.
+func (f TradeFeed) describe() string {
+	if f.SecID != "" {
+		return f.SecID
+	}
+	if f.Board != "" {
+		return f.Engine + "/" + f.Market + "/" + f.Board
+	}
+	return f.Engine + "/" + f.Market
+}
+
 // tradesMaxPages caps the catch-up pagination loop so a misbehaving server
 // (e.g. one that keeps returning the same page) cannot spin us forever.
 const tradesMaxPages = 200
 
-// TradeFeed identifies a security's trade tape on ISS. Board is optional: futures
-// are addressed at market level, while stock boards (TQBR and friends) must be
-// named explicitly or the tape comes back mixed across boards.
+// TradeFeed identifies a trade tape on ISS. Board is optional: futures are
+// addressed at market level, while stock boards (TQBR and friends) must be named
+// explicitly or the tape comes back mixed across boards.
+//
+// SecID is optional too. Leaving it empty asks for the tape of the whole market
+// (or board) — one request returns the trades of every instrument on it, with the
+// instrument in the SECID column. That is the only affordable way to watch hundreds
+// of tickers: per-security polling would need one request per ticker per interval.
 type TradeFeed struct {
 	Engine string
 	Market string
@@ -269,19 +288,21 @@ func (c *Client) FetchTradeTail(ctx context.Context, feed TradeFeed, pages int) 
 		}
 	}
 	if len(all) == 0 {
-		return nil, fmt.Errorf("trades tail for %s is empty", feed.SecID)
+		return nil, fmt.Errorf("trades tail for %s is empty", feed.describe())
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].TradeNo < all[j].TradeNo })
 	return all, nil
 }
 
 func (c *Client) tradesURL(feed TradeFeed) string {
+	base := fmt.Sprintf("%s/engines/%s/markets/%s", c.baseURL, feed.Engine, feed.Market)
 	if feed.Board != "" {
-		return fmt.Sprintf("%s/engines/%s/markets/%s/boards/%s/securities/%s/trades.json",
-			c.baseURL, feed.Engine, feed.Market, feed.Board, feed.SecID)
+		base += "/boards/" + feed.Board
 	}
-	return fmt.Sprintf("%s/engines/%s/markets/%s/securities/%s/trades.json",
-		c.baseURL, feed.Engine, feed.Market, feed.SecID)
+	if feed.SecID != "" {
+		base += "/securities/" + feed.SecID
+	}
+	return base + "/trades.json"
 }
 
 func (c *Client) fetchTradesPage(ctx context.Context, feed TradeFeed, sinceTradeNo int64) ([]Trade, error) {
@@ -374,6 +395,7 @@ func parseTrades(cd columnData) ([]Trade, error) {
 		if s, ok := cell("BUYSELL").(string); ok {
 			t.Side = s
 		}
+		t.SecID, _ = cell("SECID").(string)
 		t.Timestamp = parseTradeTime(cell("TRADEDATE"), cell("TRADETIME"), cell("SYSTIME"))
 		t.Backdated = isBackdated(cell("TRADEDATE"), cell("TRADE_SESSION_DATE"))
 		if t.Backdated {

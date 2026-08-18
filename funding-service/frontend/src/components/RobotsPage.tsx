@@ -428,9 +428,10 @@ export function RobotsPage() {
   const [tab, setTab] = useState<Tab>('live');
   const [rows, setRows] = useState<RobotSession[]>([]);
   const [watching, setWatching] = useState<string[]>([]);
+  const [tapes, setTapes] = useState<string[]>([]);
+  const [watchRule, setWatchRule] = useState('');
   const [days, setDays] = useState<DayVolume[]>([]);
   const [symbol, setSymbol] = useState('');
-  const [activeOnly, setActiveOnly] = useState(false);
   const [confirmedOnly, setConfirmedOnly] = useState(false);
   // Фильтры по графам таблицы. Намеренно не сохраняются между сеансами: пустая
   // страница назавтра из-за забытого фильтра выглядит как сломанный сбор.
@@ -467,6 +468,8 @@ export function RobotsPage() {
         const data = (await resp.json()) as RobotsResponse;
         setRows(data.robots ?? []);
         setWatching(data.watching ?? []);
+        setTapes(data.tapes ?? []);
+        setWatchRule(data.watch_rule ?? '');
         setDays(data.day_volumes ?? []);
         const asOf = Date.parse(data.as_of);
         if (Number.isFinite(asOf)) skewRef.current = asOf - Date.now();
@@ -521,24 +524,22 @@ export function RobotsPage() {
 
   const shown = useMemo(
     () => rows.filter((r) => (!symbol || r.symbol === symbol)
-      && (!activeOnly || r.active)
       && (!confirmedOnly || !r.provisional)
       && (!dirFilter || r.side === dirFilter)
       && inRange(r.period_sec, periodRange)
       && inRange(r.qty_typical, qtyRange)
       && inRange(volumeOf(r), volumeRange)
       && inRange(r.strength_pct, strengthRange)),
-    [rows, symbol, activeOnly, confirmedOnly, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
+    [rows, symbol, confirmedOnly, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
   );
 
-  const filtersOn = Boolean(symbol) || activeOnly || confirmedOnly || Boolean(dirFilter)
+  const filtersOn = Boolean(symbol) || confirmedOnly || Boolean(dirFilter)
     || rangeActive(periodRange) || rangeActive(qtyRange)
     || rangeActive(volumeRange) || rangeActive(strengthRange);
 
   const resetFilters = () => {
     setSymbol('');
     setFiltersOpen(false);
-    setActiveOnly(false);
     setConfirmedOnly(false);
     setDirFilter('');
     setPeriodRange(EMPTY_RANGE);
@@ -670,17 +671,6 @@ export function RobotsPage() {
           % оборота
         </label>
 
-        {live && (
-          <label className="rb-checkbox">
-            <input
-              type="checkbox"
-              checked={activeOnly}
-              onChange={(e) => setActiveOnly(e.target.checked)}
-            />
-            только работающие
-          </label>
-        )}
-
         <label
           className="rb-checkbox"
           title="Предварительная находка — серия короче шести принтов: периодичность в ней ещё не отличима от случайного совпадения"
@@ -735,8 +725,12 @@ export function RobotsPage() {
 
       {error && <p className="race-error">Ошибка загрузки: {error}</p>}
 
-      {watching.length > 0 && (
-        <p className="rb-watching">Следим за лентой: {watching.join(', ')}</p>
+      {(tapes.length > 0 || watching.length > 0) && (
+        <p className="rb-watching">
+          {tapes.length > 0 && <>Опрашиваем ленты: {tapes.join(', ')}. </>}
+          {watchRule && <>Отбор: {watchRule}. </>}
+          {watching.length > 0 && <>Сейчас в ленте {watching.length} инструментов.</>}
+        </p>
       )}
 
       {!error && groups.length === 0 && !loading && (

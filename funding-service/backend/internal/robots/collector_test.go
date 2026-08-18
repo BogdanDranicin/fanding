@@ -44,6 +44,9 @@ func (s *fakeStore) UpsertRobot(_ context.Context, in RobotRow) (int64, error) {
 	return in.ID, nil
 }
 
+// testTape — лента основного режима акций, из которой берут сделки тесты.
+var testTape = MarketTape{Name: "тест", Engine: stockEngine, Market: stockMarket, Board: stockBoard}
+
 // tapeWithRobot собирает ленту ISS: шум плюс серия робота заданного размера и периода.
 func tapeWithRobot(start time.Time, periodSec float64, n int, qty float64, side string) []moexiss.Trade {
 	var out []moexiss.Trade
@@ -52,6 +55,7 @@ func tapeWithRobot(start time.Time, periodSec float64, n int, qty float64, side 
 		no++
 		out = append(out, moexiss.Trade{
 			TradeNo:   no,
+			SecID:     "SBER",
 			Price:     250,
 			Quantity:  qty,
 			Timestamp: start.Add(time.Duration(float64(i) * periodSec * float64(time.Second))).Truncate(time.Second),
@@ -61,13 +65,13 @@ func tapeWithRobot(start time.Time, periodSec float64, n int, qty float64, side 
 	// Адресная сделка того же размера: она идёт мимо стакана и в анализ попасть не должна.
 	no++
 	out = append(out, moexiss.Trade{
-		TradeNo: no, Price: 250, Quantity: qty, Side: side,
+		TradeNo: no, SecID: "SBER", Price: 250, Quantity: qty, Side: side,
 		Timestamp: start.Add(3 * time.Second), OffMarket: true,
 	})
 	// Сделка чужого календарного дня, доложенная биржей в текущую сессию.
 	no++
 	out = append(out, moexiss.Trade{
-		TradeNo: no, Price: 250, Quantity: qty, Side: side,
+		TradeNo: no, SecID: "SBER", Price: 250, Quantity: qty, Side: side,
 		Timestamp: start.Add(7 * time.Second), Backdated: true,
 	})
 	return out
@@ -75,7 +79,7 @@ func tapeWithRobot(start time.Time, periodSec float64, n int, qty float64, side 
 
 func newTestCollector(client issClient, store Store, now time.Time) *Collector {
 	opts := DefaultCollectorOptions()
-	opts.Feeds = []Feed{StockFeed("SBER")}
+	opts.Tapes = []MarketTape{testTape}
 	c := NewCollector(client, store, opts, zerolog.Nop())
 	c.now = func() time.Time { return now }
 	return c
@@ -95,7 +99,7 @@ func TestCollectorFindsRobotAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchTradeTail: %v", err)
 	}
-	c.ingest("SBER", trades)
+	c.ingest(testTape, trades)
 	c.scanOnce(context.Background())
 
 	snap := c.Snapshot()
@@ -138,7 +142,7 @@ func TestCollectorUpdatesSessionInsteadOfDuplicating(t *testing.T) {
 	c := newTestCollector(client, store, start.Add(11*time.Minute))
 
 	trades, _ := client.FetchTradeTail(context.Background(), moexiss.TradeFeed{}, seedPages)
-	c.ingest("SBER", trades)
+	c.ingest(testTape, trades)
 	c.scanOnce(context.Background())
 	c.scanOnce(context.Background())
 
@@ -161,7 +165,7 @@ func TestCollectorClosesStaleRobot(t *testing.T) {
 	c := newTestCollector(client, store, start.Add(11*time.Minute))
 
 	trades, _ := client.FetchTradeTail(context.Background(), moexiss.TradeFeed{}, seedPages)
-	c.ingest("SBER", trades)
+	c.ingest(testTape, trades)
 	c.scanOnce(context.Background())
 	if !c.Snapshot()[0].Active {
 		t.Fatal("робот должен быть активен сразу после серии")
@@ -180,25 +184,52 @@ func TestCollectorClosesStaleRobot(t *testing.T) {
 	}
 }
 
-// Тикеры разбираются из конфигурации, включая срочный рынок.
-func TestParseFeeds(t *testing.T) {
-	feeds, err := ParseFeeds(" sber , GAZP,futures:USDRUBF , SBER ")
+// Список наблюдения: пустая настройка означает правила по умолчанию, непустая —
+// только перечисленные тикеры.
+func TestWatchlist(t *testing.T) {
+	shares := MarketTape{Name: "акции", Engine: stockEngine, Market: stockMarket, Board: stockBoard}
+	forts := MarketTape{Name: "срочный", Engine: futEngine, Market: futMarket}
+
+	byRules, err := NewWatchlist("")
 	if err != nil {
-		t.Fatalf("ParseFeeds: %v", err)
+		t.Fatalf("NewWatchlist(\"\"): %v", err)
 	}
-	if len(feeds) != 3 {
-		t.Fatalf("разобрано %d лент, хотим 3 (дубль SBER отбрасывается): %+v", len(feeds), feeds)
+	cases := []struct {
+		secid string
+		tape  MarketTape
+		want  bool
+		why   string
+	}{
+		{"SBER", shares, true, "акции основного режима берём все"},
+		{"AKMP", shares, true, "в том числе неликвид"},
+		{"SBERF", forts, true, "вечный контракт на акцию"},
+		{"GAZPF", forts, true, "вечный контракт на акцию"},
+		{"USDRUBF", forts, true, "валютный вечный"},
+		{"Si-9.26", forts, true, "валютный квартальный"},
+		{"MIX-9.26", forts, true, "индексный фьючерс"},
+		{"MXI-9.26", forts, true, "индексный фьючерс"},
+		{"IMOEXF", forts, true, "индексный вечный"},
+		{"SILV", forts, false, "товарный контракт не берём"},
+		{"CCQ6", forts, false, "прочий квартальный не берём"},
+		{"", shares, false, "пустой тикер"},
 	}
-	if feeds[0].Symbol != "SBER" || feeds[0].Board != stockBoard {
-		t.Errorf("первая лента = %+v, хотим акцию SBER на %s", feeds[0], stockBoard)
+	for _, tc := range cases {
+		if got := byRules.Keep(tc.secid, tc.tape); got != tc.want {
+			t.Errorf("Keep(%q) = %v, хотим %v: %s", tc.secid, got, tc.want, tc.why)
+		}
 	}
-	if feeds[2].Symbol != "USDRUBF" || feeds[2].Market != futMarket || feeds[2].Board != "" {
-		t.Errorf("третья лента = %+v, хотим фьючерс USDRUBF на forts", feeds[2])
+
+	only, err := NewWatchlist(" sber , GAZP,futures:USDRUBF ")
+	if err != nil {
+		t.Fatalf("NewWatchlist: %v", err)
 	}
-	if _, err := ParseFeeds("  "); err == nil {
-		t.Error("пустой список должен быть ошибкой")
+	if !only.Keep("SBER", shares) || !only.Keep("USDRUBF", forts) {
+		t.Error("перечисленные тикеры должны проходить")
 	}
-	if _, err := ParseFeeds("options:SI"); err == nil {
+	if only.Keep("LKOH", shares) {
+		t.Error("тикер вне списка проходить не должен")
+	}
+	if _, err := NewWatchlist("options:SI"); err == nil {
 		t.Error("неизвестный префикс должен быть ошибкой")
 	}
 }
