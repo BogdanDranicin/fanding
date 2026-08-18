@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-// На валюте робот заявляется со второго повторяющегося принта, на акции — с третьего.
+// Низкий порог обнаружения — привилегия валюты: там робот заявляется с третьего
+// повторяющегося принта. На остальных инструментах серия должна дорасти до длины,
+// на которой периодичность уже не объясняется совпадением: на ленте всего рынка
+// короткие серии давали около сотни ложных находок одновременно.
 func TestDetectionThresholdDependsOnInstrument(t *testing.T) {
 	rnd := rand.New(rand.NewSource(1))
 
@@ -17,10 +20,11 @@ func TestDetectionThresholdDependsOnInstrument(t *testing.T) {
 		prints   int
 		want     bool
 	}{
-		{"валюта, два принта", "USDRUBF", true, 2, true},
-		{"валюта, один принт", "USDRUBF", true, 1, false},
-		{"акция, два принта", "SBER", false, 2, false},
-		{"акция, три принта", "SBER", false, 3, true},
+		{"валюта, три принта", "USDRUBF", true, 3, true},
+		{"валюта, два принта", "USDRUBF", true, 2, false},
+		{"акция, три принта", "SBER", false, 3, false},
+		{"акция, пять принтов", "SBER", false, 5, false},
+		{"акция, шесть принтов", "SBER", false, ConfidentPrints, true},
 	}
 
 	for _, tc := range cases {
@@ -35,8 +39,15 @@ func TestDetectionThresholdDependsOnInstrument(t *testing.T) {
 			if got := len(found) > 0; got != tc.want {
 				t.Fatalf("найдено %d роботов, хотим наличие=%v: %+v", len(found), tc.want, found)
 			}
-			if tc.want && !found[0].Provisional {
-				t.Errorf("короткая серия должна быть помечена предварительной")
+			if !tc.want {
+				return
+			}
+			// Предварительной помечается только та серия, что короче уверенной
+			// длины, — то есть на практике лишь валютная.
+			wantProvisional := tc.prints < ConfidentPrints
+			if got := found[0].Provisional; got != wantProvisional {
+				t.Errorf("Provisional = %v, хотим %v при серии в %d принтов",
+					got, wantProvisional, tc.prints)
 			}
 		})
 	}
