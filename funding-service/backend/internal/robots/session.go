@@ -26,11 +26,24 @@ type Session struct {
 
 	// NextBeatAt — когда ждать следующий принт (стенные часы, см. Robot.NextBeatAfter).
 	NextBeatAt time.Time `json:"next_beat_at"`
-	// VolumeLots — сколько робот уже напечатал.
+	// PrintLots — объём робота за раз: сколько лотов проходит один его принт.
+	PrintLots float64 `json:"print_lots"`
+	// VolumeLots — сколько робот напечатал за всю серию.
 	VolumeLots float64 `json:"volume_lots"`
-	// DaySideLots — дневной оборот инструмента на стороне робота, база для силы.
+	// DaySideLots — дневной оборот инструмента на стороне робота, для справки.
 	DaySideLots float64 `json:"day_side_lots"`
-	// StrengthPct — доля робота в этом обороте, проценты. 0, если базы ещё нет.
+	// HourLots — оборот инструмента за час, знаменатель силы.
+	HourLots float64 `json:"hour_lots"`
+	// HourMinutes — в скольких минутах окна вообще были сделки.
+	HourMinutes int `json:"hour_minutes"`
+	// HourFrom/HourTo — границы часового окна, MSK.
+	HourFrom string `json:"hour_from"`
+	HourTo   string `json:"hour_to"`
+	// HourSince — с какого времени накоплен часовой оборот. Непустое означает, что
+	// сбор начался внутри окна, час набран не целиком и сила завышена.
+	HourSince string `json:"hour_since"`
+	// StrengthPct — сила робота: один его принт в доле часового оборота бумаги,
+	// проценты. 0, если базы ещё нет.
 	StrengthPct float64 `json:"strength_pct"`
 
 	// dirty — с момента последней записи в базу сессия изменилась.
@@ -43,13 +56,25 @@ type Session struct {
 // обнаружения именно это правило и вычищает случайные совпадения размеров.
 const MaxMisses = 2
 
-// fill досчитывает поля, которые зависят от момента запроса и от оборота дня.
-func (s *Session) fill(now time.Time, day DayVolume) {
+// fill досчитывает поля, которые зависят от момента запроса и от оборота бумаги.
+//
+// Сила — это один принт робота в доле часового оборота инструмента, а не вся
+// серия в доле дневного. Серия живёт часами и её сумма растёт сама собой, а
+// дневной оборот к вечеру набирает такую величину, что по этому отношению
+// сильный робот от слабого не отличается. Отношение «сколько бумаги робот
+// продавливает за один такт к тому, сколько её проходит за час» держится на
+// месте, пока робот работает, и сравнимо между инструментами.
+func (s *Session) fill(now time.Time, day DayVolume, hour HourVolume) {
 	s.NextBeatAt = s.NextBeatAfter(now)
+	s.PrintLots = s.QtyTypical
 	s.VolumeLots = s.Volume()
 	s.DaySideLots = day.Side(s.Side)
-	if s.DaySideLots > 0 {
-		s.StrengthPct = 100 * s.VolumeLots / s.DaySideLots
+	s.HourLots = hour.Total()
+	s.HourMinutes = hour.Minutes
+	s.HourFrom, s.HourTo = hour.From, hour.To
+	s.HourSince = hour.Since
+	if s.HourLots > 0 {
+		s.StrengthPct = 100 * s.PrintLots / s.HourLots
 	} else {
 		s.StrengthPct = 0
 	}

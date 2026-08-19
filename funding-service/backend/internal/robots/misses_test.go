@@ -215,26 +215,34 @@ func TestNextBeatExtrapolatesForward(t *testing.T) {
 	}
 }
 
-// Сила робота — его объём в доле дневного оборота на его стороне.
+// Сила робота — один его принт в доле часового оборота бумаги.
 func TestSessionStrength(t *testing.T) {
 	s := Session{Robot: Robot{
 		Symbol: "SBER", Side: SideSell, QtyTypical: 100, Prints: 20, PeriodSec: 30, LastSeen: base,
 	}}
-	s.fill(base, DayVolume{Symbol: "SBER", Date: base.Format("2006-01-02"), Buy: 100000, Sell: 40000})
+	day := DayVolume{Symbol: "SBER", Date: base.Format("2006-01-02"), Buy: 100000, Sell: 40000}
+	s.fill(base, day, HourVolume{Symbol: "SBER", Buy: 3000, Sell: 2000, Minutes: 60})
 
+	if s.PrintLots != 100 {
+		t.Errorf("PrintLots = %.0f, хотим 100 (объём робота за раз)", s.PrintLots)
+	}
 	if s.VolumeLots != 2000 {
 		t.Errorf("VolumeLots = %.0f, хотим 2000", s.VolumeLots)
 	}
 	if s.DaySideLots != 40000 {
 		t.Errorf("DaySideLots = %.0f, хотим 40000 (шорт сравниваем с продажами)", s.DaySideLots)
 	}
-	if s.StrengthPct != 5 {
-		t.Errorf("StrengthPct = %.2f, хотим 5", s.StrengthPct)
+	if s.HourLots != 5000 {
+		t.Errorf("HourLots = %.0f, хотим 5000 (весь оборот бумаги за час)", s.HourLots)
+	}
+	// 100 лотов принта на 5000 лотов часового оборота — два процента.
+	if s.StrengthPct != 2 {
+		t.Errorf("StrengthPct = %.2f, хотим 2", s.StrengthPct)
 	}
 
 	// Без базы силу не выдумываем.
-	s.fill(base, DayVolume{})
+	s.fill(base, day, HourVolume{})
 	if s.StrengthPct != 0 {
-		t.Errorf("StrengthPct = %.2f без дневного оборота, хотим 0", s.StrengthPct)
+		t.Errorf("StrengthPct = %.2f без часового оборота, хотим 0", s.StrengthPct)
 	}
 }

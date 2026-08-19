@@ -124,6 +124,8 @@ type Collector struct {
 	det *Detector
 	reg *registry
 	day *dayVolumes
+	// hour — оборот инструментов за последний час: знаменатель силы робота.
+	hour *hourVolumes
 	// streamHead — до какого биржевого времени ленту каждого инструмента закрыл
 	// быстрый источник. Принты ISS не новее этой метки отбрасываются: их та же
 	// сделка, только пришедшая на пятнадцать минут позже.
@@ -153,6 +155,7 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 		// снятая серия ещё видна детектору.
 		reg:        newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
 		day:        newDayVolumes(),
+		hour:       newHourVolumes(),
 		streamHead: make(map[string]time.Time),
 	}
 }
@@ -183,14 +186,19 @@ func (c *Collector) Run(ctx context.Context) {
 }
 
 // Snapshot — текущий срез роботов для API. Поля, зависящие от момента запроса
-// (время следующего удара, сила относительно дневного оборота), считаются здесь.
+// (время следующего удара, сила относительно часового оборота), считаются здесь.
 func (c *Collector) Snapshot() []Session {
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := c.reg.snapshot()
 	for i := range out {
-		out[i].fill(now, c.day.get(out[i].Symbol, out[i].LastSeen))
+		// Час оборота отсчитывается от последнего принта робота, а не от стенных
+		// часов: у бумаги, идущей только по ISS, лента отстаёт на пятнадцать минут,
+		// и окно от «сейчас» было бы пустым в своей свежей четверти.
+		out[i].fill(now,
+			c.day.get(out[i].Symbol, out[i].LastSeen),
+			c.hour.get(out[i].Symbol, out[i].LastSeen))
 	}
 	return out
 }
@@ -360,6 +368,7 @@ func (c *Collector) ingestStream(p Print) {
 	}
 	c.det.Add(p)
 	c.day.add(p)
+	c.hour.add(p)
 	if p.Time.After(c.streamHead[p.Symbol]) {
 		c.streamHead[p.Symbol] = p.Time
 	}
@@ -418,6 +427,7 @@ func (c *Collector) ingest(tape MarketTape, trades []moexiss.Trade) {
 	c.det.Add(kept...)
 	for _, p := range kept {
 		c.day.add(p)
+		c.hour.add(p)
 	}
 	// Режем ленту сразу, а не только на сканах: на плотной бумаге между сканами
 	// набегают тысячи сделок, и лента упиралась бы в аварийный предел длины.

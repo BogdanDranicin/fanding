@@ -16,8 +16,10 @@ const fmtLots = new Intl.NumberFormat('ru-RU');
 const TICK_MS = 200;
 // ALARM_LEAD — за сколько секунд до удара начинают звучать предупреждения.
 const ALARM_LEAD = 3;
-const THRESHOLD_KEY = 'robots.strength-threshold';
-const DEFAULT_THRESHOLD = 5;
+// Порог силы. Ключ хранения с версией: сила теперь считается от часового оборота,
+// а не от дневного, и старое сохранённое значение означало бы совсем другое.
+const THRESHOLD_KEY = 'robots.strength-threshold.v2';
+const DEFAULT_THRESHOLD = 1;
 
 function clock(iso: string): string {
   try { return fmtClock.format(new Date(iso)); } catch { return iso; }
@@ -58,8 +60,14 @@ function price(v: number): string {
   return v.toLocaleString('ru-RU', { maximumFractionDigits: 4 });
 }
 
-// volumeOf — объём робота. Живой срез считает его на сервере; строки истории
-// приходят из базы без досчитанных полей, там берём из лотовки и числа принтов.
+// printOf — объём робота за раз: сколько лотов проходит один его принт. Живой
+// срез считает его на сервере, строки истории приходят из базы без досчитанных
+// полей — там берём типичный размер принта.
+function printOf(r: RobotSession): number {
+  return r.print_lots || r.qty_typical;
+}
+
+// volumeOf — суммарный объём серии. Тот же порядок: сервер, иначе из лотовки.
 function volumeOf(r: RobotSession): number {
   return r.volume_lots || r.qty_typical * r.prints;
 }
@@ -68,11 +76,14 @@ function volumeLabel(lotsCount: number): string {
   return `${fmtLots.format(Math.round(lotsCount))} л`;
 }
 
-// strengthLabel — сила робота: его доля в дневном обороте на своей стороне.
+// strengthLabel — сила робота: один его принт в доле часового оборота бумаги.
+// Знаменатель большой, доли идут долями процента — на слабых роботах нужны сотые,
+// иначе половина списка показывает «0.0%».
 function strengthLabel(pct: number): string {
   if (!pct) return '—';
   if (pct >= 10) return `${pct.toFixed(0)}%`;
-  return `${pct.toFixed(1)}%`;
+  if (pct >= 1) return `${pct.toFixed(1)}%`;
+  return `${pct.toFixed(2)}%`;
 }
 
 // confidenceLabel — уверенность словами: цифра 0.62 читателю ничего не говорит.
@@ -196,6 +207,7 @@ interface RowProps {
 // подробности серии.
 function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowProps) {
   const long = r.side === 'B';
+  const once = printOf(r);
   const volume = volumeOf(r);
   const beatMs = live && r.active ? nextBeatAt(r, nowMs) : 0;
   const left = beatMs ? beatMs - nowMs : NaN;
@@ -222,8 +234,8 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
         </div>
 
         <div className="rb-col">
-          <span className="rb-caption">объём робота</span>
-          <span className="rb-val">{volumeLabel(volume)}</span>
+          <span className="rb-caption">объём за раз</span>
+          <span className="rb-val">{volumeLabel(once)}</span>
         </div>
 
         <div className="rb-col">
@@ -240,9 +252,19 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
 
         <div className="rb-col">
           <span className="rb-caption">сила</span>
-          <span className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}>
+          <span
+            className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
+            title={r.hour_lots > 0
+              ? `Принт ${volumeLabel(once)} к обороту ${volumeLabel(r.hour_lots)} за час ${r.hour_from}–${r.hour_to}`
+              : 'Часового оборота по бумаге ещё нет'}
+          >
             {strengthLabel(r.strength_pct)}
           </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">суммарный объём</span>
+          <span className="rb-val rb-dim">{volumeLabel(volume)}</span>
         </div>
 
         <div className="rb-col rb-status-col">
@@ -281,16 +303,25 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
 
         <div className="jrn-detail-group">
           <div className="jrn-detail-title">Лотовка и объём</div>
-          <Detail label="Типичный размер" value={`${fmtLots.format(Math.round(r.qty_typical))} л`} />
+          <Detail label="Объём за раз" value={volumeLabel(once)} />
           <Detail label="Границы размера" value={lots(r)} />
-          <Detail label="Объём робота" value={volumeLabel(volume)} />
+          <Detail label="Суммарный объём серии" value={volumeLabel(volume)} />
+          {r.hour_lots > 0 && (
+            <Detail
+              label={`Оборот бумаги за час ${r.hour_from}–${r.hour_to}`}
+              value={volumeLabel(r.hour_lots)}
+            />
+          )}
+          {r.hour_since && (
+            <Detail label="Часовой оборот считается с" value={`${r.hour_since} МСК`} />
+          )}
           {r.day_side_lots > 0 && (
             <Detail
               label={long ? 'Куплено за день' : 'Продано за день'}
               value={volumeLabel(r.day_side_lots)}
             />
           )}
-          <Detail label="Доля в обороте" value={strengthLabel(r.strength_pct)} />
+          <Detail label="Сила: принт к часовому обороту" value={strengthLabel(r.strength_pct)} />
         </div>
 
         <div className="jrn-detail-group">
@@ -331,10 +362,17 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
   const longVol = sum(longs);
   const shortVol = sum(shorts);
 
-  // Итоговая сила считается по сторонам отдельно: у лонгов и шортов разные
-  // знаменатели — дневные покупки и дневные продажи, складывать их нельзя.
-  const longPct = day && day.buy > 0 ? (100 * longVol) / day.buy : 0;
-  const shortPct = day && day.sell > 0 ? (100 * shortVol) / day.sell : 0;
+  // Часовой оборот бумаги считается на сервере от последнего принта робота, у
+  // роботов одной бумаги он практически совпадает; берём максимум как наиболее
+  // свежее окно.
+  const hourLots = Math.max(...rows.map((r) => r.hour_lots), 0);
+
+  // Итоговая сила берётся как сила самого крупного робота стороны, а не как
+  // сумма: сила — это вес одного принта, а такты роботов не синхронны, и складывать
+  // принты, приходящие в разные секунды, значило бы придумывать несуществующий залп.
+  const strongest = (xs: RobotSession[]) => Math.max(...xs.map((r) => r.strength_pct), 0);
+  const longPct = strongest(longs);
+  const shortPct = strongest(shorts);
   const leadLong = longPct >= shortPct;
   const leadPct = Math.max(longPct, shortPct);
 
@@ -378,13 +416,8 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
         </div>
 
         <div className="rb-col">
-          <span className="rb-caption">объём роботов</span>
-          <span className="rb-val">{volumeLabel(longVol + shortVol)}</span>
-        </div>
-
-        <div className="rb-col">
-          <span className="rb-caption">оборот дня</span>
-          <span className="rb-val rb-dim">{day ? volumeLabel(day.buy + day.sell) : '—'}</span>
+          <span className="rb-caption">оборот за час</span>
+          <span className="rb-val rb-dim">{hourLots > 0 ? volumeLabel(hourLots) : '—'}</span>
         </div>
 
         <div className="rb-col">
@@ -396,8 +429,18 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
 
         <div className="rb-col">
           <span className="rb-caption">сила</span>
-          <span className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}>
+          <span
+            className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
+            title="Сила самого крупного робота бумаги: его принт в доле часового оборота"
+          >
             {leadPct > 0 ? strengthLabel(leadPct) : '—'}
+          </span>
+        </div>
+
+        <div className="rb-col">
+          <span className="rb-caption">суммарный объём</span>
+          <span className="rb-val rb-dim" title={`лонг ${volumeLabel(longVol)} · шорт ${volumeLabel(shortVol)}`}>
+            {volumeLabel(longVol + shortVol)}
           </span>
         </div>
 
@@ -527,7 +570,7 @@ export function RobotsPage() {
       && (!confirmedOnly || !r.provisional)
       && (!dirFilter || r.side === dirFilter)
       && inRange(r.period_sec, periodRange)
-      && inRange(r.qty_typical, qtyRange)
+      && inRange(printOf(r), qtyRange)
       && inRange(volumeOf(r), volumeRange)
       && inRange(r.strength_pct, strengthRange)),
     [rows, symbol, confirmedOnly, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
@@ -655,21 +698,21 @@ export function RobotsPage() {
           </select>
         </label>
 
-        <label className="rb-filter" title="Доля робота в дневном обороте, с которой он считается сильным">
+        <label className="rb-filter" title="Доля одного принта робота в часовом обороте бумаги, с которой он считается сильным">
           Сильный робот от
           <input
             className="rb-threshold"
             type="number"
-            min={0.1}
+            min={0.01}
             max={100}
-            step={0.5}
+            step={0.1}
             value={threshold}
             onChange={(e) => {
               const v = Number(e.target.value);
               if (Number.isFinite(v) && v > 0) setThreshold(v);
             }}
           />
-          % оборота
+          % часового оборота
         </label>
 
         <label
@@ -709,8 +752,8 @@ export function RobotsPage() {
           </label>
 
           <RangeFilter label="Тайминг" unit="с" value={periodRange} onChange={setPeriodRange} />
-          <RangeFilter label="Лотовка" unit="л" value={qtyRange} onChange={setQtyRange} />
-          <RangeFilter label="Объём робота" unit="л" value={volumeRange} onChange={setVolumeRange} />
+          <RangeFilter label="Объём за раз" unit="л" value={qtyRange} onChange={setQtyRange} />
+          <RangeFilter label="Суммарный объём" unit="л" value={volumeRange} onChange={setVolumeRange} />
           <RangeFilter label="Сила" unit="%" value={strengthRange} onChange={setStrengthRange} />
 
           <button
