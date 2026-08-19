@@ -81,6 +81,10 @@ type InstrumentFunding struct {
 
 	// Диагностика реконструкции CBFunding (для журнала сверки с биржей):
 	SettlVWAP           *float64 // нога фьючерса на 15:30 (settlVWAP), non-nil после клиринга
+	// SettlProvisional — нога заморожена аварийно (поток сделок не дошёл до 15:30),
+	// окно могло быть обрезано, и CBFunding по ней ещё уточнится. Уведомление о
+	// публикации по такому значению не рассылается без пометки.
+	SettlProvisional    bool
 	CBFundingNoDeadband *float64 // CBFunding БЕЗ мёртвой зоны K1 — clamp(d, ±l2); чтобы видеть, зануляет ли K1
 }
 
@@ -120,6 +124,11 @@ type tradeAcc struct {
 	// ≥15:30. Только это доказывает, что окно 10:00–15:30 довезено полностью.
 	// Данные ISS запаздывают ~15 минут, поэтому «настенные» 15:30 ничего не значат.
 	sawPost1530 bool
+	// lastTradeAt — биржевое время самой свежей учтённой сделки. Нужно только для
+	// диагностики: по нему в логе аварийной заморозки видно, где именно встал поток
+	// сделок, — иначе обрезанное окно приходится вычислять задним числом по сырой
+	// ленте ISS, а она живёт лишь до конца торгового дня.
+	lastTradeAt time.Time
 }
 
 func (a *tradeAcc) vwap() (float64, bool) {
@@ -149,6 +158,10 @@ type Engine struct {
 	spotTOMWAPDate map[string]string        // MSK date the frozen spotTOMWAP belongs to (суточный сброс)
 	spotTOMWAPLive map[string]float64       // latest WAPRICE for spot TOM (any time) → fallback so the predicted row is never empty on a late start
 	settlVWAP        map[string]*float64        // sentinel: non-nil once settlement has occurred
+	// settlProvisional — нога заморожена аварийно, по истёкшей отсрочке, а не по
+	// сделке, перешагнувшей 15:30. Окно у такой ноги могло не доехать до конца, и
+	// её обязаны переписать, как только поток сделок сам перейдёт границу.
+	settlProvisional map[string]bool
 	settlDate        string                     // MSK date for which settlement was recorded
 	vwapLastVol      map[string]float64         // last VOLTODAY per symbol, to weight the rolling VWAP by ΔVOLTODAY
 	lastPrice        map[string]float64
@@ -189,6 +202,7 @@ func NewEngine() *Engine {
 		spotTOMWAPDate:   make(map[string]string),
 		spotTOMWAPLive:   make(map[string]float64),
 		settlVWAP:        make(map[string]*float64),
+		settlProvisional: make(map[string]bool),
 		vwapLastVol:      make(map[string]float64),
 		lastPrice:        make(map[string]float64),
 		swapRate:         make(map[string]float64),
@@ -303,6 +317,7 @@ func (e *Engine) ingestSessionTick(tick source.Tick) {
 		// New trading day: clear settlement state for this symbol.
 		if acc != nil {
 			e.settlVWAP[sym] = nil
+			delete(e.settlProvisional, sym)
 			delete(e.officialRateAtSettl, sym)
 			delete(e.prevSettleAtSettl, sym)
 			if e.settlDate == acc.date {
@@ -382,6 +397,10 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 		return
 	}
 
+	if mskTime.After(acc.lastTradeAt) {
+		acc.lastTradeAt = mskTime
+	}
+
 	if inFundingWindow(mskTime) {
 		acc.sumPV += tick.Price * tick.Volume
 		acc.sumV += tick.Volume
@@ -399,7 +418,11 @@ func (e *Engine) ingestTradeTick(tick source.Tick) {
 // ответа сервера ISS: публичный фид запаздывает ~15 минут (см. moexiss.parseTime).
 // Must be called while holding e.mu.
 func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
-	if e.settlVWAP[sym] != nil {
+	// Замороженную ногу переписывать нельзя — кроме одного случая: она заморожена
+	// аварийно, по отсрочке, и окно могло быть обрезано. Тогда ждём момента, когда
+	// поток сделок сам перешагнёт 15:30, и заменяем значение точным.
+	frozen := e.settlVWAP[sym] != nil
+	if frozen && !e.settlProvisional[sym] {
 		return
 	}
 	h, m, _ := mskTime.Clock()
@@ -409,10 +432,12 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	mskDate := mskTime.Format("2006-01-02")
 
 	var tradeV float64
+	var tradeFeedAt time.Time
 	tradeOK, tradeCrossed := false, false
 	if tacc := e.tradeAccs[sym]; tacc != nil && tacc.date == mskDate && tacc.startedPre1530 {
 		tradeV, tradeOK = tacc.vwap()
 		tradeCrossed = tacc.sawPost1530
+		tradeFeedAt = tacc.lastTradeAt
 	}
 	var sessV float64
 	sessOK := false
@@ -430,6 +455,31 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	graceOver := afterSettlGrace(mskTime)
 	tradeReady := tradeOK && (tradeCrossed || (graceOver && e.tradeFeedFresh(sym)))
 
+	// Уточнение аварийно замороженной ноги. Ждём именно сделки за 15:30: сделки
+	// приходят строго по возрастанию TRADENO, поэтому её появление доказывает, что
+	// всё окно уже у нас (частичный ответ ленты не создаёт дыр — курсор остаётся на
+	// последней разобранной сделке, и следующий опрос продолжает с неё).
+	//
+	// 19.08.2026 без этого EUR-фандинг ушёл подписчикам как 0.03367 вместо 0.02919:
+	// нога замёрзла на окне до 15:11, а точное значение движок получил на пять минут
+	// позже — и переписал его только по случайности, из-за суточного сброса.
+	if frozen {
+		if !tradeOK || !tradeCrossed {
+			return
+		}
+		old := *e.settlVWAP[sym]
+		e.settlVWAP[sym] = ptr(tradeV)
+		delete(e.settlProvisional, sym)
+		e.log.Warn().
+			Str("sym", sym).
+			Str("date", mskDate).
+			Float64("settl_vwap_was", old).
+			Float64("settl_vwap", tradeV).
+			Float64("delta", tradeV-old).
+			Msg("нога фьючерса уточнена: поток сделок довёз окно до 15:30")
+		return
+	}
+
 	var v float64
 	switch {
 	case tradeReady && (e.tradeFeedFresh(sym) || !sessOK):
@@ -445,11 +495,13 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 	// хвост окна мог не доехать (именно так набегало расхождение с биржей). Пишем в
 	// лог, чтобы такие дни было видно при сверке, а не искать их снова по фандингу.
 	if !tradeCrossed {
+		e.settlProvisional[sym] = true
 		e.log.Warn().
 			Str("sym", sym).
 			Str("date", mskDate).
 			Float64("settl_vwap", v).
 			Bool("trade_vwap_used", tradeReady && (e.tradeFeedFresh(sym) || !sessOK)).
+			Str("trade_feed_at", tradeFeedAt.Format("15:04:05")).
 			Msg("нога фьючерса заморожена по отсрочке: поток сделок не дошёл до 15:30, окно может быть обрезано")
 	}
 
@@ -678,6 +730,7 @@ func (e *Engine) buildFunding(sym, officialSym string, predictedCBRate float64, 
 	settlDone := settlPtr != nil
 	if settlDone {
 		inf.SettlVWAP = settlPtr // нога фьючерса на 15:30 — для журнала сверки
+		inf.SettlProvisional = e.settlProvisional[sym]
 	}
 
 	// CBFunding — НАШ расчёт от официального курса ЦБ, появляется ТОЛЬКО после его

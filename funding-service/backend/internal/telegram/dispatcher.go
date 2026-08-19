@@ -116,8 +116,8 @@ func (d *Dispatcher) awaitCBFunding(ctx context.Context, info cbr.PublicationInf
 	deadline := time.Now().Add(timeout)
 	for {
 		snap := d.snapshotFn()
-		usdReady := info.USD <= 0 || (rateEq(snap.USDRUBF.OfficialRate, info.USD) && snap.USDRUBF.CBFunding != nil)
-		eurReady := info.EUR <= 0 || (rateEq(snap.EURRUBF.OfficialRate, info.EUR) && snap.EURRUBF.CBFunding != nil)
+		usdReady := info.USD <= 0 || instrumentReady(snap.USDRUBF, info.USD)
+		eurReady := info.EUR <= 0 || instrumentReady(snap.EURRUBF, info.EUR)
 		if (usdReady && eurReady) || time.Now().After(deadline) {
 			return snap
 		}
@@ -127,6 +127,17 @@ func (d *Dispatcher) awaitCBFunding(ctx context.Context, info cbr.PublicationInf
 		case <-time.After(step):
 		}
 	}
+}
+
+// instrumentReady — фандинг по инструменту досчитан и его можно рассылать.
+//
+// Помимо курса и самого числа проверяется, что нога фьючерса заморожена НЕ
+// аварийно: у ноги, замороженной по истёкшей отсрочке, окно 10:00–15:30 могло быть
+// обрезано, и значение ещё уточнится, когда поток сделок довезёт хвост (19.08.2026:
+// в уведомлении ушло 0.03367 против 0.02919 пятью минутами позже). Ждём уточнения в
+// пределах общего таймаута; не дождались — сообщение уйдёт, но с пометкой.
+func instrumentReady(inf funding.InstrumentFunding, rate float64) bool {
+	return rateEq(inf.OfficialRate, rate) && inf.CBFunding != nil && !inf.SettlProvisional
 }
 
 func rateEq(got *float64, want float64) bool {
@@ -250,11 +261,17 @@ func indicatorEmoji(pct float64) string {
 // виде, в каком её публикует биржа (SWAPRATE, 5 знаков) — чтобы сверять один в один.
 // Процент по-прежнему считается: по нему выбирается цветовой индикатор.
 // Пустая строка, если фандинг ещё не посчитан или нет базы для процента.
-func fundingLine(sym string, fund *float64, rate float64) string {
+func fundingLine(sym string, fund *float64, rate float64, provisional bool) string {
 	if fund == nil || rate <= 0 {
 		return ""
 	}
 	pct := *fund / rate * 100
+	// Предварительное значение помечаем прямо в строке: нога фьючерса заморожена
+	// аварийно, окно могло быть обрезано, и число ещё сдвинется. Молча слать такое
+	// как окончательное нельзя — по нему принимают решения.
+	if provisional {
+		return fmt.Sprintf("%s%s: ≈%+.5f (уточняется)\n", indicatorEmoji(pct), sym, *fund)
+	}
 	return fmt.Sprintf("%s%s: %+.5f\n", indicatorEmoji(pct), sym, *fund)
 }
 
@@ -268,8 +285,8 @@ func formatCBRAlert(pubTime time.Time, info cbr.PublicationInfo, snap funding.Fu
 	fmt.Fprintf(&sb, "📢 <b>Фандинг зафиксирован</b>\n%s МСК\n", pubTime.In(msk).Format("15:04:05"))
 
 	// CNY фандинг убран из уведомлений (18.07): показываем только USD/EUR (наш CBFunding).
-	lines := fundingLine("USDRUBF", snap.USDRUBF.CBFunding, info.USD) +
-		fundingLine("EURRUBF", snap.EURRUBF.CBFunding, info.EUR)
+	lines := fundingLine("USDRUBF", snap.USDRUBF.CBFunding, info.USD, snap.USDRUBF.SettlProvisional) +
+		fundingLine("EURRUBF", snap.EURRUBF.CBFunding, info.EUR, snap.EURRUBF.SettlProvisional)
 	if lines != "" {
 		sb.WriteString("\n")
 		sb.WriteString(lines)

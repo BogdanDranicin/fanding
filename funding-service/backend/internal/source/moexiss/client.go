@@ -19,6 +19,18 @@ var ErrNotModified = errors.New("not modified")
 const (
 	defaultBaseURL = "https://iss.moex.com/iss"
 	requestTimeout = time.Second
+	// tradesRequestTimeout — для инкрементальных страниц ленты сделок.
+	//
+	// Секунды здесь не хватает: страница — это 5000 сделок, ~700 КБ, и на утреннем
+	// бэкфилле сессии их идёт подряд десятки. Отвалившийся по таймауту запрос не
+	// теряет данные (курсор TRADENO стоит на месте, следующий опрос повторит), но
+	// поллер перестаёт догонять ленту — и нога фьючерса замерзает по аварийной
+	// отсрочке на обрезанном окне. Ровно это дало 19.08.2026 EUR-фандинг 0.03367
+	// вместо 0.02919: окно кончилось на 15:11 вместо 15:30.
+	//
+	// Меньше хвостового (20 с) намеренно: опрос идёт раз в секунду, и висеть на
+	// одном запросе дольше, чем биржа обычно отвечает (0.1–0.2 с), смысла нет.
+	tradesRequestTimeout = 10 * time.Second
 	// tailRequestTimeout — для запроса хвоста ленты сделок: ISS отдаёт по нему
 	// тысячи строк, и секунды на это не хватает.
 	tailRequestTimeout = 20 * time.Second
@@ -33,6 +45,11 @@ const tradeColumns = "TRADENO,SECID,TRADEDATE,TRADETIME,SYSTIME,PRICE,QUANTITY,B
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	// tradesClient обслуживает инкрементальные страницы ленты сделок: они на порядок
+	// тяжелее обычного запроса marketdata, и общий секундный таймаут на них рвётся.
+	// Отдельный клиент, а не общий большой таймаут: на секундном висит свежесть
+	// котировок, и растягивать его ради ленты нельзя.
+	tradesClient *http.Client
 	// tailClient обслуживает единственный тяжёлый запрос — снятие хвоста ленты
 	// сделок. Он отдаёт сотни килобайт и в общий секундный таймаут не укладывается,
 	// а трогать таймаут остальных запросов нельзя: на нём висит точность фандинга.
@@ -56,9 +73,10 @@ func newClient(baseURL string) *Client {
 		IdleConnTimeout: 90 * time.Second,
 	}
 	return &Client{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: requestTimeout, Transport: transport},
-		tailClient: &http.Client{Timeout: tailRequestTimeout, Transport: transport},
+		baseURL:      baseURL,
+		httpClient:   &http.Client{Timeout: requestTimeout, Transport: transport},
+		tradesClient: &http.Client{Timeout: tradesRequestTimeout, Transport: transport},
+		tailClient:   &http.Client{Timeout: tailRequestTimeout, Transport: transport},
 	}
 }
 
@@ -307,7 +325,7 @@ func (c *Client) tradesURL(feed TradeFeed) string {
 
 func (c *Client) fetchTradesPage(ctx context.Context, feed TradeFeed, sinceTradeNo int64) ([]Trade, error) {
 	url := fmt.Sprintf("%s?tradeno=%d&next_trade=1&%s", c.tradesURL(feed), sinceTradeNo, tradeQuery)
-	return c.fetchTradesURL(ctx, url, c.httpClient)
+	return c.fetchTradesURL(ctx, url, c.tradesClient)
 }
 
 // tradeQuery ограничивает ответ ISS одной секцией trades и нужными колонками.

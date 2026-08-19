@@ -261,3 +261,46 @@ func TestBroadcast_stopsOnContextCancel(t *testing.T) {
 // клиринг вообще не повод писать подписчику, а Run теперь принимает только канал
 // публикаций ЦБ — уведомление физически неоткуда взять. Раньше сообщение уходило
 // каждый день: сначала из-за окна по настенным часам, потом из-за флага Restored.
+
+// Нога фьючерса, замороженная аварийно, — не повод рассылать число как
+// окончательное: диспетчер обязан дождаться уточнения в пределах таймаута.
+// 19.08.2026 без этого в телеграм ушло 0.03367 вместо 0.02919.
+func TestAwaitCBFunding_waitsForProvisionalSettl(t *testing.T) {
+	info := cbr.PublicationInfo{USD: 78.3181, EUR: 89.3296}
+
+	var calls atomic.Int64
+	d := &Dispatcher{
+		snapshotFn: func() funding.FundingSnapshot {
+			// Курсы и фандинг на месте сразу, но нога EUR ещё предварительная.
+			provisional := calls.Add(1) < 3
+			return funding.FundingSnapshot{
+				USDRUBF: funding.InstrumentFunding{OfficialRate: ptr(78.3181), CBFunding: ptr(-0.1169)},
+				EURRUBF: funding.InstrumentFunding{
+					OfficialRate:     ptr(89.3296),
+					CBFunding:        ptr(0.03367),
+					SettlProvisional: provisional,
+				},
+			}
+		},
+	}
+
+	snap := d.awaitCBFunding(context.Background(), info)
+	if snap.EURRUBF.SettlProvisional {
+		t.Error("диспетчер вернул снапшот с предварительной ногой, хотя уточнение успело прийти")
+	}
+	if calls.Load() < 3 {
+		t.Errorf("снапшот запрошен %d раз — ожидание уточнения не сработало", calls.Load())
+	}
+}
+
+// Не дождались уточнения за таймаут — сообщение всё равно уходит, но число
+// помечено: молчать про фандинг хуже, чем отдать его с оговоркой.
+func TestFundingLine_marksProvisional(t *testing.T) {
+	got := fundingLine("EURRUBF", ptr(0.03367), 89.3296, true)
+	if !strings.Contains(got, "≈") || !strings.Contains(got, "уточняется") {
+		t.Errorf("предварительное значение не помечено: %q", got)
+	}
+	if final := fundingLine("EURRUBF", ptr(0.02919), 89.3296, false); strings.Contains(final, "уточняется") {
+		t.Errorf("окончательное значение помечено зря: %q", final)
+	}
+}

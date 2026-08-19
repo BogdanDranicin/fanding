@@ -1202,3 +1202,112 @@ func TestEngine_SettlementFreezesAfterGraceWhenTradeFeedStalls(t *testing.T) {
 		t.Errorf("settlVWAP = %.6f, ожидалось %.6f", *got, want)
 	}
 }
+
+// Нога, замороженная по отсрочке, — предварительная: окно у неё могло быть
+// обрезано, и движок обязан переписать её точным значением, как только поток
+// сделок сам перешагнёт 15:30.
+//
+// Ровно это сломалось 19.08.2026: нога EURRUBF замёрзла на окне до 15:11 (98.67810
+// вместо 98.67362), в 17:52 по ней ушёл в телеграм фандинг 0.03367 вместо 0.02919,
+// и правильное значение появилось только через пять минут — по случайности, из-за
+// суточного сброса аккумулятора, а не потому, что движок его уточнил.
+func TestEngine_ProvisionalSettlRefinedWhenTradesCatchUp(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 80.00, mskDay(9, 0)))
+
+	// Поток сделок довёз только начало окна и застрял.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 81.00, 100, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 81.00, 100, mskDay(15, 11)))
+
+	// Отсрочка истекла — морозим тем, что есть, и помечаем предварительным.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 81.00, 200, mskDay(17, 0)))
+	snap := e.Snapshot()
+	if snap.USDRUBF.SettlVWAP == nil {
+		t.Fatal("нога не заморожена после истечения отсрочки")
+	}
+	if got := *snap.USDRUBF.SettlVWAP; got != 81.00 {
+		t.Fatalf("предварительная нога = %.5f, ожидалось 81.00000 (обрезанное окно)", got)
+	}
+	if !snap.USDRUBF.SettlProvisional {
+		t.Fatal("нога заморожена по отсрочке, но не помечена предварительной")
+	}
+
+	// Хвост окна доехал, следом сделка за 15:30 — доказательство, что окно всё у нас.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 84.00, 200, mskDay(15, 29)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 99.00, 500, mskDay(15, 31)))
+
+	snap = e.Snapshot()
+	// Окно: (81×100 + 81×100 + 84×200) / 400 = 82.5; сделка 15:31 в окно не входит.
+	const want = 82.50
+	if got := *snap.USDRUBF.SettlVWAP; got != want {
+		t.Errorf("нога после уточнения = %.5f, ожидалось %.5f", got, want)
+	}
+	if snap.USDRUBF.SettlProvisional {
+		t.Error("уточнённая нога всё ещё помечена предварительной")
+	}
+}
+
+// Уточнение не должно превращаться в право переписывать ногу задним числом:
+// нормально замороженная (по сделке за 15:30) нога неприкосновенна, что бы дальше
+// ни приходило. Иначе вечерние сделки уводили бы зафиксированный фандинг.
+func TestEngine_FinalSettlNeverOverwritten(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.00, 100, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 82.00, 100, mskDay(15, 29)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.00, 100, mskDay(15, 31)))
+
+	snap := e.Snapshot()
+	if snap.USDRUBF.SettlVWAP == nil {
+		t.Fatal("нога не заморожена сделкой за 15:30")
+	}
+	if snap.USDRUBF.SettlProvisional {
+		t.Fatal("нога заморожена нормально, пометка предварительной не нужна")
+	}
+	want := *snap.USDRUBF.SettlVWAP
+
+	// Вечерние сделки и повторный переход границы ничего менять не должны.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 95.00, 900, mskDay(18, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 95.00, 900, mskDay(19, 0)))
+	if got := *e.Snapshot().USDRUBF.SettlVWAP; got != want {
+		t.Errorf("замороженная нога переписана: было %.5f, стало %.5f", want, got)
+	}
+}
+
+// Уточнение ноги обязано пересчитать и сам фандинг: подписчик получил число по
+// обрезанному окну, на сайте после уточнения должно стоять правильное.
+func TestEngine_CBFundingFollowsRefinedSettl(t *testing.T) {
+	e := funding.NewEngine()
+	// База K1/K2 — расчётная цена предыдущего клиринга.
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 80.00, mskDay(9, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.68, 100, mskDay(10, 0)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 80.68, 100, mskDay(17, 0))) // заморозка по отсрочке
+
+	// Курс ЦБ вышел, пока нога ещё предварительная.
+	e.Ingest(cbrNewTick(source.SymbolUSDRubOfficial, 80.50, mskDay(17, 30)))
+	snap := e.Snapshot()
+	if snap.USDRUBF.CBFunding == nil {
+		t.Fatal("CBFunding не посчитан после публикации курса")
+	}
+	if !snap.USDRUBF.SettlProvisional {
+		t.Fatal("нога должна оставаться предварительной до прихода хвоста")
+	}
+	// d = 80.68 − 80.50 = 0.18; l1 = 0.001×80 = 0.08 → 0.10 (кап l2 = 0.12 не задет)
+	if got := *snap.USDRUBF.CBFunding; !nearly(got, 0.10) {
+		t.Fatalf("предварительный CBFunding = %.6f, ожидалось 0.100000", got)
+	}
+
+	// Хвост окна довёз более низкие цены — фандинг обязан уехать вниз.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.58, 100, mskDay(15, 29)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 80.58, 100, mskDay(15, 31)))
+
+	snap = e.Snapshot()
+	if snap.USDRUBF.SettlProvisional {
+		t.Error("нога уточнена, пометка должна быть снята")
+	}
+	// Окно: (80.68×100 + 80.58×100)/200 = 80.63; d = 0.13; 0.13 − 0.08 = 0.05
+	if got := *snap.USDRUBF.CBFunding; !nearly(got, 0.05) {
+		t.Errorf("CBFunding после уточнения = %.6f, ожидалось 0.050000", got)
+	}
+}
+
+func nearly(got, want float64) bool { return got-want < 1e-9 && want-got < 1e-9 }
