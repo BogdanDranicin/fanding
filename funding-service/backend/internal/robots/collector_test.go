@@ -2,6 +2,7 @@ package robots
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -15,6 +16,9 @@ import (
 type fakeISS struct {
 	tail  []moexiss.Trade
 	calls int
+	// securities — справочник режима акций; пустой означает «ISS не ответил»,
+	// и наблюдение остаётся по всему режиму.
+	securities []moexiss.Security
 }
 
 func (f *fakeISS) FetchTradeTail(context.Context, moexiss.TradeFeed, int) ([]moexiss.Trade, error) {
@@ -24,6 +28,13 @@ func (f *fakeISS) FetchTradeTail(context.Context, moexiss.TradeFeed, int) ([]moe
 
 func (f *fakeISS) FetchTradesOn(context.Context, moexiss.TradeFeed, int64) ([]moexiss.Trade, error) {
 	return nil, nil
+}
+
+func (f *fakeISS) FetchBoardSecurities(context.Context, moexiss.TradeFeed) ([]moexiss.Security, error) {
+	if len(f.securities) == 0 {
+		return nil, errors.New("справочник недоступен")
+	}
+	return f.securities, nil
 }
 
 // fakeStore считает вставки и обновления и раздаёт идентификаторы.

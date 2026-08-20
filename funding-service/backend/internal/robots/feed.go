@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Акции ходят через основной режим торгов TQBR, фьючерсы адресуются на уровне рынка.
@@ -74,6 +75,50 @@ var (
 type Watchlist struct {
 	// only — явный список тикеров из ROBOTS_SYMBOLS; nil, если работают правила.
 	only map[string]bool
+
+	// mu защищает shares: справочник обновляется в фоне, а читается из горутин лент.
+	mu sync.RWMutex
+	// shares — какие инструменты режима TQBR считаются акциями. nil означает
+	// «справочник ещё не прочитан» — тогда берём весь режим, как раньше.
+	shares map[string]bool
+}
+
+// Типы бумаг режима TQBR, которые нас интересуют: обыкновенные, привилегированные
+// и депозитарные расписки. Всё прочее в этом же режиме — паи биржевых фондов и
+// облигации; их маркетмейкер весь день печатает один лот через ровный промежуток,
+// и такие «роботы» забивают страницу, вытесняя настоящие находки.
+var stockSecTypes = map[string]bool{"1": true, "2": true, "D": true}
+
+// SetStockUniverse задаёт справочник инструментов режима акций. Пустой набор
+// игнорируется: остаться совсем без наблюдения хуже, чем последить за лишним.
+func (w *Watchlist) SetStockUniverse(securities map[string]bool) {
+	if len(securities) == 0 {
+		return
+	}
+	w.mu.Lock()
+	w.shares = securities
+	w.mu.Unlock()
+}
+
+// StockUniverseSize — сколько инструментов в справочнике; 0 — справочник не прочитан.
+func (w *Watchlist) StockUniverseSize() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return len(w.shares)
+}
+
+func (w *Watchlist) isShare(sym string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.shares == nil {
+		return true // справочника нет — работаем как раньше, по всему режиму
+	}
+	return w.shares[sym]
+}
+
+// KeepSecurity — попадает ли бумага справочника в наблюдение по своему типу.
+func KeepSecurity(secType string) bool {
+	return stockSecTypes[strings.ToUpper(strings.TrimSpace(secType))]
 }
 
 // NewWatchlist собирает список наблюдения. Пустая спецификация означает правила
@@ -119,9 +164,10 @@ func (w *Watchlist) Keep(secid string, tape MarketTape) bool {
 	if w.only != nil {
 		return w.only[sym]
 	}
-	// Акции основного режима берём все: лента уже сужена бордом TQBR.
+	// Акции основного режима берём все — но именно акции: в том же режиме
+	// торгуются паи БПИФ и облигации, которые справочник отсеивает.
 	if tape.Engine == stockEngine {
-		return true
+		return w.isShare(sym)
 	}
 	return IsCurrencyTicker(secid) || isIndexFuture(secid) || perpetualRe.MatchString(sym)
 }
@@ -130,6 +176,10 @@ func (w *Watchlist) Keep(secid string, tape MarketTape) bool {
 // список роботов не путали с неработающим сбором.
 func (w *Watchlist) Describe() string {
 	if w.only == nil {
+		if n := w.StockUniverseSize(); n > 0 {
+			return fmt.Sprintf("%d акций и расписок TQBR (без паёв фондов и облигаций), "+
+				"валютные и индексные фьючерсы, вечные контракты", n)
+		}
 		return "все акции TQBR, валютные и индексные фьючерсы, вечные контракты"
 	}
 	out := make([]string, 0, len(w.only))

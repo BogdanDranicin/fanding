@@ -166,7 +166,7 @@ func (r *registry) observe(found []Robot, now time.Time, head map[string]time.Ti
 
 	// Робот, который перестал печатать, закрывается — но остаётся в истории.
 	for _, s := range r.sessions {
-		if s.Active && now.Sub(s.LastSeen) > r.staleAfter {
+		if s.Active && r.silent(s, now, head[s.Symbol]) {
 			s.Active = false
 			s.UpdatedAt = now
 			s.dirty = true
@@ -174,6 +174,30 @@ func (r *registry) observe(found []Robot, now time.Time, head map[string]time.Ti
 	}
 
 	r.evict(now)
+}
+
+// feedSilence — сколько лента бумаги может не двигаться, прежде чем роботы на ней
+// закрываются. Больше запаздывания публичного фида ISS (ровно пятнадцать минут),
+// иначе инструмент, идущий только по нему, закрывался бы сразу; но и не бесконечно:
+// у бумаги, переставшей торговаться, лента замирает, и без этой границы её роботы
+// висели бы на странице до конца дня.
+const feedSilence = 20 * time.Minute
+
+// silent — молчит ли робот.
+//
+// Меряется по времени ленты его бумаги, а не по стенным часам: у инструмента вне
+// быстрого источника лента отстаёт на пятнадцать минут, и по стенным часам такой
+// робот считался бы замолчавшим с самого рождения — находка попадала в историю,
+// но на странице «Сейчас» не появлялась ни разу. Ровно так же меряются и
+// пропущенные такты (см. missedBeats).
+func (r *registry) silent(s *Session, now, head time.Time) bool {
+	if head.IsZero() {
+		return now.Sub(s.LastSeen) > r.staleAfter
+	}
+	if now.Sub(head) > feedSilence {
+		return true // лента бумаги встала целиком
+	}
+	return head.Sub(s.LastSeen) > r.staleAfter
 }
 
 // markMisses проставляет пропущенные такты и снимает со страницы тех, кто

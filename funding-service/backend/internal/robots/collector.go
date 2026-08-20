@@ -3,6 +3,7 @@ package robots
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 type issClient interface {
 	FetchTradeTail(ctx context.Context, feed moexiss.TradeFeed, pages int) ([]moexiss.Trade, error)
 	FetchTradesOn(ctx context.Context, feed moexiss.TradeFeed, since int64) ([]moexiss.Trade, error)
+	FetchBoardSecurities(ctx context.Context, feed moexiss.TradeFeed) ([]moexiss.Security, error)
 }
 
 // Store — то, что коллектору нужно от базы; *storage.Store его удовлетворяет.
@@ -164,9 +166,19 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 	}
 }
 
+// universeInterval — как часто перечитывается справочник инструментов режима
+// акций. Состав режима меняется листингами, то есть раз в недели, — суток хватает
+// с запасом; чаще незачем.
+const universeInterval = 24 * time.Hour
+
 // Run ведёт сбор до отмены контекста: горутина на ленту плюс общий цикл сканирования.
 func (c *Collector) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.universeLoop(ctx)
+	}()
 	for _, t := range c.opts.Tapes {
 		wg.Add(1)
 		go func(tape MarketTape) {
@@ -226,6 +238,45 @@ func (c *Collector) Symbols() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.det.Symbols()
+}
+
+// universeLoop держит справочник акций свежим.
+//
+// Пока справочник не прочитан, лента режима идёт целиком — так же, как работало
+// раньше. Это важнее аккуратности: сеть может лежать, а сбор должен идти.
+func (c *Collector) universeLoop(ctx context.Context) {
+	for {
+		c.refreshUniverse(ctx)
+		if !sleepCtx(ctx, universeInterval) {
+			return
+		}
+	}
+}
+
+func (c *Collector) refreshUniverse(ctx context.Context) {
+	for _, tape := range c.opts.Tapes {
+		if tape.Engine != stockEngine || tape.Board == "" {
+			continue
+		}
+		list, err := c.client.FetchBoardSecurities(ctx, moexiss.TradeFeed{
+			Engine: tape.Engine, Market: tape.Market, Board: tape.Board,
+		})
+		if err != nil {
+			c.log.Warn().Err(err).Str("tape", tape.Name).
+				Msg("robots: справочник инструментов не прочитан, слежу за всем режимом")
+			continue
+		}
+		shares := make(map[string]bool, len(list))
+		for _, sec := range list {
+			if KeepSecurity(sec.SecType) {
+				shares[sec.SecID] = true
+			}
+		}
+		c.opts.Watch.SetStockUniverse(shares)
+		c.log.Info().Str("tape", tape.Name).
+			Int("securities", len(list)).Int("shares", len(shares)).
+			Msg("robots: справочник инструментов обновлён")
+	}
 }
 
 // pollTape тянет ленту рынка инкрементально по курсору TRADENO.
@@ -402,15 +453,21 @@ func (c *Collector) ingest(tape MarketTape, trades []moexiss.Trade) {
 		if !c.opts.Watch.Keep(t.SecID, tape) {
 			continue
 		}
-		if !seen[t.SecID] {
-			seen[t.SecID] = true
-			if IsCurrencyTicker(t.SecID) {
-				currency = append(currency, t.SecID)
+		// Тикер приводится к верхнему регистру: срочный рынок ISS пишет контракты
+		// вперемешку («SiU6», «EuU6»), а быстрый источник — заглавными. Пока
+		// регистры расходились, один и тот же контракт жил двумя лентами: водяная
+		// метка чужую не накрывала, и ISS заводил на пятнадцать минут отставший
+		// дубль каждого фьючерсного робота.
+		symbol := strings.ToUpper(t.SecID)
+		if !seen[symbol] {
+			seen[symbol] = true
+			if IsCurrencyTicker(symbol) {
+				currency = append(currency, symbol)
 			}
 		}
 		prints = append(prints, Print{
 			TradeNo: t.TradeNo,
-			Symbol:  t.SecID,
+			Symbol:  symbol,
 			Time:    t.Timestamp,
 			Price:   t.Price,
 			Qty:     t.Quantity,
