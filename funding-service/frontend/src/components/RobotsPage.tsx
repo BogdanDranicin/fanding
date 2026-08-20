@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DayVolume, RobotSession, RobotsResponse } from '../types/robots';
+import type { DayVolume, RobotSession, RobotsResponse, StreamStatus } from '../types/robots';
 import { authFetch } from '../api/auth';
 
 const fmtClock = new Intl.DateTimeFormat('ru-RU', {
@@ -96,8 +96,9 @@ function confidenceLabel(c: number): string {
 // nextBeatAt — когда робот ударит в следующий раз, в миллисекундах.
 //
 // Фаза продолжается вперёд от последнего принта, а не берётся как «последний
-// принт плюс период»: лента ISS запаздывает на минуты, и к моменту отрисовки
-// робот успевает отработать несколько тактов, которых страница ещё не видела.
+// принт плюс период»: лента запаздывает (у потока брокера — на секунды, у фида
+// ISS — на четверть часа), и к моменту отрисовки робот успевает отработать
+// такты, которых страница ещё не видела.
 function nextBeatAt(r: RobotSession, nowMs: number): number {
   const periodMs = r.period_sec * 1000;
   const last = new Date(r.last_seen).getTime();
@@ -115,6 +116,48 @@ function countdown(ms: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.round(sec - m * 60);
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// lagLabel — отставание ленты по-человечески: «1.7 с», «15 мин».
+function lagLabel(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} мс`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} с`;
+  return `${Math.round(ms / 60_000)} мин`;
+}
+
+// SourceNote — откуда берутся принты и насколько они свежие.
+//
+// Пишется по факту, а не заранее: у сервиса два источника. Поток брокера
+// приносит сделку за секунду-другую, публичный фид MOEX ISS — ровно через
+// пятнадцать минут, и на этих двух источниках «до удара» означает разное.
+function SourceNote({ stream }: { stream: StreamStatus | null }) {
+  if (!stream || !stream.enabled) {
+    return (
+      <>
+        Лента идёт из публичного фида MOEX ISS, а он приходит с задержкой ровно
+        в 15 минут: время до удара здесь — продолжение такта вперёд по известному
+        периоду, а не наблюдение.
+      </>
+    );
+  }
+  if (!stream.connected) {
+    return (
+      <>
+        Поток брокера сейчас оборван, лента идёт из публичного фида MOEX ISS —
+        это задержка в 15 минут, и время до удара пока чистая экстраполяция.
+        Соединение восстанавливается само.
+      </>
+    );
+  }
+  return (
+    <>
+      Принты приходят потоком брокера
+      {stream.symbols > 0 && <> по {stream.symbols} инструментам</>}
+      {stream.lag_ms > 0 && <>, отставание от биржи {lagLabel(stream.lag_ms)}</>}
+      {' '}— время до удара считается почти по наблюдению. Бумаги вне потока
+      идут из фида MOEX ISS с задержкой в 15 минут.
+    </>
+  );
 }
 
 // beep — короткий сигнал через WebAudio. Готовых звуковых файлов не держим:
@@ -167,6 +210,7 @@ function RangeFilter({ label, unit, value, onChange }: {
       <input
         type="number"
         className="rb-range-input"
+        inputMode="decimal"
         placeholder="от"
         value={value.min}
         onChange={(e) => onChange({ ...value, min: e.target.value })}
@@ -175,6 +219,7 @@ function RangeFilter({ label, unit, value, onChange }: {
       <input
         type="number"
         className="rb-range-input"
+        inputMode="decimal"
         placeholder="до"
         value={value.max}
         onChange={(e) => onChange({ ...value, max: e.target.value })}
@@ -215,6 +260,9 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
   // Сильный робот подсвечивается в свою сторону: зелёный — набирает, красный — льёт.
   const strong = r.strength_pct >= threshold && r.strength_pct > 0;
   const classes = ['jrn-card', 'rb-card'];
+  // Живая строка шире на колонку кнопки сигнала — в истории её нет, и сетка
+  // строки должна отличаться, иначе справа зияет пустая графа.
+  if (live) classes.push('rb-card-live');
   if (r.misses > 0) classes.push('rb-missed');
   if (strong) classes.push(long ? 'rb-strong-long' : 'rb-strong-short');
 
@@ -263,7 +311,7 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
         </div>
 
         <div className="rb-col">
-          <span className="rb-caption">суммарный объём</span>
+          <span className="rb-caption">объём серии</span>
           <span className="rb-val rb-dim">{volumeLabel(volume)}</span>
         </div>
 
@@ -474,6 +522,7 @@ export function RobotsPage() {
   const [tapes, setTapes] = useState<string[]>([]);
   const [watchRule, setWatchRule] = useState('');
   const [days, setDays] = useState<DayVolume[]>([]);
+  const [stream, setStream] = useState<StreamStatus | null>(null);
   const [symbol, setSymbol] = useState('');
   const [confirmedOnly, setConfirmedOnly] = useState(false);
   // Фильтры по графам таблицы. Намеренно не сохраняются между сеансами: пустая
@@ -491,6 +540,10 @@ export function RobotsPage() {
     const saved = Number(localStorage.getItem(THRESHOLD_KEY));
     return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_THRESHOLD;
   });
+  // Черновик поля порога. Отдельно от самого порога: набирая «0.5», пользователь
+  // проходит через пустую строку и через «0.», а фильтровать по ним нельзя —
+  // раньше поле просто отказывалось стираться, и число нельзя было перебить.
+  const [thresholdDraft, setThresholdDraft] = useState(() => String(threshold));
 
   // Часы страницы: один таймер на всю таблицу вместо таймера в каждой строке.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -514,6 +567,7 @@ export function RobotsPage() {
         setTapes(data.tapes ?? []);
         setWatchRule(data.watch_rule ?? '');
         setDays(data.day_volumes ?? []);
+        setStream(data.stream ?? null);
         const asOf = Date.parse(data.as_of);
         if (Number.isFinite(asOf)) skewRef.current = asOf - Date.now();
       } else {
@@ -670,8 +724,7 @@ export function RobotsPage() {
         предварительным; на остальных инструментах серия должна дорасти до шести принтов,
         иначе на ленте всего рынка список тонет в случайных совпадениях. Пропустил такт —
         строка желтеет, пропустил второй подряд — робот уходит со страницы в историю.
-        Биржевая лента приходит с задержкой в 15 минут, поэтому время до удара — это
-        продолжение такта вперёд по известному периоду, а не наблюдение.
+        {' '}<SourceNote stream={stream} />
       </p>
 
       <div className="rb-controls">
@@ -706,11 +759,14 @@ export function RobotsPage() {
             min={0.01}
             max={100}
             step={0.1}
-            value={threshold}
+            inputMode="decimal"
+            value={thresholdDraft}
             onChange={(e) => {
+              setThresholdDraft(e.target.value);
               const v = Number(e.target.value);
               if (Number.isFinite(v) && v > 0) setThreshold(v);
             }}
+            onBlur={() => setThresholdDraft(String(threshold))}
           />
           % часового оборота
         </label>

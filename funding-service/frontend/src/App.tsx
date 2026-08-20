@@ -4,6 +4,7 @@ import { useAuthStore } from './store/authStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useAuthSync } from './hooks/useAuth';
 import { useFundingAlert } from './hooks/useFundingAlert';
+import { useTimeAlarms } from './hooks/useTimeAlarms';
 import { initAlertUnlock } from './lib/alertSound';
 import { FundingTable } from './components/FundingTable';
 import { SettingsPage } from './components/SettingsPage';
@@ -11,6 +12,7 @@ import { CalculatorPage } from './components/CalculatorPage';
 import { RacePage } from './components/RacePage';
 import { JournalPage } from './components/JournalPage';
 import { RobotsPage } from './components/RobotsPage';
+import { AlarmToasts } from './components/AlarmToasts';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
@@ -38,6 +40,7 @@ export default function App() {
   useWebSocket(WS_URL);
   useAuthSync();
   useFundingAlert();
+  useTimeAlarms();
   const [page, setPage] = useState<Page>(pageFromPath);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -129,6 +132,8 @@ export default function App() {
           <FundingTable current={current} previous={previous} />
         )}
       </main>
+
+      <AlarmToasts />
     </div>
   );
 }

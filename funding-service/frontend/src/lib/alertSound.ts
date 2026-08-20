@@ -69,6 +69,24 @@ function ctx(): AudioContext {
   return audioCtx;
 }
 
+/**
+ * Общий AudioContext страницы. Один на всё: браузер разрешает звук после жеста
+ * пользователя именно контексту, и второй, заведённый где-то ещё, оказался бы
+ * заблокированным. null — WebAudio в этом браузере недоступен.
+ */
+export function alertAudioContext(): AudioContext | null {
+  try {
+    return ctx();
+  } catch {
+    return null;
+  }
+}
+
+/** Загруженный пользователем звук как data-URL; null — файла нет. */
+export function getCustomSoundDataURL(): string | null {
+  return localStorage.getItem(SOUND_KEY);
+}
+
 // Браузеры блокируют звук до первого жеста пользователя. Подписываемся на
 // pointerdown/keydown и «разогреваем» AudioContext, чтобы сигнал, пришедший
 // позже по WebSocket, уже мог прозвучать.

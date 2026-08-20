@@ -16,6 +16,11 @@
   --border: #2b303d;
   --border-strong: #3a4051;
 
+  /* Тема тёмная целиком, включая то, что рисует сам браузер: выпадающие
+     списки, часы у input[type=time], полосы прокрутки. Без этого поле выбора
+     времени в настройках открывалось белым окном посреди тёмной страницы. */
+  color-scheme: dark;
+
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   color: var(--text-primary);

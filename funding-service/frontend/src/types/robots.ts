@@ -65,6 +65,20 @@ export interface DayVolume {
   latest: string;
 }
 
+/** Чем сейчас живёт лента принтов: поток брокера или публичный фид биржи. */
+export interface StreamStatus {
+  /** Быстрый источник настроен (у сервиса есть токен брокера). */
+  enabled: boolean;
+  /** Соединение с ним держится прямо сейчас. */
+  connected: boolean;
+  /** Сколько инструментов покрыто потоком; остальные идут по ISS. */
+  symbols: number;
+  /** Биржевое время последнего принта из потока. */
+  last_print_at?: string;
+  /** Замеренное отставание потока от биржи, миллисекунды. 0 — ещё не мерили. */
+  lag_ms: number;
+}
+
 export interface RobotsResponse {
   /** Инструменты, по которым сейчас идёт лента. */
   watching: string[];
@@ -74,5 +88,7 @@ export interface RobotsResponse {
   watch_rule: string;
   robots: RobotSession[];
   day_volumes: DayVolume[];
+  /** Состояние быстрого источника — от него зависит свежесть всей страницы. */
+  stream: StreamStatus;
   as_of: string;
 }
