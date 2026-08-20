@@ -1311,3 +1311,76 @@ func TestEngine_CBFundingFollowsRefinedSettl(t *testing.T) {
 }
 
 func nearly(got, want float64) bool { return got-want < 1e-9 && want-got < 1e-9 }
+
+// Точная нога сильнее оценки полноты: если поток сделок сам перешагнул 15:30,
+// окно посчитано целиком, и подменять его приближением по ΔVOLTODAY нельзя.
+//
+// Ровно это случилось 20.08.2026 с USDRUBF. Сверка по сырой ленте ISS: окно
+// 10:00–15:30 = 83.47670 (20064 безадресных сделки, 212014 контрактов), курс ЦБ
+// 83.3550, база K1/K2 = PREVSETTLEPRICE 85.13, то есть фандинг 0.03657 — ровно
+// столько начислила биржа (SWAPRATE 0.036570). А подписчикам ушло 0.03570:
+// движок держал точную ногу на руках, но проверка полноты (наш дневной объём
+// против VOLTODAY) не сошлась — в неё не попала утренняя сессия ЕТС с 07:00 —
+// и заморозка взяла приближение по ΔVOLTODAY, 83.47583. Разница в ноге 0.00087
+// один в один перешла в фандинг.
+func TestEngine_ExactLegWinsWhenTradesCrossedSettlement(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 85.13, mskDay(9, 0)))
+
+	// Лента marketdata знает про весь день, включая утреннюю сессию с 07:00:
+	// к 09:59 по ней уже прошло 30000 контрактов, которых нет в нашей ленте сделок.
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.40, 30000, mskDay(9, 59)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.40, 30100, mskDay(10, 0)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.56, 30200, mskDay(15, 20)))
+
+	// Лента сделок принесла само окно — обе сделки, и ни одной утренней.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.40, 100, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.55, 100, mskDay(15, 20)))
+
+	// Сделка за границей окна: в ногу не входит, но доказывает, что окно закрыто.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 90.00, 100, mskDay(15, 32)))
+
+	got := e.Snapshot().USDRUBF.SettlVWAP
+	if got == nil {
+		t.Fatal("нога фьючерса не заморожена после сделки за 15:30")
+	}
+	wantExact := (83.40*100 + 83.55*100) / 200  // 83.475 — по сделкам
+	wantApprox := (83.40*100 + 83.56*100) / 200 // 83.480 — по ΔVOLTODAY
+	if diff := *got - wantExact; diff > 1e-9 || diff < -1e-9 {
+		if diff := *got - wantApprox; diff > -1e-9 && diff < 1e-9 {
+			t.Fatalf("нога взята приближением по ΔVOLTODAY (%.5f) при полном окне сделок (%.5f)",
+				wantApprox, wantExact)
+		}
+		t.Fatalf("settlVWAP = %.6f, ожидалось точное окно по сделкам %.6f", *got, wantExact)
+	}
+}
+
+// Полнота по объёму продолжает работать там, где она и нужна: окно на наших
+// глазах не закрылось, отсрочка истекла — значит лента сделок могла оказаться
+// обрезанной, и приближение по ΔVOLTODAY надёжнее огрызка.
+func TestEngine_StaleTradeFeedStillFallsBackAfterGrace(t *testing.T) {
+	e := funding.NewEngine()
+	e.Ingest(prevSettleTick(source.SymbolUSDRUBF, 85.13, mskDay(9, 0)))
+
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.40, 30000, mskDay(9, 59)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.40, 30100, mskDay(10, 0)))
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.56, 30200, mskDay(15, 20)))
+
+	// Лента сделок встала в 10:05 и до 15:30 так и не дошла.
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.40, 100, mskDay(10, 0)))
+	e.Ingest(tradeTick(source.SymbolUSDRUBF, 83.41, 100, mskDay(10, 5)))
+
+	e.Ingest(moexTick(source.SymbolUSDRUBF, 83.56, 30200, mskDay(17, 0)))
+
+	snap := e.Snapshot().USDRUBF
+	if snap.SettlVWAP == nil {
+		t.Fatal("нога не заморожена после истечения отсрочки")
+	}
+	want := (83.40*100 + 83.56*100) / 200
+	if diff := *snap.SettlVWAP - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("settlVWAP = %.6f, ожидалось приближение по ΔVOLTODAY %.6f", *snap.SettlVWAP, want)
+	}
+	if !snap.SettlProvisional {
+		t.Error("нога, замороженная по отсрочке, обязана быть помечена предварительной")
+	}
+}

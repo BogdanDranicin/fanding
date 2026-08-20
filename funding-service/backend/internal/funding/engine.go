@@ -480,9 +480,22 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 		return
 	}
 
+	// Перешагнувший 15:30 поток сделок — это доказательство полного окна, и оно
+	// сильнее любой оценки полноты по объёму. Сделки приходят строго по возрастанию
+	// TRADENO, курсор не оставляет дыр, а бэкфилл после рестарта переигрывает день
+	// с начала: раз пришла сделка за 15:30, всё окно уже посчитано точно.
+	//
+	// Проверка полноты (tradeFeedFresh) сравнивает наш дневной объём с VOLTODAY и
+	// нужна ровно в одном случае — когда окно НЕ закрылось на наших глазах и мы
+	// решаем, доверять ли обрезанной ленте. Раньше она стояла и здесь: 20.08.2026
+	// это стоило USD-фандинга 0.03570 вместо 0.03657 — точная нога 83.47670 была
+	// у движка на руках, но её отвергли в пользу приближения по ΔVOLTODAY (83.47583),
+	// хотя сделка за 15:30 уже пришла.
+	exact := tradeReady && (tradeCrossed || e.tradeFeedFresh(sym) || !sessOK)
+
 	var v float64
 	switch {
-	case tradeReady && (e.tradeFeedFresh(sym) || !sessOK):
+	case exact:
 		v = tradeV
 	case sessOK && (tradeReady || graceOver || !tradeOK):
 		v = sessV
@@ -491,16 +504,33 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 		return
 	}
 
+	// Каждая заморозка попадает в лог: три месяца сверки ушли на то, чтобы по
+	// одному числу фандинга восстанавливать, какой ногой он посчитан. Теперь это
+	// один grep.
+	e.log.Warn().
+		Str("sym", sym).
+		Str("date", mskDate).
+		Float64("settl_vwap", v).
+		Bool("trade_vwap_used", exact).
+		Float64("trade_vwap", tradeV).
+		Float64("session_vwap", sessV).
+		Bool("trade_crossed_1530", tradeCrossed).
+		Bool("trade_feed_fresh", e.tradeFeedFresh(sym)).
+		Float64("trade_day_volume", e.tradeDayVolume(sym)).
+		Float64("marketdata_voltoday", e.vwapLastVol[sym]).
+		Str("trade_feed_at", tradeFeedAt.Format("15:04:05")).
+		Bool("grace_over", graceOver).
+		Msg("нога фьючерса заморожена")
+
 	// Заморозка по отсрочке — аварийная: поток сделок так и не перешагнул 15:30, и
-	// хвост окна мог не доехать (именно так набегало расхождение с биржей). Пишем в
-	// лог, чтобы такие дни было видно при сверке, а не искать их снова по фандингу.
+	// хвост окна мог не доехать (именно так набегало расхождение с биржей). Помечаем
+	// значение предварительным: оно ещё уточнится, и уведомление скажет об этом прямо.
 	if !tradeCrossed {
 		e.settlProvisional[sym] = true
 		e.log.Warn().
 			Str("sym", sym).
 			Str("date", mskDate).
 			Float64("settl_vwap", v).
-			Bool("trade_vwap_used", tradeReady && (e.tradeFeedFresh(sym) || !sessOK)).
 			Str("trade_feed_at", tradeFeedAt.Format("15:04:05")).
 			Msg("нога фьючерса заморожена по отсрочке: поток сделок не дошёл до 15:30, окно может быть обрезано")
 	}
@@ -542,6 +572,16 @@ func (e *Engine) tradeFeedFresh(sym string) bool {
 	// Completeness is judged on whole-day volume: VOLTODAY counts from 07:00,
 	// while the funding accumulator (sumV) holds only the 10:00–15:30 window.
 	return acc.dayV >= volToday*tradeFeedMinCompleteness
+}
+
+// tradeDayVolume — сколько объёма за день собрала лента сделок. Только для
+// диагностики заморозки: по нему видно, почему полнота не сошлась с VOLTODAY.
+// Must be called while holding e.mu.
+func (e *Engine) tradeDayVolume(sym string) float64 {
+	if acc := e.tradeAccs[sym]; acc != nil {
+		return acc.dayV
+	}
+	return 0
 }
 
 // displayVWAP returns the rolling 6-hour VWAP for display: exact trade-based
