@@ -18,6 +18,7 @@ type RobotSource interface {
 	WatchDescription() string
 	Symbols() []string
 	DayVolumes() []robots.DayVolume
+	StreamStatus() robots.StreamStatus
 }
 
 // robotsResponse — ответ страницы «Роботы».
@@ -34,7 +35,10 @@ type robotsResponse struct {
 	// продажи. Страница берёт отсюда базу для силы робота и показывает, с какого
 	// времени оборот считается: после перезапуска среди дня база неполная.
 	DayVolumes []robots.DayVolume `json:"day_volumes"`
-	AsOf       time.Time          `json:"as_of"`
+	// Stream — каким источником приходят принты. Страница пишет про свежесть
+	// ленты то, что есть на самом деле, а не то, что было верно на прошлом источнике.
+	Stream robots.StreamStatus `json:"stream"`
+	AsOf   time.Time           `json:"as_of"`
 }
 
 // handleRobots отдаёт текущих роботов: тех, кто печатает прямо сейчас, и тех,
@@ -58,6 +62,7 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 		resp.Watching = append(resp.Watching, src.Symbols()...)
 		resp.WatchRule = src.WatchDescription()
 		resp.DayVolumes = append(resp.DayVolumes, src.DayVolumes()...)
+		resp.Stream = src.StreamStatus()
 
 		sessions := src.Snapshot()
 		symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))

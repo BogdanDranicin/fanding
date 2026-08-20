@@ -135,6 +135,10 @@ type Collector struct {
 	// поток обрывается, метка замирает — и ISS сам собой подхватывает всё, что
 	// после неё, без переключения режимов.
 	streamHead map[string]time.Time
+	// stream — что происходит с быстрым источником прямо сейчас. Нужно странице:
+	// от того, каким источником пришёл принт, зависит его свежесть, а разница
+	// между потоком брокера и публичным фидом ISS — пятнадцать минут.
+	stream StreamStatus
 }
 
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
@@ -291,6 +295,7 @@ func (c *Collector) streamLoop(ctx context.Context) {
 		return
 	}
 	c.log.Info().Int("symbols", len(symbols)).Msg("robots: быстрый источник подключается")
+	c.setStreamSymbols(len(symbols))
 
 	for attempt := 0; ctx.Err() == nil; attempt++ {
 		prints := make(chan Print, streamBuffer)
@@ -302,7 +307,9 @@ func (c *Collector) streamLoop(ctx context.Context) {
 			}
 		}()
 
+		c.setStreamConnected(true)
 		err := c.opts.Stream.Run(ctx, symbols, prints)
+		c.setStreamConnected(false)
 		close(prints)
 		<-done
 
@@ -372,6 +379,7 @@ func (c *Collector) ingestStream(p Print) {
 	if p.Time.After(c.streamHead[p.Symbol]) {
 		c.streamHead[p.Symbol] = p.Time
 	}
+	c.noteStreamPrint(p.Time)
 	c.mu.Unlock()
 }
 

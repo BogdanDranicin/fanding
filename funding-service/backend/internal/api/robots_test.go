@@ -15,6 +15,7 @@ type fakeRobotSource struct {
 	tapes    []robots.MarketTape
 	symbols  []string
 	days     []robots.DayVolume
+	stream   robots.StreamStatus
 }
 
 func (f fakeRobotSource) Snapshot() []robots.Session      { return f.sessions }
@@ -22,11 +23,16 @@ func (f fakeRobotSource) Tapes() []robots.MarketTape      { return f.tapes }
 func (f fakeRobotSource) Symbols() []string               { return f.symbols }
 func (f fakeRobotSource) WatchDescription() string        { return "тестовый отбор" }
 func (f fakeRobotSource) DayVolumes() []robots.DayVolume  { return f.days }
+func (f fakeRobotSource) StreamStatus() robots.StreamStatus { return f.stream }
 
 func testSource() fakeRobotSource {
 	now := time.Date(2026, 8, 17, 15, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
 	return fakeRobotSource{
 		tapes:   []robots.MarketTape{{Name: "акции TQBR"}},
+		stream: robots.StreamStatus{
+			Enabled: true, Connected: true, Symbols: 305,
+			LastPrintAt: now, LagMs: 1650,
+		},
 		symbols: []string{"SBER", "GAZP"},
 		days: []robots.DayVolume{
 			{Symbol: "SBER", Date: "2026-08-17", Buy: 900000, Sell: 750000, Trades: 40000, Since: "09:59:58"},
@@ -164,5 +170,29 @@ func TestRobotsResponseCarriesDayVolumes(t *testing.T) {
 	}
 	if sber.Since != "09:59:58" {
 		t.Errorf("Since = %q: страница показывает, с какого времени считается база", sber.Since)
+	}
+}
+
+// Состояние быстрого источника едет вместе с роботами: страница по нему пишет,
+// откуда пришёл принт и насколько он свежий. Без этого она сообщала бы про
+// пятнадцатиминутную задержку ISS и когда сделки идут потоком брокера за секунды.
+func TestRobotsResponseCarriesStreamStatus(t *testing.T) {
+	resp := getRobots(t, testSource(), "")
+	if !resp.Stream.Enabled || !resp.Stream.Connected {
+		t.Errorf("Stream = %+v, хотим подключённый быстрый источник", resp.Stream)
+	}
+	if resp.Stream.Symbols != 305 {
+		t.Errorf("инструментов в потоке %d, хотим 305", resp.Stream.Symbols)
+	}
+	if resp.Stream.LagMs != 1650 {
+		t.Errorf("отставание %d мс, хотим 1650", resp.Stream.LagMs)
+	}
+}
+
+// Сбор выключен — страница обязана понять, что быстрого источника нет, а не
+// принять нули за «поток есть, просто молчит».
+func TestRobotsStreamStatusWithoutCollector(t *testing.T) {
+	if got := getRobots(t, nil, "").Stream; got.Enabled || got.Connected {
+		t.Errorf("Stream = %+v, хотим выключенный источник", got)
 	}
 }

@@ -177,3 +177,81 @@ func TestStreamLoopGivesUpOnCatalogueError(t *testing.T) {
 		t.Errorf("поток запускался %d раз, хотим 0", stream.runs)
 	}
 }
+
+// Отставание потока меряется, а не берётся из головы: страница пишет пользователю
+// реальную свежесть ленты, и она у потока брокера на три порядка меньше, чем у ISS.
+func TestStreamStatusMeasuresLag(t *testing.T) {
+	now := base.Add(2 * time.Second)
+	c := newTestCollector(&fakeISS{}, nil, now)
+
+	if got := c.StreamStatus(); got.Enabled {
+		t.Errorf("без настроенного источника Enabled = true: %+v", got)
+	}
+
+	for i := 0; i < 20; i++ {
+		c.ingestStream(Print{Symbol: "SBER", Time: base, Price: 250, Qty: 100, Side: SideBuy})
+	}
+	st := c.StreamStatus()
+	if st.LagMs != 2000 {
+		t.Errorf("отставание %d мс, хотим 2000: все принты пришли с одинаковым запозданием", st.LagMs)
+	}
+	if !st.LastPrintAt.Equal(base) {
+		t.Errorf("LastPrintAt = %v, хотим %v", st.LastPrintAt, base)
+	}
+}
+
+// Хвост, досланный после переподключения, — это не измерение скорости: полчаса
+// отставания одного принта не должны превратить живой поток в «отстаёт на полчаса».
+func TestStreamStatusIgnoresReplayedBacklog(t *testing.T) {
+	now := base.Add(time.Second)
+	c := newTestCollector(&fakeISS{}, nil, now)
+
+	c.ingestStream(Print{Symbol: "SBER", Time: base, Price: 250, Qty: 100, Side: SideBuy})
+	c.ingestStream(Print{
+		Symbol: "SBER", Time: now.Add(-30 * time.Minute),
+		Price: 250, Qty: 100, Side: SideBuy,
+	})
+
+	if got := c.StreamStatus().LagMs; got != 1000 {
+		t.Errorf("отставание %d мс, хотим 1000: старый хвост в среднее не идёт", got)
+	}
+}
+
+// Обрыв и переподключение видны странице: пока соединения нет, лента идёт из ISS
+// и «время до удара» перестаёт быть почти-наблюдением.
+func TestStreamStatusFollowsConnection(t *testing.T) {
+	stream := &fakeStream{
+		symbols: []StreamInstrument{{Symbol: "SBER", Board: testTape.Board}},
+		runErr:  errors.New("обрыв"),
+	}
+	c := newTestCollector(&fakeISS{}, nil, base)
+	c.opts.Stream = stream
+	c.opts.StreamRetry = func(int) time.Duration { return time.Hour }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.streamLoop(ctx)
+	}()
+
+	// Ждём, пока цикл дойдёт до паузы после обрыва: соединения нет, но список
+	// инструментов уже получен.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		st := c.StreamStatus()
+		if st.Symbols == 1 && !st.Connected && stream.runs > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("не дождались состояния после обрыва: %+v", st)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	if got := c.StreamStatus(); got.Connected {
+		t.Errorf("после отмены Connected = true: %+v", got)
+	}
+}
