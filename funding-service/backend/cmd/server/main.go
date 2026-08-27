@@ -83,6 +83,17 @@ func main() {
 	}
 	mux := multiplex.New(routing)
 
+	// Живой поток сделок брокера. Одно соединение на весь сервис: тот же поток
+	// нужен и поиску роботов, и — с 28.08.2026 — ноге фьючерса в формуле
+	// фандинга. Без токена всё работает как раньше, по ленте MOEX ISS, только
+	// нога считается с её пятнадцатиминутным отставанием.
+	tinvestClient := dialTInvest(ctx, cfg, log.Logger)
+	if tinvestClient != nil {
+		defer tinvestClient.Close()
+		mux.Overlay(newTInvestFunding(tinvestClient, log.Logger),
+			source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF)
+	}
+
 	// USDTRUB (crypto) has no source yet; omitted until a crypto feed is added.
 	// USDRUB_TOM is the spot "tomorrow" leg whose 10:00–15:30 MSK WAPRICE predicts the CBR fixing.
 	// EUR/RUB_TOM doesn't trade on MOEX — EUR predicted CB rate uses EUR/USD × USD/RUB cross.
@@ -110,7 +121,7 @@ func main() {
 
 	// Поиск роботов в ленте сделок — независимый от фандинга сбор: свои ленты
 	// рынков и свои курсоры TRADENO. Выключается флагом ROBOTS_ENABLED.
-	robotCollector, err := newRobotCollector(cfg, store, log.Logger)
+	robotCollector, err := newRobotCollector(cfg, store, log.Logger, tinvestClient)
 	if err != nil {
 		log.Fatal().Err(err).Msg("robots: некорректный ROBOTS_SYMBOLS")
 	}

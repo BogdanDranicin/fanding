@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -16,7 +15,14 @@ import (
 
 // newRobotCollector собирает поиск роботов по конфигурации. Возвращает nil, если
 // сбор выключен; ошибку — только на нечитаемом списке тикеров.
-func newRobotCollector(cfg *config.Config, store *storage.Store, log zerolog.Logger) (*robots.Collector, error) {
+//
+// tinvestClient может быть nil: тогда сбор идёт по одной ленте ISS, как до
+// появления быстрого источника. Соединение заводится снаружи и общее с расчётом
+// фандинга — фандингу тот же поток нужен под ногу фьючерса, и держать ради него
+// второе соединение с брокером незачем.
+func newRobotCollector(
+	cfg *config.Config, store *storage.Store, log zerolog.Logger, tinvestClient *tinvest.Client,
+) (*robots.Collector, error) {
 	if !cfg.RobotsEnabled {
 		return nil, nil
 	}
@@ -35,20 +41,10 @@ func newRobotCollector(cfg *config.Config, store *storage.Store, log zerolog.Log
 
 	// Быстрый источник — поток обезличенных сделок брокера: биржевая лента ISS
 	// приходит с задержкой ровно в пятнадцать минут, а поиску роботов важна
-	// свежесть принта. Без токена сбор работает как раньше, только по ISS.
-	if cfg.TInvestToken != "" {
-		client, err := tinvest.Dial(context.Background(), tinvest.Config{
-			Token:   cfg.TInvestToken,
-			AppName: "funding-service/robots",
-		})
-		if err != nil {
-			// Не валим сервис: запасной источник на месте, робот просто будет
-			// виден на четверть часа позже.
-			log.Error().Err(err).Msg("robots: быстрый источник недоступен, работаю по ISS")
-		} else {
-			opts.Stream = newTInvestSource(client)
-			opts.StreamRetry = tinvest.ReconnectDelay
-		}
+	// свежесть принта. Без соединения сбор работает как раньше, только по ISS.
+	if tinvestClient != nil {
+		opts.Stream = newTInvestSource(tinvestClient)
+		opts.StreamRetry = tinvest.ReconnectDelay
 	}
 
 	// Свой HTTP-клиент ISS: лента роботов тянет тысячи сделок за опрос и не должна

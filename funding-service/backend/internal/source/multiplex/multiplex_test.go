@@ -76,8 +76,8 @@ func TestMultiplex_FansInFromTwoSources(t *testing.T) {
 	}}
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
-		source.SymbolUSDRUBF: src1,
-		source.SymbolUSDRubOfficial:  src2,
+		source.SymbolUSDRUBF:        src1,
+		source.SymbolUSDRubOfficial: src2,
 	})
 
 	ch, err := mux.Subscribe(context.Background(), []string{source.SymbolUSDRUBF, source.SymbolUSDRubOfficial})
@@ -135,8 +135,8 @@ func TestMultiplex_ContextCancelClosesChannel(t *testing.T) {
 	src2 := &blockingSource{name: "b"}
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
-		source.SymbolUSDRUBF: src1,
-		source.SymbolUSDRubOfficial:  src2,
+		source.SymbolUSDRUBF:        src1,
+		source.SymbolUSDRubOfficial: src2,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -160,8 +160,8 @@ func TestMultiplex_CloseCallsUnderlyingSources(t *testing.T) {
 	src2 := &staticSource{name: "y"}
 
 	mux := multiplex.New(map[string]source.MarketDataSource{
-		source.SymbolUSDRUBF: src1,
-		source.SymbolUSDRubOfficial:  src2,
+		source.SymbolUSDRUBF:        src1,
+		source.SymbolUSDRubOfficial: src2,
 	})
 
 	if err := mux.Close(); err != nil {
@@ -206,4 +206,66 @@ func TestMultiplex_DefaultRoutingCoversAllSymbols(t *testing.T) {
 	if routing[source.SymbolUSDRubOfficial] != cbr {
 		t.Error("USDRubOfficial should map to cbr")
 	}
+}
+
+// Наложение: живой поток брокера подписывается на те же символы, что и лента
+// ISS, и его тики приходят вперемешку с её тиками. «Один символ — один
+// источник» перестало быть правдой 28.08.2026: рыночные данные фьючерса берутся
+// из MOEX ISS, а сами сделки — из потока брокера, который на пятнадцать минут
+// свежее.
+func TestMultiplex_OverlaySubscribesAlongsideRouting(t *testing.T) {
+	iss := &capturingSource{name: "moex-iss"}
+	live := &capturingSource{name: "tinvest"}
+
+	mux := multiplex.New(map[string]source.MarketDataSource{
+		source.SymbolUSDRUBF:        iss,
+		source.SymbolUSDRubOfficial: iss,
+	})
+	// Наложение объявлено и на символ, который сервис не запрашивает.
+	mux.Overlay(live, source.SymbolUSDRUBF, source.SymbolEURRUBF)
+
+	if _, err := mux.Subscribe(context.Background(), []string{
+		source.SymbolUSDRUBF, source.SymbolUSDRubOfficial,
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if len(live.subscribed) != 1 {
+		t.Fatalf("наложение должно подписаться ровно один раз, получил %d", len(live.subscribed))
+	}
+	got := live.subscribed[0]
+	if len(got) != 1 || got[0] != source.SymbolUSDRUBF {
+		t.Errorf("наложение подписалось на %v, хочу только [%s]", got, source.SymbolUSDRUBF)
+	}
+	// Основной маршрут наложение не трогает.
+	if len(iss.subscribed) != 1 || len(iss.subscribed[0]) != 2 {
+		t.Errorf("основной маршрут изменился: %v", iss.subscribed)
+	}
+}
+
+// Наложение уезжает в Close вместе с остальными источниками — иначе подписка
+// пережила бы остановку сервиса.
+func TestMultiplex_OverlayClosed(t *testing.T) {
+	iss := &capturingSource{name: "moex-iss"}
+	live := &closeCountingSource{capturingSource: capturingSource{name: "tinvest"}}
+
+	mux := multiplex.New(map[string]source.MarketDataSource{source.SymbolUSDRUBF: iss})
+	mux.Overlay(live, source.SymbolUSDRUBF)
+
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if live.closed != 1 {
+		t.Errorf("наложение закрыто %d раз, хочу 1", live.closed)
+	}
+}
+
+type closeCountingSource struct {
+	capturingSource
+	closed int
+}
+
+func (c *closeCountingSource) Close() error {
+	c.closed++
+	return nil
 }

@@ -62,6 +62,11 @@ func (r *Runner) sendToObs(tick source.Tick) {
 	if tick.Kind == source.KindTrade {
 		return
 	}
+	// Служебные тики живого потока (подписка поднялась / оборвалась) цен не несут
+	// и в истории котировок им делать нечего.
+	if tick.Kind == source.KindStreamUp || tick.Kind == source.KindStreamDown {
+		return
+	}
 	select {
 	case r.tickObs <- tick:
 	default:

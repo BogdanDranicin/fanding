@@ -6,7 +6,7 @@ import "time"
 type TickKind int
 
 const (
-	KindLastPrice   TickKind = iota
+	KindLastPrice TickKind = iota
 	KindBid
 	KindAsk
 	KindOfficialRate    // startup load of current official rate (yesterday's publication)
@@ -17,14 +17,22 @@ const (
 	KindWaprice     // session VWAP published by MOEX ISS (WAPRICE field)
 	KindTrade       // single executed deal from MOEX ISS trades.json (Volume = QUANTITY of that trade)
 	KindPrevSettle  // расчётная цена предыдущего вечернего клиринга (PREVSETTLEPRICE) — база границ K1/K2
+
+	// KindStreamUp / KindStreamDown — служебные тики живого потока сделок: подписка
+	// установлена / оборвалась. Цены не несут. Движку они нужны, чтобы знать, покрыт
+	// ли живым потоком ВЕСЬ расчётный интервал 10:00–15:30: поток, поднявшийся в
+	// полдень или переподключившийся среди окна, теряет сделки безвозвратно —
+	// в отличие от ленты ISS, которая доигрывает пропущенное по курсору TRADENO.
+	KindStreamUp
+	KindStreamDown
 )
 
 // Symbol constants for all tracked instruments.
 const (
-	SymbolUSDRUBF       = "USDRUBF"
-	SymbolEURRUBF       = "EURRUBF"
-	SymbolCNYRUBF       = "CNYRUBF"
-	SymbolUSDTRUB       = "USDTRUB"
+	SymbolUSDRUBF        = "USDRUBF"
+	SymbolEURRUBF        = "EURRUBF"
+	SymbolCNYRUBF        = "CNYRUBF"
+	SymbolUSDTRUB        = "USDTRUB"
 	SymbolUSDRubOfficial = "USDRUB_CB"
 	SymbolEURRubOfficial = "EURRUB_CB"
 
@@ -49,4 +57,15 @@ type Tick struct {
 	// VOLTODAY, but their price belongs to another day and must stay out of every
 	// price accumulator.
 	Backdated bool
+
+	// Live помечает сделку, пришедшую живым потоком брокера, а не публичной лентой
+	// MOEX ISS. Разница не в качестве данных, а в возрасте: лента ISS отдаёт сделку
+	// через пятнадцать минут после того, как она прошла на бирже, поток брокера —
+	// через десяток миллисекунд (замер на проде 27.08.2026: lag_ms = 12).
+	//
+	// Для ноги фьючерса это решает всё. Окно 10:00–15:30 по ленте ISS закрывается
+	// только к 15:45, и до тех пор движок не может отличить «окно кончилось» от
+	// «лента отстала», из-за чего нога регулярно замораживалась обрезанной. Живой
+	// поток пересекает 15:30 своими же сделками секунда в секунду.
+	Live bool
 }

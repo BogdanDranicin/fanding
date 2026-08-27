@@ -16,6 +16,18 @@ var _ source.MarketDataSource = (*Source)(nil)
 type Source struct {
 	routing map[string]source.MarketDataSource
 	all     []source.MarketDataSource // deduplicated, for Close
+	// overlays — источники, которые подписываются ДОПОЛНИТЕЛЬНО к маршруту, на те
+	// же символы. Нужны потому, что «один символ — один источник» перестало быть
+	// правдой: у фьючерса рыночные данные (VOLTODAY, SWAPRATE, расчётные цены)
+	// приходят из MOEX ISS, а сами сделки — живым потоком брокера, и второй не
+	// заменяет первый, а дополняет его.
+	overlays []overlay
+}
+
+// overlay — дополнительный источник и символы, на которые он подписывается.
+type overlay struct {
+	src  source.MarketDataSource
+	syms []string
 }
 
 // New creates a Source from an explicit symbol→source routing map.
@@ -45,6 +57,26 @@ func DefaultRouting(moex, cbr source.MarketDataSource) map[string]source.MarketD
 	}
 }
 
+// Overlay добавляет источник, подписывающийся на symbols ПОМИМО основного
+// маршрута. Тики обоих сливаются в общий поток; кто их прислал, различается по
+// полю Tick.Source (и Tick.Live у сделок). Вызывать до Subscribe.
+//
+// Символы, которых нет в запросе Subscribe, из наложения молча выпадают: сервис
+// может не следить за инструментом вовсе, и подписываться на него «про запас»
+// незачем.
+func (s *Source) Overlay(src source.MarketDataSource, symbols ...string) {
+	if src == nil || len(symbols) == 0 {
+		return
+	}
+	s.overlays = append(s.overlays, overlay{src: src, syms: symbols})
+	for _, existing := range s.all {
+		if existing == src {
+			return
+		}
+	}
+	s.all = append(s.all, src)
+}
+
 // Name implements source.MarketDataSource.
 func (s *Source) Name() string { return "multiplex" }
 
@@ -56,8 +88,8 @@ func (s *Source) Subscribe(ctx context.Context, symbols []string) (<-chan source
 	// Group requested symbols by owner source. Using a slice-of-pairs to preserve
 	// insertion order and avoid non-determinism in ranging over maps.
 	type group struct {
-		src   source.MarketDataSource
-		syms  []string
+		src  source.MarketDataSource
+		syms []string
 	}
 	order := make([]group, 0)
 	index := make(map[source.MarketDataSource]int)
@@ -76,11 +108,33 @@ func (s *Source) Subscribe(ctx context.Context, symbols []string) (<-chan source
 	}
 
 	// Subscribe each source to its symbol batch.
-	channels := make([]<-chan source.Tick, 0, len(order))
+	channels := make([]<-chan source.Tick, 0, len(order)+len(s.overlays))
 	for _, g := range order {
 		ch, err := g.src.Subscribe(ctx, g.syms)
 		if err != nil {
 			return nil, fmt.Errorf("multiplex: subscribe %s: %w", g.src.Name(), err)
+		}
+		channels = append(channels, ch)
+	}
+
+	// Наложения — только на те символы, которые действительно запрошены.
+	requested := make(map[string]bool, len(symbols))
+	for _, sym := range symbols {
+		requested[sym] = true
+	}
+	for _, ov := range s.overlays {
+		syms := make([]string, 0, len(ov.syms))
+		for _, sym := range ov.syms {
+			if requested[sym] {
+				syms = append(syms, sym)
+			}
+		}
+		if len(syms) == 0 {
+			continue
+		}
+		ch, err := ov.src.Subscribe(ctx, syms)
+		if err != nil {
+			return nil, fmt.Errorf("multiplex: subscribe overlay %s: %w", ov.src.Name(), err)
 		}
 		channels = append(channels, ch)
 	}

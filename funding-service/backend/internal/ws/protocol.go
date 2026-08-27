@@ -37,7 +37,31 @@ func instrPayload(f funding.InstrumentFunding) map[string]any {
 	if f.PredictedCBRate != nil {
 		m["predicted_cb_rate"] = *f.PredictedCBRate
 	}
+	// Нога фьючерса на 15:30 и то, чем она посчитана. Уходит наружу, чтобы сверку
+	// с биржей можно было делать по снапшоту, не поднимая логи: "live" — окно
+	// закрыто живым потоком сделок брокера в свою же секунду, "iss-trades" —
+	// точной лентой MOEX ISS (она отстаёт на четверть часа), "voltoday" —
+	// приближением по приросту VOLTODAY.
+	if f.SettlVWAP != nil {
+		m["settl_vwap"] = *f.SettlVWAP
+	}
+	if f.SettlSource != "" {
+		m["settl_source"] = f.SettlSource
+		m["settl_provisional"] = f.SettlProvisional
+	}
 	return m
+}
+
+// feedPayload описывает источник сделок: живой поток брокера или публичная
+// лента MOEX ISS, отстающая на пятнадцать минут. Страница пишет это словами,
+// чтобы «свежая цифра» и «цифра четвертьчасовой давности» перестали выглядеть
+// одинаково.
+func feedPayload(f funding.FeedStatus) map[string]any {
+	return map[string]any{
+		"live":    f.Live,
+		"lag_ms":  f.LagMs,
+		"symbols": f.Symbols,
+	}
 }
 
 // EncodeSnapshot serialises a FundingSnapshot into a MessagePack binary frame.
@@ -46,10 +70,11 @@ func EncodeSnapshot(s funding.FundingSnapshot) ([]byte, error) {
 		Type:      "snapshot",
 		Timestamp: s.Timestamp.UnixMilli(),
 		Payload: map[string]any{
-			"USDRUBF":      instrPayload(s.USDRUBF),
-			"EURRUBF":      instrPayload(s.EURRUBF),
-			"CNYRUBF":      instrPayload(s.CNYRUBF),
+			"USDRUBF":       instrPayload(s.USDRUBF),
+			"EURRUBF":       instrPayload(s.EURRUBF),
+			"CNYRUBF":       instrPayload(s.CNYRUBF),
 			"usdtrub_price": s.USDTRUBPrice,
+			"feed":          feedPayload(s.Feed),
 		},
 	}
 	return msgpack.Marshal(msg)
@@ -65,6 +90,7 @@ func SnapshotJSON(s funding.FundingSnapshot) ([]byte, error) {
 		"EURRUBF":       instrPayload(s.EURRUBF),
 		"CNYRUBF":       instrPayload(s.CNYRUBF),
 		"usdtrub_price": s.USDTRUBPrice,
+		"feed":          feedPayload(s.Feed),
 	}
 	return json.Marshal(payload)
 }
