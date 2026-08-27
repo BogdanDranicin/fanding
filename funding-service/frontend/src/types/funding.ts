@@ -6,6 +6,27 @@ export interface InstrumentFunding {
   official_rate?: number;
   predicted_funding?: number;
   predicted_cb_rate?: number;
+  /** Нога фьючерса на 15:30 — та самая, из которой считается точный фандинг. */
+  settl_vwap?: number;
+  /**
+   * Чем эта нога посчитана: `live` — живым потоком сделок брокера (окно
+   * закрылось своей же сделкой в 15:30), `iss-trades` — точной лентой MOEX ISS
+   * (она отстаёт на четверть часа), `voltoday` — приближением по приросту
+   * дневного объёма.
+   */
+  settl_source?: string;
+  /** Окно могло не доехать до конца — значение ещё уточнится. */
+  settl_provisional?: boolean;
+}
+
+/** Чем питается расчёт прямо сейчас. */
+export interface FeedStatus {
+  /** Сделки идут живым потоком брокера, а не пятнадцатиминутной лентой ISS. */
+  live: boolean;
+  /** Замеренное отставание живого потока от биржи, миллисекунды. */
+  lag_ms: number;
+  /** Сколько фьючерсов покрыто живым потоком. */
+  symbols: number;
 }
 
 export interface FundingSnapshot {
@@ -14,6 +35,7 @@ export interface FundingSnapshot {
   EURRUBF: InstrumentFunding;
   CNYRUBF: InstrumentFunding;
   usdtrub_price: number;
+  feed?: FeedStatus;
 }
 
 export interface InstrumentSpec {

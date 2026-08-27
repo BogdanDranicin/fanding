@@ -13,6 +13,8 @@ import { RacePage } from './components/RacePage';
 import { JournalPage } from './components/JournalPage';
 import { RobotsPage } from './components/RobotsPage';
 import { AlarmToasts } from './components/AlarmToasts';
+import { CbFundingWindow } from './components/CbFundingWindow';
+import { FeedNote } from './components/FeedNote';
 import './App.css';
 
 const WS_URL = import.meta.env.VITE_WS_URL as string
@@ -95,6 +97,7 @@ export default function App() {
         <h1 className="app-title">Funding Rates</h1>
 
         <div className="app-header-controls">
+          <CbFundingWindow />
           <StatusDot />
           <button
             className="nav-burger"
@@ -129,7 +132,10 @@ export default function App() {
         {shownPage === 'race' && <RacePage />}
         {shownPage === 'journal' && <JournalPage />}
         {shownPage === 'main' && (
-          <FundingTable current={current} previous={previous} />
+          <>
+            <FundingTable current={current} previous={previous} />
+            <FeedNote current={current} />
+          </>
         )}
       </main>
 

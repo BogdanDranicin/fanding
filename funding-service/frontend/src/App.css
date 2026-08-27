@@ -2153,3 +2153,64 @@ details[open] > .accordion-summary::before {
 }
 
 .alm-toast-close:hover { color: var(--text-primary); }
+
+/* ── Кнопка «CB funding отдельным окном» ──────────────────────────────────── */
+
+.cbw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cbw-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+
+.cbw-btn-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.cbw-btn-icon { font-size: 13px; line-height: 1; }
+
+.cbw-err { font-size: 11px; color: var(--accent-warn); }
+
+/* Статус звука в свёрнутом окне: молчащий сигнал невозможно отличить от
+   выключенного, поэтому состояние подписано словами и подкрашено. */
+.snd-status {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.snd-ok {
+  border-color: color-mix(in srgb, var(--accent-up) 45%, var(--border));
+  color: var(--accent-up);
+}
+
+.snd-bad {
+  border-color: color-mix(in srgb, var(--accent-down) 45%, var(--border));
+  color: var(--accent-down);
+}
+
+/* Строка под таблицей фандинга: чем посчитано и насколько свежо. Мелко и
+   негромко — это подпись к цифрам, а не сообщение. */
+.feed-note {
+  margin: 10px 2px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}

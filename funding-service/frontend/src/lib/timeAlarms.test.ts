@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALARM_ARM_MS,
+  ALARM_MAX_SLEEP_MS,
+  alarmSleep,
   clockOf,
   describeAlarm,
+  isAlarmFresh,
   makeAlarm,
   minutesOf,
   mskDayStart,
@@ -147,5 +151,37 @@ describe('чтение сохранённого', () => {
   it('оставляет разумные значения как есть', () => {
     const a = normalizeAlarm({ id: 'x', kind: 'at', atMin: 600, tone: 'gong', label: 'открытие' });
     expect(a).toMatchObject({ id: 'x', kind: 'at', atMin: 600, tone: 'gong', label: 'открытие' });
+  });
+});
+
+describe('планировщик', () => {
+  const now = msk('2026-08-20T14:00:00');
+
+  it('просыпается к постановке звука, а не к самой отметке', () => {
+    // Отметка далеко за горизонтом постановки: спим фоновым ударом.
+    expect(alarmSleep(now + ALARM_ARM_MS + 10 * 60_000, false, now)).toBe(ALARM_MAX_SLEEP_MS);
+    // Отметка чуть дальше горизонта: просыпаемся ровно к моменту постановки,
+    // но не дольше фонового удара — часы могут съехать, сутки смениться.
+    expect(alarmSleep(now + ALARM_ARM_MS + 20_000, false, now))
+      .toBe(Math.min(ALARM_MAX_SLEEP_MS, 20_000));
+    // Момент постановки уже наступил — не спим вовсе.
+    expect(alarmSleep(now + ALARM_ARM_MS - 1_000, false, now)).toBe(0);
+  });
+
+  it('после постановки звука ждёт саму отметку — ради плашки', () => {
+    expect(alarmSleep(now + 10_000, true, now)).toBe(10_020);
+    // Отметка позади, а плашку ещё не показали: просыпаемся немедленно.
+    expect(alarmSleep(now - 1_000, true, now)).toBe(0);
+  });
+
+  it('без отметок только тикает вхолостую', () => {
+    expect(alarmSleep(0, false, now)).toBe(ALARM_MAX_SLEEP_MS);
+  });
+
+  // Ровно тот случай, из-за которого сигналы пропадали: фоновая вкладка будится
+  // раз в минуту, и такт приходит уже после отметки.
+  it('считает опоздавший на такт сигнал живым, а проспанный за ночь — нет', () => {
+    expect(isAlarmFresh(now, now + 55_000)).toBe(true);
+    expect(isAlarmFresh(now, now + 8 * 3600_000)).toBe(false);
   });
 });

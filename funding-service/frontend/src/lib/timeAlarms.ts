@@ -7,6 +7,7 @@
 // с переходами, зато принёс бы в арифметику расписания разбор строк.
 
 import { alertAudioContext, getCustomSoundDataURL } from './alertSound';
+import { keepAudioAlive } from './audioKeepAlive';
 
 const ALARMS_KEY = 'time_alarms.v1';
 const ENABLED_KEY = 'time_alarms_enabled';
@@ -264,66 +265,249 @@ export const ALARM_PRESETS: { label: string; patch: Partial<TimeAlarm> }[] = [
   { label: 'Каждые 2 часа', patch: { everyMin: 120 } },
 ];
 
+// ── Планирование ────────────────────────────────────────────────────────────
+//
+// Первая версия просто опрашивала расписание раз в полсекунды. В активной
+// вкладке это работало, в фоновой — нет: браузер режет таймеры скрытой страницы
+// до одного пробуждения в секунду, а через пять минут — до одного в минуту.
+// Отсюда обе жалобы: сигнал приходил с опозданием, а иногда не приходил вовсе
+// (опоздание перекрывало срок годности, и сигнал молча проглатывался).
+//
+// Поэтому звук больше не ждёт своего такта: он заранее ставится в очередь
+// WebAudio, а таймер страницы остаётся только для бухгалтерии — посчитать
+// следующую отметку и показать плашку.
+
+/** Насколько просроченный сигнал ещё имеет смысл проиграть. */
+export const ALARM_STALE_MS = 60_000;
+
+/**
+ * За сколько до отметки звук уходит в очередь WebAudio.
+ *
+ * Было полторы минуты — с расчётом на самый тугой режим фоновой вкладки, одно
+ * пробуждение таймера в минуту. Этого хватало ровно до того момента, когда
+ * браузер вкладку не душит, а ЗАМОРАЖИВАЕТ (после ~5 минут вне поля зрения):
+ * у замороженной страницы таймеров нет вообще, и поставить звук за полторы
+ * минуты она не успевает, потому что не просыпается ни разу.
+ *
+ * Теперь горизонт — десять минут, а от заморозки страницу держит непрерывный
+ * неслышимый тон (см. audioKeepAlive). Расхождение часов аудиопотока и
+ * системных на таком плече — единицы миллисекунд, и планировщик всё равно
+ * сверяет его на каждом такте (ALARM_DRIFT_TOLERANCE_MS).
+ */
+export const ALARM_ARM_MS = 600_000;
+
+/**
+ * Насколько поставленному звуку позволено разойтись со стенными часами, прежде
+ * чем его снимут и поставят заново. Расхождение означает не неточность, а
+ * остановку: у приостановленного аудиоконтекста часы стоят, и нота, назначенная
+ * по ним, уезжает в будущее ровно на длительность остановки. Заодно ловится
+ * перевод системных часов и выход машины из сна.
+ */
+export const ALARM_DRIFT_TOLERANCE_MS = 250;
+
+/** Потолок сна планировщика: страховка от съехавших часов и смены суток. */
+export const ALARM_MAX_SLEEP_MS = 30_000;
+
+/** Стоит ли ещё звонить об отметке, которая уже наступила. */
+export function isAlarmFresh(at: number, now: number): boolean {
+  return now - at <= ALARM_STALE_MS;
+}
+
+/**
+ * Через сколько планировщику проснуться ради отметки `at`: пока звук не в
+ * очереди — к моменту постановки, после — сразу за отметкой, чтобы показать
+ * плашку. Ноль отметки означает, что срабатываний нет, — тогда только фоновый
+ * удар на всякий случай.
+ */
+export function alarmSleep(at: number, armed: boolean, now: number): number {
+  if (!at) return ALARM_MAX_SLEEP_MS;
+  // +20 мс: просыпаться ровно в момент отметки — значит с равной вероятностью
+  // проснуться на миллисекунду раньше неё и уйти на второй круг впустую.
+  const wake = armed ? at + 20 : at - ALARM_ARM_MS;
+  return Math.min(ALARM_MAX_SLEEP_MS, Math.max(0, wake - now));
+}
+
 // ── Звук ────────────────────────────────────────────────────────────────────
+
+/** Поставленный в очередь сигнал, который ещё можно снять. */
+export interface ScheduledTone {
+  cancel(): void;
+  /**
+   * На сколько миллисекунд запланированный момент разошёлся со стенными часами.
+   * Ноль — звук ещё не поставлен либо идёт точно по расписанию; большая
+   * величина означает, что часы аудиопотока стояли (вкладка спала) и звук надо
+   * ставить заново.
+   */
+  driftMs(now?: number): number;
+}
+
+const SILENT: ScheduledTone = { cancel() {}, driftMs: () => 0 };
 
 // note — одна нота осциллятором. Готовых файлов не держим: страница отдаётся
 // под строгим CSP, а осциллятору внешние ресурсы не нужны.
 function note(
   c: AudioContext, freq: number, at: number, len: number, vol: number,
   type: OscillatorType = 'sine',
-): void {
+): OscillatorNode {
   const osc = c.createOscillator();
   const gain = c.createGain();
   osc.type = type;
   osc.frequency.value = freq;
-  const t0 = c.currentTime + at;
   // Края огибающей сглажены: прямоугольный импульс щёлкает в динамике.
-  gain.gain.setValueAtTime(0.0001, t0);
-  gain.gain.exponentialRampToValueAtTime(Math.max(0.001, vol), t0 + 0.015);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + len);
+  gain.gain.setValueAtTime(0.0001, at);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.001, vol), at + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, at + len);
   osc.connect(gain).connect(c.destination);
-  osc.start(t0);
-  osc.stop(t0 + len + 0.03);
+  osc.start(at);
+  osc.stop(at + len + 0.03);
+  return osc;
 }
 
-function scheduleTone(c: AudioContext, tone: AlarmTone, vol: number): void {
+/** Ставит тон на момент `at` по часам аудиоконтекста. */
+function scheduleTone(c: AudioContext, tone: AlarmTone, vol: number, at: number): ScheduledTone {
+  const parts: AudioScheduledSourceNode[] = [];
   switch (tone) {
     case 'beep':
-      note(c, 880, 0, 0.18, 0.5 * vol);
+      parts.push(note(c, 880, at, 0.18, 0.5 * vol));
       break;
     case 'double':
-      note(c, 880, 0, 0.12, 0.5 * vol);
-      note(c, 1174.7, 0.16, 0.16, 0.5 * vol);
+      parts.push(note(c, 880, at, 0.12, 0.5 * vol));
+      parts.push(note(c, 1174.7, at + 0.16, 0.16, 0.5 * vol));
       break;
     case 'gong':
-      note(c, 196, 0, 1.6, 0.6 * vol, 'triangle');
-      note(c, 293.7, 0.02, 1.2, 0.35 * vol);
+      parts.push(note(c, 196, at, 1.6, 0.6 * vol, 'triangle'));
+      parts.push(note(c, 293.7, at + 0.02, 1.2, 0.35 * vol));
       break;
     default:
-      note(c, 880, 0, 0.35, 0.5 * vol);
-      note(c, 1318.5, 0.18, 0.4, 0.5 * vol);
+      parts.push(note(c, 880, at, 0.35, 0.5 * vol));
+      parts.push(note(c, 1318.5, at + 0.18, 0.4, 0.5 * vol));
+  }
+  return { cancel: () => stopAll(parts), driftMs: () => 0 };
+}
+
+function stopAll(parts: AudioScheduledSourceNode[]): void {
+  for (const p of parts) {
+    try {
+      p.stop();
+      p.disconnect();
+    } catch {
+      // Нота уже отыграла — снимать нечего.
+    }
   }
 }
 
-/** Проигрывает сигнал. Молча выходит, если звук браузером ещё не разрешён. */
-export function playAlarmTone(tone: AlarmTone, volume = getAlarmVolume()): void {
-  if (tone === 'custom') {
-    const custom = getCustomSoundDataURL();
-    if (custom) {
-      const a = new Audio(custom);
-      a.volume = volume;
-      a.play().catch(() => {});
+// Пользовательский файл тоже играем через WebAudio, а не элементом <audio>:
+// во-первых, только у аудиоконтекста есть часы, по которым звук можно назначить
+// на будущий момент; во-вторых, data-URL в <audio> запрещён нашим же CSP
+// (`default-src 'self'` закрывает и media-src), а декодированный буфер к сети
+// отношения не имеет.
+let customBuf: { url: string; buf: AudioBuffer } | null = null;
+
+function dataUrlBytes(url: string): ArrayBuffer | null {
+  const comma = url.indexOf(',');
+  if (comma < 0) return null;
+  try {
+    const bin = atob(url.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  } catch {
+    return null;
+  }
+}
+
+/** Декодированный пользовательский звук; null — файла нет или он не читается. */
+function customBuffer(c: AudioContext): Promise<AudioBuffer | null> {
+  const url = getCustomSoundDataURL();
+  if (!url) return Promise.resolve(null);
+  if (customBuf && customBuf.url === url) return Promise.resolve(customBuf.buf);
+  const bytes = dataUrlBytes(url);
+  if (!bytes) return Promise.resolve(null);
+  return c.decodeAudioData(bytes).then(
+    (buf) => {
+      customBuf = { url, buf };
+      return buf;
+    },
+    () => null,
+  );
+}
+
+function scheduleBuffer(c: AudioContext, buf: AudioBuffer, vol: number, at: number): ScheduledTone {
+  const src = c.createBufferSource();
+  const gain = c.createGain();
+  src.buffer = buf;
+  gain.gain.value = Math.min(1, Math.max(0, vol));
+  src.connect(gain).connect(c.destination);
+  src.start(at);
+  return { cancel: () => stopAll([src]), driftMs: () => 0 };
+}
+
+/**
+ * Ставит сигнал на момент `atMs` (шкала Date.now()). Ноты назначаются по часам
+ * WebAudio: они идут на аудиопотоке, который браузер не усыпляет вместе со
+ * скрытой вкладкой, — поэтому сигнал звучит в свою миллисекунду, даже если
+ * таймеры страницы к этому времени будятся раз в минуту.
+ */
+export function scheduleAlarmTone(
+  tone: AlarmTone, volume = getAlarmVolume(), atMs = Date.now(),
+): ScheduledTone {
+  const c = alertAudioContext();
+  if (!c) return SILENT;
+
+  // Пока в очереди есть звук, вкладку надо держать живой: у замороженной
+  // страницы браузер останавливает и аудиоконтекст, и очередь вместе с ним.
+  keepAudioAlive(c, 'time-alarms');
+
+  let live = true;
+  let queued: ScheduledTone = SILENT;
+  // Момент по часам аудиопотока, на который назначен звук. Нужен, чтобы потом
+  // сверить его со стенными часами: разойтись они могут только одним способом —
+  // если аудиоконтекст стоял.
+  let audioTarget: number | null = null;
+
+  // Момент считаем в последний момент перед постановкой: между вызовом и
+  // фактическим запуском контекста может пройти заметное время.
+  const audioAt = () => {
+    audioTarget = c.currentTime + Math.max(0, atMs - Date.now()) / 1000;
+    return audioTarget;
+  };
+
+  const arm = () => {
+    if (!live) return;
+    if (tone === 'custom') {
+      void customBuffer(c).then((buf) => {
+        if (!live) return;
+        // Файл не загружен или не читается — лучше встроенный чайм, чем тишина.
+        queued = buf
+          ? scheduleBuffer(c, buf, volume, audioAt())
+          : scheduleTone(c, 'chime', volume, audioAt());
+      });
       return;
     }
-    // Файл не загружен — лучше встроенный чайм, чем тишина вместо сигнала.
-  }
-  const c = alertAudioContext();
-  if (!c) return;
+    queued = scheduleTone(c, tone, volume, audioAt());
+  };
+
   // У приостановленного контекста currentTime стоит на месте, и ноты,
-  // запланированные до фактического запуска, оказались бы в прошлом.
-  if (c.state === 'suspended') {
-    c.resume().then(() => scheduleTone(c, tone, volume)).catch(() => {});
-    return;
-  }
-  scheduleTone(c, tone, volume);
+  // назначенные до фактического запуска, оказались бы в прошлом.
+  if (c.state === 'suspended') c.resume().then(arm, () => {});
+  else arm();
+
+  return {
+    cancel() {
+      live = false;
+      queued.cancel();
+    },
+    driftMs(now = Date.now()) {
+      if (audioTarget === null) return 0;
+      // Когда звук зазвучит по стенным часам, если аудиочасы пойдут дальше
+      // ровно так же, как идут сейчас.
+      const willFireAt = now + (audioTarget - c.currentTime) * 1000;
+      return willFireAt - atMs;
+    },
+  };
+}
+
+/** Проигрывает сигнал сразу. Молча выходит, если звук браузером ещё не разрешён. */
+export function playAlarmTone(tone: AlarmTone, volume = getAlarmVolume()): void {
+  scheduleAlarmTone(tone, volume, Date.now());
 }

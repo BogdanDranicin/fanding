@@ -109,18 +109,69 @@ export function initAlertUnlock(): void {
   };
   window.addEventListener('pointerdown', unlock);
   window.addEventListener('keydown', unlock);
+  window.addEventListener('touchstart', unlock);
 }
 
 /** Проигрывает сигнал: пользовательский файл, если задан, иначе встроенный чайм. */
 export function playAlert(): void {
   const custom = localStorage.getItem(SOUND_KEY);
-  if (custom) {
-    const a = new Audio(custom);
-    a.volume = getAlertVolume();
-    a.play().catch(() => {});
+  if (!custom) {
+    playChime();
     return;
   }
-  playChime();
+  // Пользовательский файл идёт через WebAudio, а не через элемент <audio>.
+  // Причина не в красоте: страница отдаётся под CSP `default-src 'self'`,
+  // который закрывает и media-src, поэтому data-URL в <audio> браузер блокирует
+  // молча — у всех, кто загрузил свой звук, сигнал фандинга был беззвучным.
+  // Декодированный буфер к сети отношения не имеет и под запрет не попадает.
+  let c: AudioContext;
+  try {
+    c = ctx();
+  } catch {
+    return;
+  }
+  const play = (buf: AudioBuffer) => {
+    const src = c.createBufferSource();
+    const gain = c.createGain();
+    src.buffer = buf;
+    gain.gain.value = getAlertVolume();
+    src.connect(gain).connect(c.destination);
+    src.start();
+  };
+  const run = () => {
+    void decodeCustom(c, custom).then((buf) => {
+      if (buf) play(buf);
+      else playChime(); // файл не читается — лучше встроенный чайм, чем тишина
+    });
+  };
+  if (c.state === 'suspended') c.resume().then(run, () => {});
+  else run();
+}
+
+// Декодированный пользовательский звук держим в памяти: разбор base64 и
+// decodeAudioData на двухмегабайтном файле стоят заметно дороже самого сигнала.
+let customBuf: { url: string; buf: AudioBuffer } | null = null;
+
+function decodeCustom(c: AudioContext, url: string): Promise<AudioBuffer | null> {
+  if (customBuf && customBuf.url === url) return Promise.resolve(customBuf.buf);
+  const comma = url.indexOf(',');
+  if (comma < 0) return Promise.resolve(null);
+  let bytes: ArrayBuffer;
+  try {
+    const bin = atob(url.slice(comma + 1));
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    bytes = arr.buffer;
+  } catch {
+    return Promise.resolve(null);
+  }
+  return c.decodeAudioData(bytes).then(
+    (buf) => {
+      customBuf = { url, buf };
+      return buf;
+    },
+    () => null,
+  );
 }
 
 // Двойной двухтональный чайм (A5→E6), ~0.9 с.
