@@ -141,6 +141,10 @@ type Collector struct {
 	// от того, каким источником пришёл принт, зависит его свежесть, а разница
 	// между потоком брокера и публичным фидом ISS — пятнадцать минут.
 	stream StreamStatus
+	// streamCovers — инструменты, на которые подписан быстрый источник. По нему
+	// страница отвечает на вопрос «почему вот эта бумага отстаёт»: всё, чего
+	// здесь нет, идёт лентой ISS и приходит на пятнадцать минут позже.
+	streamCovers map[string]bool
 }
 
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
@@ -159,10 +163,11 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 		det:    det,
 		// Чёрный список снятых серий держим на длину окна анализа: ровно столько
 		// снятая серия ещё видна детектору.
-		reg:        newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
-		day:        newDayVolumes(),
-		hour:       newHourVolumes(),
-		streamHead: make(map[string]time.Time),
+		reg:          newRegistry(opts.StaleAfter, opts.KeepClosed, opts.Detector.Window, maxSessions, det.BeatTol),
+		day:          newDayVolumes(),
+		hour:         newHourVolumes(),
+		streamHead:   make(map[string]time.Time),
+		streamCovers: make(map[string]bool),
 	}
 }
 
@@ -346,7 +351,7 @@ func (c *Collector) streamLoop(ctx context.Context) {
 		return
 	}
 	c.log.Info().Int("symbols", len(symbols)).Msg("robots: быстрый источник подключается")
-	c.setStreamSymbols(len(symbols))
+	c.setStreamSymbols(symbols)
 
 	for attempt := 0; ctx.Err() == nil; attempt++ {
 		prints := make(chan Print, streamBuffer)

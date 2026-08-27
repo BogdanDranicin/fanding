@@ -77,6 +77,11 @@ export interface StreamStatus {
   last_print_at?: string;
   /** Замеренное отставание потока от биржи, миллисекунды. 0 — ещё не мерили. */
   lag_ms: number;
+  /**
+   * Инструменты, которых нет в каталоге брокера: только их лента и остаётся
+   * пятнадцатиминутной. Пусто — потоком покрыто всё наблюдение.
+   */
+  missing?: string[];
 }
 
 export interface RobotsResponse {

@@ -1,6 +1,10 @@
 package robots
 
-import "time"
+import (
+	"sort"
+	"strings"
+	"time"
+)
 
 // lagAlpha — вес свежего замера в скользящем среднем отставания. Отдельные принты
 // приходят пачками и рвано, поэтому в отчёт идёт сглаженная величина, а не последняя.
@@ -30,6 +34,11 @@ type StreamStatus struct {
 	// LagMs — замеренное отставание потока: сколько проходит от биржевой метки
 	// сделки до её появления у нас, миллисекунды. Ноль — ещё не мерили.
 	LagMs int64 `json:"lag_ms"`
+	// Missing — инструменты, за которыми мы следим, но которых нет в каталоге
+	// брокера: только по ним лента и остаётся пятнадцатиминутной. Список, а не
+	// счётчик, потому что вопрос «откуда задержка» задаётся про конкретную
+	// бумагу, и ответ «у этих двух» кончает разговор, а «у скольких-то» — нет.
+	Missing []string `json:"missing,omitempty"`
 }
 
 // StreamStatus — срез состояния быстрого источника для API.
@@ -38,12 +47,34 @@ func (c *Collector) StreamStatus() StreamStatus {
 	defer c.mu.Unlock()
 	st := c.stream
 	st.Enabled = c.opts.Stream != nil
+	st.Missing = c.uncoveredLocked()
 	return st
 }
 
-func (c *Collector) setStreamSymbols(n int) {
+// uncoveredLocked — за какими инструментами мы следим мимо быстрого источника.
+// Считается по тем, чья лента реально идёт: список правил отбора тут не годится,
+// он описывает намерение, а не факт. Must be called while holding c.mu.
+func (c *Collector) uncoveredLocked() []string {
+	if len(c.streamCovers) == 0 {
+		return nil
+	}
+	var out []string
+	for _, sym := range c.det.Symbols() {
+		if !c.streamCovers[sym] {
+			out = append(out, sym)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (c *Collector) setStreamSymbols(symbols []string) {
 	c.mu.Lock()
-	c.stream.Symbols = n
+	c.stream.Symbols = len(symbols)
+	c.streamCovers = make(map[string]bool, len(symbols))
+	for _, sym := range symbols {
+		c.streamCovers[strings.ToUpper(sym)] = true
+	}
 	c.mu.Unlock()
 }
 
