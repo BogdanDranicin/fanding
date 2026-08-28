@@ -154,41 +154,6 @@ function SourceChip({ stream }: { stream: StreamStatus | null }) {
   );
 }
 
-// SourceNote — то же самое словами, для раздела «Как это работает».
-function SourceNote({ stream }: { stream: StreamStatus | null }) {
-  if (!stream || !stream.enabled) {
-    return (
-      <>
-        Лента идёт из публичного фида MOEX ISS, а он приходит с задержкой ровно
-        в 15 минут: время до удара здесь — продолжение такта вперёд по известному
-        периоду, а не наблюдение.
-      </>
-    );
-  }
-  if (!stream.connected) {
-    return (
-      <>
-        Поток брокера сейчас оборван, лента идёт из публичного фида MOEX ISS —
-        это задержка в 15 минут, и время до удара пока чистая экстраполяция.
-        Соединение восстанавливается само.
-      </>
-    );
-  }
-  const missing = stream.missing ?? [];
-  return (
-    <>
-      Принты приходят потоком брокера
-      {stream.symbols > 0 && <> по {stream.symbols} инструментам</>}
-      {stream.lag_ms > 0 && <>, отставание от биржи {lagLabel(stream.lag_ms)}</>}
-      {' '}— время до удара считается почти по наблюдению.
-      {' '}
-      {missing.length === 0
-        ? 'Потоком покрыто всё наблюдение — пятнадцатиминутной ленты ISS здесь не осталось.'
-        : `Мимо потока идут только ${missing.join(', ')} — их нет в каталоге брокера, и по ним лента ISS отстаёт на 15 минут.`}
-    </>
-  );
-}
-
 // beep — короткий сигнал через WebAudio. Готовых звуковых файлов не держим:
 // страница отдаётся под строгим CSP, а осциллятор не требует внешних ресурсов.
 function beep(ctx: AudioContext, freq: number, durationSec: number) {
@@ -667,7 +632,6 @@ export function RobotsPage() {
   const [tab, setTab] = useState<Tab>('live');
   const [rows, setRows] = useState<RobotSession[]>([]);
   const [watching, setWatching] = useState<string[]>([]);
-  const [tapes, setTapes] = useState<string[]>([]);
   const [watchRule, setWatchRule] = useState('');
   const [days, setDays] = useState<DayVolume[]>([]);
   const [stream, setStream] = useState<StreamStatus | null>(null);
@@ -712,7 +676,6 @@ export function RobotsPage() {
         const data = (await resp.json()) as RobotsResponse;
         setRows(data.robots ?? []);
         setWatching(data.watching ?? []);
-        setTapes(data.tapes ?? []);
         setWatchRule(data.watch_rule ?? '');
         setDays(data.day_volumes ?? []);
         setStream(data.stream ?? null);
