@@ -224,7 +224,7 @@ func (c *Collector) Snapshot() []Session {
 		// и окно от «сейчас» было бы пустым в своей свежей четверти.
 		out[i].fill(now,
 			c.day.get(out[i].Symbol, out[i].LastSeen),
-			c.hour.get(out[i].Symbol, out[i].LastSeen))
+			c.hour.window(out[i].Symbol, out[i].LastSeen, out[i].baseMinutes()))
 	}
 	return out
 }
@@ -579,7 +579,9 @@ func (c *Collector) scanOnce(ctx context.Context) {
 		row := rowOf(*s)
 		// Обороты бумаги записываем вместе со строкой: они живут только в памяти
 		// сбора, и к моменту, когда историю откроют, их уже неоткуда взять.
-		row.HourLots = c.hour.get(s.Symbol, s.LastSeen).Total()
+		// То же окно сравнения, что и у живого среза, иначе сила у сохранённой
+		// строки означала бы не то же самое, что была видна на странице.
+		row.HourLots = c.hour.window(s.Symbol, s.LastSeen, s.baseMinutes()).Total()
 		row.DaySideLots = c.day.get(s.Symbol, s.LastSeen).Side(s.Side)
 		rows = append(rows, row)
 	}

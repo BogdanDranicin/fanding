@@ -9,6 +9,9 @@ const fmtDayClock = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
+const fmtShort = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit',
+});
 const fmtLots = new Intl.NumberFormat('ru-RU');
 
 // TICK_MS — с этим шагом пересчитываются обратные отсчёты и проверяется, не пора
@@ -24,6 +27,12 @@ const DEFAULT_THRESHOLD = 10;
 
 function clock(iso: string): string {
   try { return fmtClock.format(new Date(iso)); } catch { return iso; }
+}
+// shortClock — часы и минуты. Полное время с секундами уезжает в подсказку и в
+// подробности: пара меток «12:13:57–17:40:29» в одной графе не помещается ни на
+// каком разумном экране, а на вопрос «давно ли работает» отвечают и минуты.
+function shortClock(iso: string): string {
+  try { return fmtShort.format(new Date(iso)); } catch { return iso; }
 }
 function dayClock(iso: string): string {
   try { return fmtDayClock.format(new Date(iso)); } catch { return iso; }
@@ -278,13 +287,13 @@ function RangeFilter({ label, unit, value, onChange }: {
 // 0008), а не пряталось в разметке: теперь оба знаменателя сохраняются вместе
 // со строкой, и сила у сохранённых роботов настоящая.
 const COLUMNS_LIVE = [
-  'тикер', 'направление', 'объём за раз', 'тайминг', 'поток',
-  'до удара', 'сила', 'ход цены', 'объём серии', 'статус',
+  '', 'объём за раз', 'тайминг', 'поток', 'сила',
+  'перв/последн', 'до удара', 'ход цены', 'объём серии', 'статус',
 ] as const;
 
 const COLUMNS_HISTORY = [
-  'тикер', 'направление', 'объём за раз', 'тайминг', 'поток',
-  'уверенность', 'сила', 'ход цены', 'объём серии', 'когда',
+  '', 'объём за раз', 'тайминг', 'поток', 'сила',
+  'перв/последн', 'уверенность', 'ход цены', 'объём серии', 'когда',
 ] as const;
 
 /** Класс сетки строки. Живая строка шире на колонку кнопки сигнала. */
@@ -340,15 +349,11 @@ interface RowProps {
   armed: boolean;
   onToggleAlarm: (id: number) => void;
   day?: DayVolume;
-  /** Строка лежит внутри группы одной бумаги — тикер там уже назван выше. */
-  nested?: boolean;
-  /** Справочные данные бумаги; подписываются под строкой, если она не вложенная. */
-  inst?: Instrument;
 }
 
 // RobotRow — один робот. В свёрнутом виде — графы таблицы, по клику раскрываются
 // подробности серии.
-function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested, inst }: RowProps) {
+function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowProps) {
   // Подробности строки рисуются только раскрытыми. Содержимое <details> лежит в
   // DOM независимо от того, открыт он или нет, и на истории за неделю это была
   // тысяча строк по полсотни узлов каждая: вкладка вставала на десятки секунд,
@@ -363,8 +368,7 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
 
   // Сильный робот подсвечивается в свою сторону: зелёный — набирает, красный — льёт.
   const strong = r.strength_pct >= threshold && r.strength_pct > 0;
-  const classes = ['jrn-card', 'rb-card'];
-  if (nested) classes.push('rb-nested');
+  const classes = ['rb-card'];
   if (r.misses > 0) classes.push('rb-missed');
   if (strong) classes.push(long ? 'rb-strong-long' : 'rb-strong-short');
 
@@ -376,13 +380,15 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           ещё и подробности, и они не должны попадать в колонки таблицы.
           Живая строка шире на колонку кнопки сигнала — в истории её нет. */}
       <summary className={`rb-summary ${rowClass(live)}`}>
-        <Cell label="тикер" className="rb-symbol">
-          <span className="rb-symbol-val">{r.symbol}</span>
-        </Cell>
-
-        <Cell label="направление">
-          <span className={`rb-side ${long ? 'rb-long' : 'rb-short'}`}>
-            {long ? 'ЛОНГ' : 'ШОРТ'}
+        {/* Сторона — метка, а не слово: тикер теперь стоит в шапке бумаги, а
+            «ЛОНГ»/«ШОРТ» занимали целую графу ради одного бита. Цвет и стрелка
+            читаются с той же скоростью и оставляют место числам. */}
+        <Cell label="сторона" className="rb-side-col">
+          <span
+            className={`rb-mark ${long ? 'rb-long' : 'rb-short'}`}
+            title={long ? 'Агрессор покупает — робот набирает' : 'Агрессор продаёт — робот льёт'}
+          >
+            {long ? '▲' : '▼'}
           </span>
         </Cell>
 
@@ -403,10 +409,23 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           </span>
         </Cell>
 
+        <Cell label="перв/последн">
+          <span className="rb-val rb-dim rb-span" title={`${dayClock(r.first_seen)} — ${dayClock(r.last_seen)}`}>
+            {shortClock(r.first_seen)}–{shortClock(r.last_seen)}
+          </span>
+        </Cell>
+
         {live && (
           <Cell label="до удара">
             {r.active
-              ? <span className={`rb-val rb-beat${beatSoon ? ' rb-beat-soon' : ''}`}>{countdown(left)}</span>
+              ? (
+                <span
+                  className={`rb-val rb-beat${beatSoon ? ' rb-beat-soon' : ''}`}
+                  title={beatMs ? `следующий принт в ${clock(new Date(beatMs).toISOString())}` : ''}
+                >
+                  {countdown(left)}
+                </span>
+              )
               : <Dash />}
           </Cell>
         )}
@@ -425,8 +444,8 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
               <span
                 className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
               title={r.hour_lots > 0
-                ? `Принт ${volumeLabel(once)} к обороту ${volumeLabel(r.hour_lots)} за час ${r.hour_from}–${r.hour_to}`
-                  : 'Часового оборота по бумаге не сохранилось'}
+                ? `${rateLabel(rateOf(r))} робота против оборота ${volumeLabel(r.hour_lots)} по бумаге за ${r.hour_from}–${r.hour_to}`
+                  : 'Оборота по бумаге для сравнения не сохранилось'}
               >
                 {strengthLabel(r.strength_pct)}
               </span>
@@ -472,10 +491,6 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
         )}
 
         <span className="jrn-chevron" aria-hidden="true">▸</span>
-
-        {/* У бумаги с единственным роботом обёртки-группы нет, и подписать её
-            больше негде. */}
-        {!nested && inst && <InstrumentNote inst={inst} />}
       </summary>
 
       {open && <div className="jrn-details">
@@ -507,12 +522,12 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           <Detail label="Суммарный объём серии" value={volumeLabel(volume)} />
           {r.hour_lots > 0 && (
             <Detail
-              label={`Оборот бумаги за час ${r.hour_from}–${r.hour_to}`}
+              label={`Оборот бумаги за ${r.hour_from}–${r.hour_to}`}
               value={volumeLabel(r.hour_lots)}
             />
           )}
           {r.hour_since && (
-            <Detail label="Часовой оборот считается с" value={`${r.hour_since} МСК`} />
+            <Detail label="Оборот для сравнения считается с" value={`${r.hour_since} МСК`} />
           )}
           {r.day_side_lots > 0 && (
             <Detail
@@ -543,246 +558,125 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
   );
 }
 
-// InstrumentNote — подпись бумаги под строкой-итогом: имя, шаг цены, размер лота.
+// PaperHead — полоса бумаги над её роботами: тикер, имя, справочные величины и
+// то, что роботы этой бумаги делают вместе.
 //
-// Без неё страница показывала голый код. «AFLT» ещё узнаваем, а «CRU6» — уже нет,
-// и главное: лотовка робота считается в лотах, и без размера лота непонятно, идёт
-// речь о трёхстах бумагах или о трёхстах тысячах. Шаг цены нужен, чтобы прочесть
-// графу «ход цены»: полпроцента на бумаге с шагом 0.0005 и с шагом рубль — это
-// совершенно разное число тиков.
-function InstrumentNote({ inst }: { inst: Instrument }) {
-  const parts: string[] = [];
-  if (inst.min_step > 0) parts.push(`шаг ${inst.min_step.toLocaleString('ru-RU', { maximumFractionDigits: 6 })}`);
-  if (inst.lot_size > 0) {
-    parts.push(inst.lot_size === 1 ? 'лот — 1 бумага' : `${fmtLots.format(inst.lot_size)} бумаг в лоте`);
+// Раньше на этом месте была строка-итог по тем же графам, что и у роботов ниже.
+// Читалась она плохо: те же колонки, но значения в них означали разное —
+// «самый крупный принт», «самый частый такт», — и глаз всё время спотыкался,
+// пытаясь сравнить итог со строками под ним. Полоса не притворяется строкой
+// таблицы: она подписывает бумагу и сводит роботов одной фразой.
+function PaperHead({ symbol, rows, inst, live, threshold }: {
+  symbol: string;
+  rows: RobotSession[];
+  inst?: Instrument;
+  live: boolean;
+  threshold: number;
+}) {
+  const longs = rows.filter((r) => r.side === 'B');
+  const shorts = rows.filter((r) => r.side === 'S');
+  // Сила стороны складывается: это доли одного и того же потока бумаги.
+  const sumPct = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + r.strength_pct, 0);
+  const longPct = sumPct(longs);
+  const shortPct = sumPct(shorts);
+  const leadLong = longPct >= shortPct;
+  const leadPct = Math.max(longPct, shortPct);
+  const strong = leadPct >= threshold && leadPct > 0;
+
+  const active = rows.filter((r) => r.active).length;
+  const rate = rows.reduce((acc, r) => acc + (r.active || !live ? rateOf(r) : 0), 0);
+
+  const spec: string[] = [];
+  if (inst?.min_step) {
+    spec.push(`шаг ${inst.min_step.toLocaleString('ru-RU', { maximumFractionDigits: 6 })}`);
   }
-  if (!inst.name && parts.length === 0) return null;
+  if (inst?.lot_size) {
+    spec.push(inst.lot_size === 1 ? 'лот — 1 бумага' : `${fmtLots.format(inst.lot_size)} бумаг в лоте`);
+  }
+
   return (
-    <div className="rb-instrument">
-      {inst.name && <span className="rb-instrument-name">{inst.name}</span>}
-      {parts.length > 0 && <span className="rb-instrument-spec">{parts.join(' · ')}</span>}
+    <div className="rb-paper-head">
+      <span className={`rb-ticker${strong ? (leadLong ? ' rb-ticker-long' : ' rb-ticker-short') : ''}`}>
+        {symbol}
+      </span>
+
+      <span className="rb-paper-about">
+        {inst?.name && <span className="rb-paper-name">{inst.name}</span>}
+        {spec.length > 0 && <span className="rb-paper-spec">{spec.join(' · ')}</span>}
+      </span>
+
+      <span className="rb-paper-sums">
+        <span className="rb-paper-sum" title="Роботов на бумаге, из них печатают сейчас">
+          {live ? `${active} из ${rows.length}` : `${rows.length}`}
+          <span className="rb-paper-sum-label">роботов</span>
+        </span>
+        {rate > 0 && (
+          <span className="rb-paper-sum" title="Сколько лотов в минуту качают роботы бумаги вместе">
+            {rateLabel(rate)}
+          </span>
+        )}
+        {leadPct > 0 && (
+          <span
+            className={`rb-paper-sum ${leadLong ? 'rb-long' : 'rb-short'}`}
+            title={`Роботы ${leadLong ? 'лонга' : 'шорта'} делают ${strengthLabel(leadPct)} потока бумаги`}
+          >
+            {leadLong ? '▲' : '▼'} {strengthLabel(leadPct)}
+            <span className="rb-paper-sum-label">потока</span>
+          </span>
+        )}
+      </span>
     </div>
   );
 }
 
-// SymbolGroup — все роботы одной бумаги под общей строкой-итогом.
-interface GroupProps extends Omit<RowProps, 'r' | 'armed'> {
+// PaperGroup — бумага целиком: полоса с её описанием и роботы под ней.
+interface GroupProps extends Omit<RowProps, 'r' | 'armed' | 'nested' | 'inst'> {
   symbol: string;
   rows: RobotSession[];
   armedIds: Set<number>;
   inst?: Instrument;
 }
 
-function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day, inst }: GroupProps) {
-  const [open, setOpen] = useState(false);
+function PaperGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day, inst }: GroupProps) {
   const [doneOpen, setDoneOpen] = useState(false);
-  // В живом срезе робот, который замолчал, остаётся в ответе ещё сутки — это и есть
+  // В живом срезе замолчавший робот остаётся в ответе ещё сутки — это и есть
   // «завершённые». В истории замолчали все, и делить там нечего.
   const working = live ? rows.filter((r) => r.active) : rows;
   const finished = live ? rows.filter((r) => !r.active) : [];
-  const longs = rows.filter((r) => r.side === 'B');
-  const shorts = rows.filter((r) => r.side === 'S');
-  const sum = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + volumeOf(r), 0);
-  const longVol = sum(longs);
-  const shortVol = sum(shorts);
 
-  // Часовой оборот бумаги считается на сервере от последнего принта робота, у
-  // роботов одной бумаги он практически совпадает; берём максимум как наиболее
-  // свежее окно.
-  const hourLots = Math.max(...rows.map((r) => r.hour_lots), 0);
-
-  // Итоговая сила складывается по стороне. Складывать теперь можно и нужно: сила —
-  // это доля потока бумаги, которую делает робот, а доли одного и того же потока
-  // суммируются. Раньше силой был вес одного принта, и сумма таких весов не значила
-  // ничего — приходилось брать максимум и терять всю остальную сторону.
-  const sumPct = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + r.strength_pct, 0);
-  const longPct = sumPct(longs);
-  const shortPct = sumPct(shorts);
-  // Поток бумаги от роботов целиком — сколько лотов в минуту они прокачивают вместе.
-  const groupRate = rows.reduce((acc, r) => acc + rateOf(r), 0);
-  // Ход цены по бумаге: от самого раннего принта её роботов до самого свежего.
-  const earliest = rows.reduce((a, r) => (r.first_seen < a.first_seen ? r : a), rows[0]);
-  const latest = rows.reduce((a, r) => (r.last_seen > a.last_seen ? r : a), rows[0]);
-  const groupMove = priceMove(earliest.price_first, latest.price_last);
-  const leadLong = longPct >= shortPct;
-  const leadPct = Math.max(longPct, shortPct);
-
-  // Ближайший удар по бумаге — самый скорый среди работающих роботов.
-  const nextMs = live
-    ? rows
-      .filter((r) => r.active)
-      .map((r) => nextBeatAt(r, nowMs))
-      .filter((ms) => ms > 0)
-      .reduce((min, ms) => (min === 0 || ms < min ? ms : min), 0)
-    : 0;
-
-  // Графы итога — ровно те же, что у строки робота, и считаются как «худший или
-  // самый заметный из своих». Раньше у итога был свой набор граф (оборот за час,
-  // ближайший удар), не совпадавший ни с чем ниже: две шапки подряд с разными
-  // словами читались как две разные таблицы, а половина их значений была прочерками.
-  const biggestPrint = Math.max(...rows.map(printOf), 0);
-  const fastest = Math.min(...rows.map((r) => r.period_sec));
-
-  const missed = rows.some((r) => r.misses > 0);
-  const active = rows.filter((r) => r.active).length;
-  // Последний признак жизни бумаги — самый свежий принт среди её роботов.
-  const lastSeen = rows.reduce((a, r) => (r.last_seen > a ? r.last_seen : a), rows[0].last_seen);
-  const firstSeen = rows.reduce((a, r) => (r.first_seen < a ? r.first_seen : a), rows[0].first_seen);
-  const bestConfidence = Math.max(...rows.map((r) => r.confidence));
-  const strong = leadPct >= threshold && leadPct > 0;
-  const classes = ['rb-group'];
-  if (missed) classes.push('rb-missed');
-  if (strong) classes.push(leadLong ? 'rb-strong-long' : 'rb-strong-short');
+  const row = (r: RobotSession) => (
+    <RobotRow
+      key={`${r.id}-${r.first_seen}`}
+      r={r}
+      nowMs={nowMs}
+      live={live}
+      threshold={threshold}
+      armed={armedIds.has(r.id)}
+      onToggleAlarm={onToggleAlarm}
+      day={day}
+    />
+  );
 
   return (
-    <details
-      className={classes.join(' ')}
-      open={open}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-    >
-      <summary className={`rb-summary ${rowClass(live)}`}>
-        <Cell label="тикер" className="rb-symbol">
-          <span className="rb-symbol-val">{symbol}</span>
-          <span className="rb-badge" title={`роботов на бумаге: ${rows.length}`}>{rows.length}</span>
-        </Cell>
+    <section className="rb-paper">
+      <PaperHead symbol={symbol} rows={rows} inst={inst} live={live} threshold={threshold} />
+      {working.map(row)}
 
-        <Cell label="направление">
-          <span className="rb-val rb-mix">
-            {longs.length > 0 && <span className="rb-long">{longs.length} Л</span>}
-            {longs.length > 0 && shorts.length > 0 && <span className="rb-mix-sep">/</span>}
-            {shorts.length > 0 && <span className="rb-short">{shorts.length} Ш</span>}
-          </span>
-        </Cell>
-
-        <Cell label="объём за раз">
-          <span className="rb-val" title="Самый крупный принт среди роботов бумаги">
-            {volumeLabel(biggestPrint)}
-          </span>
-        </Cell>
-
-        <Cell label="тайминг">
-          <span className="rb-val rb-period" title="Самый частый такт среди роботов бумаги">
-            {period(fastest)}
-          </span>
-        </Cell>
-
-        <Cell label="поток">
-          <span className="rb-val rb-dim" title="Сколько лотов в минуту качают роботы бумаги вместе">
-            {rateLabel(groupRate)}
-          </span>
-        </Cell>
-
-        {live && (
-          <Cell label="до удара">
-            {nextMs > 0
-              ? (
-                <span className={`rb-val rb-beat${nextMs - nowMs <= ALARM_LEAD * 1000 ? ' rb-beat-soon' : ''}`}>
-                  {countdown(nextMs - nowMs)}
-                </span>
-              )
-              : <Dash />}
-          </Cell>
-        )}
-
-        {!live && (
-          <Cell label="уверенность">
-            <span className="rb-val rb-dim" title="Лучшая уверенность среди роботов бумаги">
-              {confidenceLabel(bestConfidence)}
-            </span>
-          </Cell>
-        )}
-
-        <Cell label="сила">
-          {leadPct > 0
-              ? (
-                <span
-                  className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
-                  title={hourLots > 0
-                    ? `Роботы ${leadLong ? 'лонга' : 'шорта'} делают ${strengthLabel(leadPct)} потока бумаги (оборот за час ${volumeLabel(hourLots)})`
-                    : 'Сила роботов ведущей стороны'}
-              >
-                {strengthLabel(leadPct)}
-              </span>
-            )
-            : <Dash />}
-        </Cell>
-
-        <Cell label="ход цены">
-          <span
-            className={`rb-val${moveClass(groupMove)}`}
-            title={`${price(earliest.price_first)} → ${price(latest.price_last)} за время работы роботов бумаги`}
-          >
-            {moveLabel(groupMove)}
-          </span>
-        </Cell>
-
-        <Cell label="объём серии">
-          <span className="rb-val rb-dim" title={`лонг ${volumeLabel(longVol)} · шорт ${volumeLabel(shortVol)}`}>
-            {volumeLabel(longVol + shortVol)}
-          </span>
-        </Cell>
-
-        <Cell label={live ? 'статус' : 'когда'} className="rb-status-col">
-          {!live
-            ? <span className="rb-status rb-stopped">{dayClock(firstSeen)} – {clock(lastSeen)}</span>
-            : missed
-              ? <span className="rb-status rb-warn">пропустил такт</span>
-              : active > 0
-                ? <span className="rb-status rb-active">работает {active} из {rows.length}</span>
-                : <span className="rb-status rb-stopped">замолчал в {clock(lastSeen)}</span>}
-        </Cell>
-
-        {live && <span className="rb-group-spacer" />}
-        <span className="jrn-chevron" aria-hidden="true">▸</span>
-
-        {/* Подпись занимает всю ширину строки, поэтому лежит внутри summary:
-            иначе она была бы видна только у раскрытой группы, а нужна всегда. */}
-        {inst && <InstrumentNote inst={inst} />}
-      </summary>
-
-      {open && <div className="rb-group-body">
-        {working.map((r) => (
-          <RobotRow
-            key={`${r.id}-${r.first_seen}`}
-            r={r}
-            nowMs={nowMs}
-            live={live}
-            threshold={threshold}
-            armed={armedIds.has(r.id)}
-            onToggleAlarm={onToggleAlarm}
-            day={day}
-            nested
-          />
-        ))}
-
-        {/* Замолчавшие роботы бумаги — отдельным свёрнутым списком, а не вперемешку
-            с работающими. Смешанными они мешали: живой список читают, чтобы понять,
-            что происходит прямо сейчас, а вчерашний робот выглядит в нём ровно как
-            сегодняшний. При этом выбрасывать их нельзя — по ним видно, кто на этой
-            бумаге работал и с каким тактом, и вернулся ли он. */}
-        {finished.length > 0 && (
-          <details className="rb-finished" onToggle={(e) => setDoneOpen(e.currentTarget.open)}>
-            <summary className="rb-finished-summary">
-              <span className="jrn-chevron" aria-hidden="true">▸</span>
-              Завершённые роботы: {finished.length}
-            </summary>
-            {doneOpen && finished.map((r) => (
-              <RobotRow
-                key={`${r.id}-${r.first_seen}`}
-                r={r}
-                nowMs={nowMs}
-                live={live}
-                threshold={threshold}
-                armed={armedIds.has(r.id)}
-                onToggleAlarm={onToggleAlarm}
-                day={day}
-                nested
-              />
-            ))}
-          </details>
-        )}
-      </div>}
-    </details>
+      {/* Замолчавшие роботы — отдельным свёрнутым списком, а не вперемешку с
+          работающими: живой список читают, чтобы понять, что происходит прямо
+          сейчас, а вчерашний робот выглядит в нём ровно как сегодняшний.
+          Выбрасывать их при этом нельзя — по ним видно, кто на бумаге работал,
+          с каким тактом и вернулся ли он. */}
+      {finished.length > 0 && (
+        <details className="rb-finished" onToggle={(e) => setDoneOpen(e.currentTarget.open)}>
+          <summary className="rb-finished-summary">
+            <span className="jrn-chevron" aria-hidden="true">▸</span>
+            Завершённые роботы: {finished.length}
+          </summary>
+          {doneOpen && finished.map(row)}
+        </details>
+      )}
+    </section>
   );
 }
 
@@ -1132,35 +1026,18 @@ export function RobotsPage() {
         <div className="jrn-list rb-list">
           <TableHead live={live} />
           {groups.map((g) => (
-            // Бумага с единственным роботом показывается просто строкой: обёртка
-            // повторяла бы своим итогом ровно то, что в этой строке и написано,
-            // и на каждого такого робота уходило вдвое больше места и рамок.
-            g.rows.length === 1 ? (
-              <RobotRow
-                key={g.symbol}
-                r={g.rows[0]}
-                nowMs={nowMs}
-                live={live}
-                threshold={threshold}
-                armed={armedIds.has(g.rows[0].id)}
-                onToggleAlarm={toggleAlarm}
-                day={dayBySymbol.get(g.symbol)}
-                inst={instBySymbol.get(g.symbol)}
-              />
-            ) : (
-              <SymbolGroup
-                key={g.symbol}
-                symbol={g.symbol}
-                rows={g.rows}
-                nowMs={nowMs}
-                live={live}
-                threshold={threshold}
-                armedIds={armedIds}
-                onToggleAlarm={toggleAlarm}
-                day={dayBySymbol.get(g.symbol)}
-                inst={instBySymbol.get(g.symbol)}
-              />
-            )
+            <PaperGroup
+              key={g.symbol}
+              symbol={g.symbol}
+              rows={g.rows}
+              nowMs={nowMs}
+              live={live}
+              threshold={threshold}
+              armedIds={armedIds}
+              onToggleAlarm={toggleAlarm}
+              day={dayBySymbol.get(g.symbol)}
+              inst={instBySymbol.get(g.symbol)}
+            />
           ))}
         </div>
       )}

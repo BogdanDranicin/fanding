@@ -1569,49 +1569,43 @@ details[open] > .accordion-summary::before {
 
 /* ── Таблица роботов ──────────────────────────────────────────────────────────
 
-   Одна сетка на шапку, на итог по бумаге и на строку робота: только так три
-   уровня читаются как одна таблица, а не как три разных.
+   Список устроен как у биржевых скринеров: бумага объявляется полосой, под ней
+   плотными строками идут её роботы. Одна сетка на шапку и на все строки — только
+   так десять граф читаются как таблица, а не как десять подписанных значений.
 
    Подпись графы раньше лежала ВНУТРИ каждой ячейки и повторялась столько раз,
-   сколько на странице строк. На полусотне роботов это сотня слов «НАПРАВЛЕНИЕ»
-   и «СУММАРНЫЙ ОБЪЁМ», между которыми терялись сами числа. Теперь подпись одна —
-   в шапке; на узком экране, где сетка рассыпается, её возвращает .rb-col::before
-   из data-label — там она и правда нужна.
+   сколько на странице строк. На полусотне роботов это сотня одинаковых слов,
+   между которыми терялись числа. Теперь подпись одна — в шапке; на узком экране,
+   где сетка рассыпается, её возвращает .rb-col::before из data-label.
 
-   Колонки: тикер · направление · объём за раз · тайминг · поток · до удара ·
-   сила · ход цены · объём серии · статус (+ кнопка сигнала в живом срезе) + шеврон. */
+   Графы: сторона · объём за раз · тайминг · поток · сила · первый–последний ·
+   до удара · ход цены · объём серии · статус (+ кнопка сигнала) + шеврон. */
 .rb-row {
   display: grid;
   grid-template-columns:
-    minmax(84px, 1fr)            /* тикер */
-    minmax(72px, 0.8fr)          /* направление */
-    repeat(7, minmax(72px, 1fr)) /* объём за раз … объём серии */
-    minmax(120px, 1.2fr)         /* статус */
-    14px;                        /* шеврон */
-  align-items: center;
-  gap: 4px 12px;
-}
-
-/* История: граф семь — «до удара» и «силы» в ней не бывает, вместо них
-   уверенность и дата. Свой шаг колонок, иначе строка растянулась бы по сетке
-   живого среза и справа зияли бы две пустые графы. */
-.rb-row-hist {
-  grid-template-columns:
-    minmax(84px, 1fr)            /* тикер */
-    minmax(72px, 0.8fr)          /* направление */
-    repeat(6, minmax(72px, 1fr)) /* объём за раз … объём серии */
-    minmax(140px, 1.4fr)         /* когда */
-    14px;                        /* шеврон */
+    22px                          /* сторона */
+    repeat(4, minmax(70px, 1fr))  /* объём за раз … сила */
+    minmax(92px, 1.1fr)           /* первый–последний */
+    minmax(64px, 0.85fr)          /* до удара либо уверенность */
+    minmax(64px, 0.85fr)          /* ход цены */
+    minmax(76px, 1fr)             /* объём серии */
+    minmax(104px, 1.2fr)          /* статус либо когда */
+    14px;                         /* шеврон */
+  align-items: stretch;
+  gap: 0;
 }
 
 /* В живом срезе к строке добавляется кнопка сигнала — ещё одна колонка. */
 .rb-row-live {
   grid-template-columns:
-    minmax(84px, 1fr)
-    minmax(72px, 0.8fr)
-    repeat(7, minmax(72px, 1fr))
-    minmax(120px, 1.2fr)
-    28px
+    22px
+    repeat(4, minmax(70px, 1fr))
+    minmax(92px, 1.1fr)
+    minmax(64px, 0.85fr)
+    minmax(64px, 0.85fr)
+    minmax(76px, 1fr)
+    minmax(104px, 1.2fr)
+    30px
     14px;
 }
 
@@ -1620,13 +1614,13 @@ details[open] > .accordion-summary::before {
 .rb-head {
   position: sticky;
   top: 0;
-  z-index: 2;
-  padding: 8px 14px;
+  z-index: 3;
   background: var(--bg-primary);
   border-bottom: 1px solid var(--border-strong);
 }
 
 .rb-head-cell {
+  padding: 7px 8px;
   font-size: 10px;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -1638,11 +1632,27 @@ details[open] > .accordion-summary::before {
 
 .rb-col {
   display: flex;
-  /* По левому краю, а не во всю ширину графы: подсветка силы — это фон значения,
-     и растянутый на всю колонку он читался как заливка ячейки таблицы. */
   align-items: center;
   gap: 6px;
   min-width: 0;
+  padding: 7px 8px;
+  /* Разделители между графами — как в биржевом стакане: без них десять чисел в
+     строке сливаются в ленту цифр. Линия тонкая и приглушённая, чтобы держать
+     колонки, но не рисовать клетку поверх данных. */
+  border-left: 1px solid var(--border);
+}
+
+/* У первой графы разделителя нет — он совпал бы с рамкой самой строки. */
+.rb-row > .rb-col:first-child,
+.rb-row > .rb-head-cell:first-child { border-left: 0; }
+
+/* Значения, которые могут не поместиться, обрезаем многоточием, а не выпускаем
+   за пределы графы: одна длинная ячейка не должна раздвигать всю таблицу. */
+.rb-val,
+.rb-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Прочерк не должен весить столько же, сколько число: пустых граф на странице
@@ -1653,34 +1663,29 @@ details[open] > .accordion-summary::before {
 }
 
 .rb-val {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.rb-symbol-val {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.02em;
-}
+/* Сторона — цветная стрелка вместо слова: тикер стоит в полосе бумаги, а на
+   «ЛОНГ»/«ШОРТ» уходила целая графа ради одного бита. */
+.rb-side-col { justify-content: center; padding-left: 4px; padding-right: 4px; }
+.rb-mark { font-size: 11px; line-height: 1; }
 
 /* Период — главная величина на странице, выделяем его. */
 .rb-period { color: var(--accent-up); }
 
-.rb-side {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
+/* Пара меток времени идёт мельче: это справка о том, давно ли робот работает,
+   а не число, которое сравнивают между строками. */
+.rb-span { font-size: 12px; }
 
 .rb-long { color: var(--accent-up); }
 .rb-short { color: var(--accent-down); }
 
 .rb-summary {
-  padding: 9px 14px;
   cursor: pointer;
   user-select: none;
   list-style: none;
@@ -1692,8 +1697,9 @@ details[open] > .accordion-summary::before {
 .rb-status-col { min-width: 0; }
 
 .rb-status {
-  font-size: 13px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .rb-active {
@@ -1705,21 +1711,27 @@ details[open] > .accordion-summary::before {
 
 /* На узком экране жёсткий шаг колонок не влезает — графы раскладываются по
    месту, и вот здесь подпись у каждой из них незаменима: без неё пришлось бы
-   листать таблицу вбок, чего на этой странице быть не должно. */
-@media (max-width: 900px) {
+   листать таблицу вбок, чего на этой странице быть не должно.
+
+   Порог выше суммы минимальных ширин колонок (около 820 пикселей плюс поля):
+   ниже него сетка не сжимается, а вылезает за край. */
+@media (max-width: 1000px) {
   .rb-head { display: none; }
 
   .rb-row,
   .rb-row-live {
-    grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
-    gap: 10px 14px;
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+    gap: 8px 10px;
     align-items: start;
+    padding: 8px 12px;
   }
 
   .rb-col {
     flex-direction: column;
     align-items: flex-start;
     gap: 1px;
+    padding: 0;
+    border-left: 0;
   }
 
   .rb-col::before {
@@ -1734,49 +1746,131 @@ details[open] > .accordion-summary::before {
     text-overflow: ellipsis;
   }
 
-  /* Тикер в шапке ячейки не нуждается — он и так крупнее всего остального. */
-  .rb-symbol::before { display: none; }
+  /* Сторона на узком экране становится обычной подписанной ячейкой. */
+  .rb-side-col { justify-content: flex-start; }
+
+  /* Кнопка сигнала занимает свою клетку сетки целиком и выглядит пустой рамкой
+     во всю ширину. Прижимаем к началу — это кнопка, а не поле. */
+  .rb-summary .rb-alarm { justify-self: start; }
+
+  /* На узком экране у стороны своя клетка во всю ширину колонки, и одна стрелка
+     в ней смотрится потерянной. Возвращаем слово: место всё равно занято. */
+  .rb-mark { font-size: 12px; font-weight: 700; }
+  .rb-mark.rb-long::after { content: ' лонг'; }
+  .rb-mark.rb-short::after { content: ' шорт'; }
 }
 
-/* ── Роботы: группировка по бумаге, сила и таймер ─────────────────────────── */
+/* ── Роботы: бумага, её полоса и строки ───────────────────────────────────── */
 
-/* Группа — та же карточка, но на уровень выше: внутри неё лежат строки роботов
-   этой бумаги. Раскрывается кнопкой-шевроном, как и всё остальное на странице. */
-.rb-group {
+/* Бумага — одна карточка на все её строки. Раньше каждый робот лежал в
+   собственной рамке внутри рамки группы: на одного робота приходилось две
+   коробки и две шапки, и список из полусотни строк был списком из ста рамок. */
+.rb-paper {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
 
-.rb-group[open] { border-color: var(--border-strong); }
-
-.rb-group[open] > .rb-summary { border-bottom: 1px solid var(--border); }
-.rb-group[open] > .rb-summary .jrn-chevron { transform: rotate(90deg); }
-
-/* Пустая клетка на месте кнопки сигнала: у итога по бумаге своего сигнала нет,
-   но колонка должна остаться, иначе шеврон уедет под соседнюю графу. */
-.rb-group-spacer { display: block; }
-
-/* Подпись бумаги под строкой-итогом. Лежит внутри summary и занимает всю ширину
-   сетки: строка из имени и справочных величин не колонка таблицы, и втискивать
-   её в графу тикера значило бы обрезать многоточием и то, и другое. */
-.rb-instrument {
-  grid-column: 1 / -1;
+/* Полоса бумаги: тикер, имя со справочными величинами и сводка по её роботам.
+   Намеренно не сетка таблицы — это подпись, а не строка данных. */
+.rb-paper-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 10px;
-  margin-top: 2px;
-  font-size: 12px;
-  line-height: 1.35;
+  gap: 4px 12px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary, var(--bg-primary));
+  border-bottom: 1px solid var(--border-strong);
 }
 
-.rb-instrument-name { color: var(--text-secondary); }
-.rb-instrument-spec { color: var(--text-muted); }
+.rb-ticker {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
 
-/* Завершённые роботы бумаги — свёрнутый список внутри группы. Раскрывается
-   строчкой-ссылкой, а не карточкой: это не самостоятельный раздел, а хвост. */
+/* Сильная сторона перекрашивает тикер: по списку сразу видно, где робот давит,
+   не читая графу силы в каждой строке. */
+.rb-ticker-long {
+  background: var(--accent-up-soft);
+  color: var(--accent-up);
+}
+
+.rb-ticker-short {
+  background: var(--accent-down-soft);
+  color: var(--accent-down);
+}
+
+/* Имя и справка занимают всё свободное место и сжимаются первыми: если строка
+   не помещается, обрезать надо описание, а не числа справа. */
+.rb-paper-about {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.rb-paper-name {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rb-paper-spec {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.rb-paper-sums {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.rb-paper-sum {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rb-paper-sum-label {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* Строка робота — продолжение той же таблицы, а не отдельная карточка. */
+.rb-card {
+  border-top: 1px solid var(--border);
+}
+
+.rb-paper > .rb-card:first-of-type { border-top: 0; }
+
+/* Подсветка строки под курсором: в списке из полусотни строк по десять граф
+   глаз теряет строку на полпути к правому краю. */
+.rb-card > .rb-summary:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.03)); }
+
+.rb-card[open] { background: var(--bg-primary); }
+.rb-card[open] > .rb-summary .jrn-chevron { transform: rotate(90deg); }
+
+/* Завершённые роботы бумаги — свёрнутый хвост, а не самостоятельный раздел. */
 .rb-finished {
   border-top: 1px solid var(--border);
 }
@@ -1785,7 +1879,7 @@ details[open] > .accordion-summary::before {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 14px;
+  padding: 6px 12px;
   cursor: pointer;
   user-select: none;
   list-style: none;
@@ -1797,47 +1891,8 @@ details[open] > .accordion-summary::before {
 .rb-finished-summary::marker { content: none; }
 .rb-finished-summary:hover { color: var(--text-secondary); }
 .rb-finished[open] > .rb-finished-summary .jrn-chevron { transform: rotate(90deg); }
+.rb-finished .rb-card { border-top: 1px solid var(--border); }
 
-/* Строки роботов внутри группы — продолжение той же таблицы, а не вложенные
-   карточки. Раньше каждая лежала в собственной рамке внутри рамки группы:
-   на одного робота приходилось две коробки и две шапки. */
-.rb-group-body {
-  display: flex;
-  flex-direction: column;
-}
-
-.rb-group-body .rb-card {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  border-top: 1px solid var(--border);
-}
-
-.rb-group-body .rb-card:first-child { border-top: 0; }
-
-/* Тикер во вложенной строке уже назван в итоге бумаги — приглушаем, чтобы он
-   не спорил с ним за внимание, но и не пропадал при беглом просмотре. */
-.rb-nested .rb-symbol-val {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-/* Счётчик роботов на бумаге. */
-.rb-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 700;
-  vertical-align: middle;
-}
-
-.rb-mix { display: inline-flex; gap: 4px; }
-.rb-mix-sep { color: var(--text-dim); }
 .rb-dim { color: var(--text-muted); font-weight: 500; }
 
 /* Обратный отсчёт до удара. За три секунды до принта — та же граница, на которой
@@ -1878,11 +1933,11 @@ details[open] > .accordion-summary::before {
 /* Полоса слева — как быстрая метка строки: зелёная у сильного лонга, красная у
    сильного шорта, жёлтая у пропустившего такт. Пропуск важнее силы и перекрывает
    её: следующий несостоявшийся принт уберёт робота со страницы совсем. */
-.rb-strong-long { border-left: 3px solid var(--accent-up); }
-.rb-strong-short { border-left: 3px solid var(--accent-down); }
+.rb-strong-long { box-shadow: inset 3px 0 0 var(--accent-up); }
+.rb-strong-short { box-shadow: inset 3px 0 0 var(--accent-down); }
 
 .rb-missed {
-  border-left: 3px solid var(--accent-warn);
+  box-shadow: inset 3px 0 0 var(--accent-warn);
   background: var(--accent-warn-soft);
 }
 
@@ -1906,16 +1961,14 @@ details[open] > .accordion-summary::before {
 
 .rb-alarm:hover { border-color: var(--border-strong); }
 
-/* Последние две ячейки строки закреплены с правого края сетки: у строки-итога
-   граф меньше, и без этого шеврон повисал бы посреди строки. */
-.rb-card-live .rb-summary .rb-alarm { grid-column: -3; }
-.rb-summary .jrn-chevron,
-.rb-group-summary .jrn-chevron { grid-column: -2 / -1; align-self: center; }
+/* Последние две ячейки строки закреплены с правого края сетки: иначе на строке,
+   где какой-то графы нет, шеврон повисал бы посреди неё. */
+.rb-summary .rb-alarm { grid-column: -3; align-self: center; }
+.rb-summary .jrn-chevron { grid-column: -2 / -1; align-self: center; }
 
-@media (max-width: 900px) {
-  .rb-card-live .rb-summary .rb-alarm,
-  .rb-summary .jrn-chevron,
-  .rb-group-summary .jrn-chevron { grid-column: auto; }
+@media (max-width: 1000px) {
+  .rb-summary .rb-alarm,
+  .rb-summary .jrn-chevron { grid-column: auto; }
 }
 
 .rb-alarm-on {
@@ -1926,10 +1979,6 @@ details[open] > .accordion-summary::before {
 .rb-threshold {
   width: 68px;
   margin: 0 2px;
-}
-
-@media (max-width: 900px) {
-  .rb-group-body { padding: 6px; }
 }
 
 /* Фильтры по графам таблицы роботов. Свёрнуты, пока ничего не задано, — в шапке

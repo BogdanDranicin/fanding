@@ -253,3 +253,53 @@ func TestWatchlist(t *testing.T) {
 		t.Error("неизвестный префикс должен быть ошибкой")
 	}
 }
+
+// Предварительная находка видна на странице сразу, но в базу не едет.
+//
+// На валюте робот заявляется со второго принта — это компромисс ради скорости, и
+// цена у него известная: случайная пара сделок одного размера тоже становится
+// «роботом». Пока такие находки писались в базу, история за сутки состояла из них
+// почти целиком (замер на проде 28.08: 118 строк на одну случайную пару EURRUBF).
+// Живой срез при этом берётся из памяти, поэтому скорость показа не страдает.
+func TestProvisionalStaysOutOfStore(t *testing.T) {
+	start := base
+	// Два принта одного размера — ровно та длина, с которой валюта заявляет робота.
+	trades := []moexiss.Trade{
+		{TradeNo: 1, SecID: "USDRUBF", Price: 80, Quantity: 7, Side: "B", Timestamp: start},
+		{TradeNo: 2, SecID: "USDRUBF", Price: 80, Quantity: 7, Side: "B", Timestamp: start.Add(30 * time.Second)},
+	}
+	client := &fakeISS{}
+	store := &fakeStore{}
+	c := newTestCollector(client, store, start.Add(40*time.Second))
+	c.ingest(testTape, trades)
+	c.scanOnce(context.Background())
+
+	snap := c.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("в срезе %d роботов, хотим 1: %+v", len(snap), snap)
+	}
+	if !snap[0].Provisional {
+		t.Fatalf("серия из двух принтов должна быть предварительной")
+	}
+	if len(store.inserted) != 0 {
+		t.Errorf("в базу записано %d строк, хотим ноль: %+v", len(store.inserted), store.inserted)
+	}
+
+	// Дорастает до подтверждённой — уезжает в базу целиком, вместе со своим началом.
+	for i := 2; i < ConfidentPrints+2; i++ {
+		trades = append(trades, moexiss.Trade{
+			TradeNo: int64(i + 1), SecID: "USDRUBF", Price: 80, Quantity: 7, Side: "B",
+			Timestamp: start.Add(time.Duration(i) * 30 * time.Second),
+		})
+	}
+	c.now = func() time.Time { return start.Add(time.Duration(ConfidentPrints+2) * 30 * time.Second) }
+	c.ingest(testTape, trades)
+	c.scanOnce(context.Background())
+
+	if len(store.inserted) != 1 {
+		t.Fatalf("в базу записано %d строк, хотим одну: %+v", len(store.inserted), store.inserted)
+	}
+	if got := store.inserted[0].FirstSeen; !got.Equal(start) {
+		t.Errorf("FirstSeen = %v, хотим начало серии %v", got, start)
+	}
+}

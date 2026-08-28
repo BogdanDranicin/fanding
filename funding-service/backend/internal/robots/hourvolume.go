@@ -115,14 +115,31 @@ func (v *hourVolumes) add(p Print) {
 // пустым в своей свежей четверти. От последнего принта окно у всех полное, и
 // сила инструментов сравнима между собой.
 func (v *hourVolumes) get(symbol string, ts time.Time) HourVolume {
+	return v.window(symbol, ts, hourWindow)
+}
+
+// window — то же самое за произвольное число последних минут.
+//
+// Нужно для силы робота: сравнивать его поток с часовым оборотом можно только
+// если робот этот час и работал. Робот, начавший пять минут назад, получал по
+// часовому знаменателю тысячи процентов — его минутный поток растягивался на час,
+// которого не было. Окно сравнения обрезается до времени жизни серии, и обе части
+// отношения снова меряют одно и то же время.
+func (v *hourVolumes) window(symbol string, ts time.Time, minutes int) HourVolume {
 	out := HourVolume{Symbol: symbol}
 	e := v.bySymbol[symbol]
 	if e == nil || ts.IsZero() {
 		return out
 	}
+	if minutes < 1 {
+		minutes = 1
+	}
+	if minutes > hourWindow {
+		minutes = hourWindow
+	}
 
 	last := ts.Unix() / 60
-	first := last - hourWindow + 1
+	first := last - int64(minutes) + 1
 	for i := range e.ring {
 		b := e.ring[i]
 		if b.minute < first || b.minute > last {
