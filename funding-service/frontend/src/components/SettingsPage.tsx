@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { fetchTelegramLink } from '../api/auth';
 import { useAuthStore } from '../store/authStore';
 import { TimeAlarmsSettings } from './TimeAlarmsSettings';
-import { BackgroundSoundSettings } from './BackgroundSoundSettings';
 import {
   clearCustomSound,
   getAlertVolume,
@@ -197,8 +196,6 @@ export function SettingsPage({ onBack }: Props) {
       </div>
 
       <TimeAlarmsSettings />
-
-      <BackgroundSoundSettings />
     </div>
   );
 }

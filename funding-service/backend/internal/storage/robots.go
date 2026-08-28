@@ -17,14 +17,16 @@ func (s *Store) UpsertRobot(ctx context.Context, in robots.RobotRow) (int64, err
 			INSERT INTO robots
 				(symbol, side, qty_min, qty_max, qty_typical, period_sec, jitter,
 				 prints, beats, confidence, price_first, price_last,
-				 first_seen, last_seen, detected_at, updated_at, active)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+				 first_seen, last_seen, detected_at, updated_at, active,
+				 hour_lots, day_side_lots)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 			RETURNING id`
 		var id int64
 		err := s.pool.QueryRow(ctx, q,
 			in.Symbol, in.Side, in.QtyMin, in.QtyMax, in.QtyTypical, in.PeriodSec, in.Jitter,
 			in.Prints, in.Beats, in.Confidence, in.PriceFirst, in.PriceLast,
 			in.FirstSeen, in.LastSeen, in.DetectedAt, in.UpdatedAt, in.Active,
+			in.HourLots, in.DaySideLots,
 		).Scan(&id)
 		if err != nil {
 			return 0, fmt.Errorf("insert robot: %w", err)
@@ -47,12 +49,17 @@ func (s *Store) UpsertRobot(ctx context.Context, in robots.RobotRow) (int64, err
 			price_last  = $10,
 			last_seen   = GREATEST(last_seen, $11),
 			updated_at  = $12,
-			active      = $13
+			active      = $13,
+			-- Часовой оборот берём наибольший за жизнь серии: он меряется на
+			-- скользящем окне и к вечеру спадает, а сила робота должна отражать
+			-- рынок, в котором он работал, а не последнюю тихую минуту.
+			hour_lots     = GREATEST(robots.hour_lots, $14),
+			day_side_lots = GREATEST(robots.day_side_lots, $15)
 		WHERE id = $1`
 	_, err := s.pool.Exec(ctx, q,
 		in.ID, in.QtyMin, in.QtyMax, in.QtyTypical, in.PeriodSec, in.Jitter,
 		in.Prints, in.Beats, in.Confidence, in.PriceLast,
-		in.LastSeen, in.UpdatedAt, in.Active,
+		in.LastSeen, in.UpdatedAt, in.Active, in.HourLots, in.DaySideLots,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("update robot %d: %w", in.ID, err)
@@ -77,7 +84,8 @@ func (s *Store) RecentRobots(ctx context.Context, f RobotFilter) ([]robots.Robot
 	const q = `
 		SELECT id, symbol, side, qty_min, qty_max, qty_typical, period_sec, jitter,
 		       prints, beats, confidence, price_first, price_last,
-		       first_seen, last_seen, detected_at, updated_at, active
+		       first_seen, last_seen, detected_at, updated_at, active,
+		       hour_lots, day_side_lots
 		FROM robots
 		WHERE ($1::timestamptz IS NULL OR last_seen >= $1)
 		  AND ($2::text IS NULL OR symbol = $2)
@@ -107,6 +115,7 @@ func (s *Store) RecentRobots(ctx context.Context, f RobotFilter) ([]robots.Robot
 			&r.ID, &r.Symbol, &r.Side, &r.QtyMin, &r.QtyMax, &r.QtyTypical, &r.PeriodSec, &r.Jitter,
 			&r.Prints, &r.Beats, &r.Confidence, &r.PriceFirst, &r.PriceLast,
 			&r.FirstSeen, &r.LastSeen, &r.DetectedAt, &r.UpdatedAt, &r.Active,
+			&r.HourLots, &r.DaySideLots,
 		); err != nil {
 			return nil, fmt.Errorf("scan robot: %w", err)
 		}

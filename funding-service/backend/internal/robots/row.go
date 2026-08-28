@@ -23,6 +23,11 @@ type RobotRow struct {
 	DetectedAt time.Time
 	UpdatedAt  time.Time
 	Active     bool
+	// HourLots и DaySideLots — знаменатели силы на момент сохранения. Часовой
+	// оборот живёт только в памяти сбора, и без записи история показывала бы по
+	// графе «сила» один прочерк: величина была известна, её просто теряли.
+	HourLots    float64
+	DaySideLots float64
 }
 
 // rowOf переводит сессию в строку базы.
@@ -46,13 +51,15 @@ func rowOf(s Session) RobotRow {
 		DetectedAt: s.DetectedAt,
 		UpdatedAt:  s.UpdatedAt,
 		Active:     s.Active,
+		// Заполняются вызывающим: сама сессия про обороты бумаги не знает,
+		// их держит коллектор.
 	}
 }
 
 // SessionOf переводит строку базы обратно в сессию — так страница истории отдаёт
 // сохранённых роботов в том же виде, что и живой срез коллектора.
 func SessionOf(r RobotRow) Session {
-	return Session{
+	s := Session{
 		ID: r.ID,
 		Robot: Robot{
 			Symbol:     r.Symbol,
@@ -74,4 +81,15 @@ func SessionOf(r RobotRow) Session {
 		UpdatedAt:  r.UpdatedAt,
 		Active:     r.Active,
 	}
+	// Производные величины считаются здесь же, чтобы строка истории приезжала на
+	// страницу в том же виде, что и живая: страница не должна знать, из какого
+	// источника пришла сессия, и уж тем более гасить графы «в истории их не бывает».
+	s.PrintLots = r.QtyTypical
+	s.VolumeLots = s.Volume()
+	s.HourLots = r.HourLots
+	s.DaySideLots = r.DaySideLots
+	if s.HourLots > 0 {
+		s.StrengthPct = 100 * s.PrintLots / s.HourLots
+	}
+	return s
 }

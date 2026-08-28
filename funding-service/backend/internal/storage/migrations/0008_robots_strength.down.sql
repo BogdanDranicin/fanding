@@ -1,0 +1,2 @@
+ALTER TABLE robots DROP COLUMN IF EXISTS hour_lots;
+ALTER TABLE robots DROP COLUMN IF EXISTS day_side_lots;

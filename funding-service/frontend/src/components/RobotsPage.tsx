@@ -263,12 +263,15 @@ function RangeFilter({ label, unit, value, onChange }: {
 // каждой ячейки и повторялась столько раз, сколько на странице строк, — на полусотне
 // роботов это сотня одинаковых слов «НАПРАВЛЕНИЕ», между которыми терялись числа.
 //
-// Наборы разные у живого среза и у истории, и это не украшательство: в истории
-// не бывает ни «до удара» (бить уже нечему), ни силы с часовым оборотом (сервер
-// их не хранит — в выгрузке за неделю оба поля нулевые во всех 1000 строках).
-// Раньше обе графы всё равно рисовались и стояли сплошным столбцом прочерков,
-// занимая четверть ширины. На их месте теперь то, что в истории и правда есть:
-// уверенность находки и дата, когда робот работал.
+// Графы одни и те же в обоих режимах, кроме одной. «До удара» в истории не
+// бывает по существу: серия закончилась, бить нечему, и обратный отсчёт для
+// робота, замолчавшего вчера, — не пустая графа, а неверная. На её месте стоит
+// уверенность находки, которая в истории как раз есть.
+//
+// А вот силу в истории раньше показать было нечем — часовой оборот бумаги жил
+// только в памяти сбора и в базу не писался. Это чинилось в базе (миграция
+// 0008), а не пряталось в разметке: теперь оба знаменателя сохраняются вместе
+// со строкой, и сила у сохранённых роботов настоящая.
 const COLUMNS_LIVE = [
   'тикер', 'направление', 'объём за раз', 'тайминг',
   'до удара', 'сила', 'объём серии', 'статус',
@@ -276,12 +279,12 @@ const COLUMNS_LIVE = [
 
 const COLUMNS_HISTORY = [
   'тикер', 'направление', 'объём за раз', 'тайминг',
-  'уверенность', 'объём серии', 'когда',
+  'уверенность', 'сила', 'объём серии', 'когда',
 ] as const;
 
-/** Класс сетки строки. Живая строка шире: у неё своя графа и кнопка сигнала. */
+/** Класс сетки строки. Живая строка шире на колонку кнопки сигнала. */
 function rowClass(live: boolean): string {
-  return `rb-row ${live ? 'rb-row-live' : 'rb-row-hist'}`;
+  return `rb-row${live ? ' rb-row-live' : ''}`;
 }
 
 // TableHead — шапка списка. На узком экране прячется: там графы раскладываются
@@ -391,19 +394,6 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           </Cell>
         )}
 
-        {live && (
-          <Cell label="сила">
-            <span
-              className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
-              title={r.hour_lots > 0
-                ? `Принт ${volumeLabel(once)} к обороту ${volumeLabel(r.hour_lots)} за час ${r.hour_from}–${r.hour_to}`
-                : 'Часового оборота по бумаге ещё нет'}
-            >
-              {strengthLabel(r.strength_pct)}
-            </span>
-          </Cell>
-        )}
-
         {!live && (
           <Cell label="уверенность">
             <span className="rb-val rb-dim" title={`ровность такта: ${r.confidence.toFixed(2)}`}>
@@ -411,6 +401,21 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
             </span>
           </Cell>
         )}
+
+        <Cell label="сила">
+          {r.strength_pct > 0
+            ? (
+              <span
+                className={`rb-val rb-strength${strong ? (long ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
+              title={r.hour_lots > 0
+                ? `Принт ${volumeLabel(once)} к обороту ${volumeLabel(r.hour_lots)} за час ${r.hour_from}–${r.hour_to}`
+                  : 'Часового оборота по бумаге не сохранилось'}
+              >
+                {strengthLabel(r.strength_pct)}
+              </span>
+            )
+            : <Dash />}
+        </Cell>
 
         <Cell label="объём серии">
           <span className="rb-val rb-dim">{volumeLabel(volume)}</span>
@@ -594,23 +599,6 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
           </Cell>
         )}
 
-        {live && (
-          <Cell label="сила">
-            {leadPct > 0
-              ? (
-                <span
-                  className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
-                  title={hourLots > 0
-                    ? `Самый крупный принт бумаги к её обороту ${volumeLabel(hourLots)} за час`
-                    : 'Сила самого крупного робота бумаги'}
-                >
-                  {strengthLabel(leadPct)}
-                </span>
-              )
-              : <Dash />}
-          </Cell>
-        )}
-
         {!live && (
           <Cell label="уверенность">
             <span className="rb-val rb-dim" title="Лучшая уверенность среди роботов бумаги">
@@ -618,6 +606,21 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
             </span>
           </Cell>
         )}
+
+        <Cell label="сила">
+          {leadPct > 0
+              ? (
+                <span
+                  className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
+                  title={hourLots > 0
+                    ? `Самый крупный принт бумаги к её обороту ${volumeLabel(hourLots)} за час`
+                    : 'Сила самого крупного робота бумаги'}
+              >
+                {strengthLabel(leadPct)}
+              </span>
+            )
+            : <Dash />}
+        </Cell>
 
         <Cell label="объём серии">
           <span className="rb-val rb-dim" title={`лонг ${volumeLabel(longVol)} · шорт ${volumeLabel(shortVol)}`}>
@@ -867,28 +870,23 @@ export function RobotsPage() {
             там показаны находки прошедших дней, и «задержка 15 минут» рядом с
             ними — просто неверная подпись. */}
         {live && <SourceChip stream={stream} />}
-        <details className="rb-howto">
-          <summary className="rb-howto-summary">Как это работает</summary>
-          <div className="rb-howto-body">
-            <p>
-              Сервис пишет каждый принт по каждому тикеру и ищет повторы: если сделка
-              одного размера (±1 лот) проходит через ровные промежутки времени — это
-              робот. На валюте он заявляется с третьего повторяющегося принта и до
-              шестого помечается предварительным; на остальных инструментах серия должна
-              дорасти до шести принтов, иначе на ленте всего рынка список тонет в
-              случайных совпадениях. Пропустил такт — строка желтеет, пропустил второй
-              подряд — робот уходит со страницы в историю.
-            </p>
-            <p><SourceNote stream={stream} /></p>
-            {(tapes.length > 0 || watching.length > 0) && (
-              <p>
-                {tapes.length > 0 && <>Опрашиваем ленты: {tapes.join(', ')}. </>}
-                {watchRule && <>Отбор: {watchRule}. </>}
-                {watching.length > 0 && <>Сейчас в ленте {watching.length} инструментов.</>}
-              </p>
-            )}
-          </div>
-        </details>
+        {/* Робот — это повтор: один и тот же размер через один и тот же промежуток.
+            Больше про методику на странице знать незачем; всё остальное — пороги,
+            ленты, правила отбора — это внутренности сервиса, а не то, с чем
+            работает человек. Ушло в подсказку под вопросительным знаком. */}
+        <button
+          type="button"
+          className="rb-hint"
+          title={'Робот — это повтор: сделка одного размера (±1 лот) через ровный промежуток времени. '
+            + 'На валюте серия засчитывается с третьего принта, на остальном — с шестого. '
+            + 'Пропустил такт — строка желтеет, пропустил второй подряд — уходит в историю.'
+            + (watching.length > 0 ? `
+
+В наблюдении ${watching.length} инструментов: ${watchRule}` : '')}
+          aria-label="Как работает поиск роботов"
+        >
+          ?
+        </button>
       </div>
 
       <div className="rb-controls">

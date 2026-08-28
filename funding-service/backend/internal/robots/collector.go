@@ -529,7 +529,12 @@ func (c *Collector) scanOnce(ctx context.Context) {
 	dirty := c.reg.takeDirty()
 	rows := make([]RobotRow, 0, len(dirty))
 	for _, s := range dirty {
-		rows = append(rows, rowOf(*s))
+		row := rowOf(*s)
+		// Обороты бумаги записываем вместе со строкой: они живут только в памяти
+		// сбора, и к моменту, когда историю откроют, их уже неоткуда взять.
+		row.HourLots = c.hour.get(s.Symbol, s.LastSeen).Total()
+		row.DaySideLots = c.day.get(s.Symbol, s.LastSeen).Side(s.Side)
+		rows = append(rows, row)
 	}
 	c.mu.Unlock()
 
