@@ -11,24 +11,26 @@ import (
 )
 
 type fakeRobotSource struct {
-	sessions []robots.Session
-	tapes    []robots.MarketTape
-	symbols  []string
-	days     []robots.DayVolume
-	stream   robots.StreamStatus
+	sessions    []robots.Session
+	tapes       []robots.MarketTape
+	symbols     []string
+	days        []robots.DayVolume
+	stream      robots.StreamStatus
+	instruments []robots.Instrument
 }
 
-func (f fakeRobotSource) Snapshot() []robots.Session      { return f.sessions }
-func (f fakeRobotSource) Tapes() []robots.MarketTape      { return f.tapes }
-func (f fakeRobotSource) Symbols() []string               { return f.symbols }
-func (f fakeRobotSource) WatchDescription() string        { return "тестовый отбор" }
-func (f fakeRobotSource) DayVolumes() []robots.DayVolume  { return f.days }
+func (f fakeRobotSource) Snapshot() []robots.Session        { return f.sessions }
+func (f fakeRobotSource) Tapes() []robots.MarketTape        { return f.tapes }
+func (f fakeRobotSource) Symbols() []string                 { return f.symbols }
+func (f fakeRobotSource) WatchDescription() string          { return "тестовый отбор" }
+func (f fakeRobotSource) DayVolumes() []robots.DayVolume    { return f.days }
 func (f fakeRobotSource) StreamStatus() robots.StreamStatus { return f.stream }
+func (f fakeRobotSource) Instruments() []robots.Instrument  { return f.instruments }
 
 func testSource() fakeRobotSource {
 	now := time.Date(2026, 8, 17, 15, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
 	return fakeRobotSource{
-		tapes:   []robots.MarketTape{{Name: "акции TQBR"}},
+		tapes: []robots.MarketTape{{Name: "акции TQBR"}},
 		stream: robots.StreamStatus{
 			Enabled: true, Connected: true, Symbols: 305,
 			LastPrintAt: now, LagMs: 1650,

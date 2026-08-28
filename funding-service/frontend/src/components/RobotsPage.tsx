@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DayVolume, RobotSession, RobotsResponse, StreamStatus } from '../types/robots';
+import type { DayVolume, Instrument, RobotSession, RobotsResponse, StreamStatus } from '../types/robots';
 import { authFetch } from '../api/auth';
 
 const fmtClock = new Intl.DateTimeFormat('ru-RU', {
@@ -16,10 +16,11 @@ const fmtLots = new Intl.NumberFormat('ru-RU');
 const TICK_MS = 200;
 // ALARM_LEAD — за сколько секунд до удара начинают звучать предупреждения.
 const ALARM_LEAD = 3;
-// Порог силы. Ключ хранения с версией: сила теперь считается от часового оборота,
-// а не от дневного, и старое сохранённое значение означало бы совсем другое.
-const THRESHOLD_KEY = 'robots.strength-threshold.v2';
-const DEFAULT_THRESHOLD = 1;
+// Порог силы. Ключ хранения с версией: сила теперь считается как доля потока
+// бумаги, а не как вес одного принта, и старое сохранённое значение означало бы
+// совсем другое — прежняя «единица» соответствует новым десяткам процентов.
+const THRESHOLD_KEY = 'robots.strength-threshold.v3';
+const DEFAULT_THRESHOLD = 10;
 
 function clock(iso: string): string {
   try { return fmtClock.format(new Date(iso)); } catch { return iso; }
@@ -76,14 +77,47 @@ function volumeLabel(lotsCount: number): string {
   return `${fmtLots.format(Math.round(lotsCount))} л`;
 }
 
-// strengthLabel — сила робота: один его принт в доле часового оборота бумаги.
-// Знаменатель большой, доли идут долями процента — на слабых роботах нужны сотые,
-// иначе половина списка показывает «0.0%».
+// strengthLabel — сила робота: его поток в доле потока бумаги.
 function strengthLabel(pct: number): string {
   if (!pct) return '—';
   if (pct >= 10) return `${pct.toFixed(0)}%`;
   if (pct >= 1) return `${pct.toFixed(1)}%`;
   return `${pct.toFixed(2)}%`;
+}
+
+// rateOf — поток робота в лотах за минуту. Живой срез считает его на сервере,
+// у строки истории берём тот же расчёт: принт, разложенный на такт.
+function rateOf(r: RobotSession): number {
+  if (r.lots_per_min) return r.lots_per_min;
+  return r.period_sec > 0 ? (printOf(r) * 60) / r.period_sec : 0;
+}
+
+// rateLabel — «114 л/мин». Медленный робот качает меньше лота в минуту, и там
+// нужна десятая доля, иначе весь неликвид показывает ноль.
+function rateLabel(lotsPerMin: number): string {
+  if (!lotsPerMin) return '—';
+  if (lotsPerMin >= 10) return `${fmtLots.format(Math.round(lotsPerMin))} л/мин`;
+  return `${lotsPerMin.toFixed(1)} л/мин`;
+}
+
+// priceMove — куда уехала цена за жизнь серии, проценты. Это не прибыль робота,
+// а движение бумаги за то время, что он работает: по нему видно, продавливает
+// он цену или его наливают.
+function priceMove(first: number, last: number): number {
+  if (!first || !last) return NaN;
+  return ((last - first) / first) * 100;
+}
+
+function moveLabel(pct: number): string {
+  if (!Number.isFinite(pct)) return '—';
+  const sign = pct > 0 ? '+' : '';
+  return `${sign}${pct.toFixed(2)}%`;
+}
+
+// moveClass — движение цены красим по стороне: рост зелёным, падение красным.
+function moveClass(pct: number): string {
+  if (!Number.isFinite(pct) || Math.abs(pct) < 0.005) return ' rb-dim';
+  return pct > 0 ? ' rb-long' : ' rb-short';
 }
 
 // confidenceLabel — уверенность словами: цифра 0.62 читателю ничего не говорит.
@@ -233,18 +267,24 @@ function RangeFilter({ label, unit, value, onChange }: {
 // робота, замолчавшего вчера, — не пустая графа, а неверная. На её месте стоит
 // уверенность находки, которая в истории как раз есть.
 //
+// Отдельная графа «поток» появилась потому, что по паре «объём за раз» и «тайминг»
+// сравнивать роботов глазами невозможно: 26 лотов раз в три секунды и 400 лотов
+// раз в три минуты — это 520 и 133 лота в минуту, и на глаз сильнее выглядит
+// второй. Поток сводит обе величины в одно число, а «ход цены» показывает, чем
+// это давление кончилось для самой бумаги.
+//
 // А вот силу в истории раньше показать было нечем — часовой оборот бумаги жил
 // только в памяти сбора и в базу не писался. Это чинилось в базе (миграция
 // 0008), а не пряталось в разметке: теперь оба знаменателя сохраняются вместе
 // со строкой, и сила у сохранённых роботов настоящая.
 const COLUMNS_LIVE = [
-  'тикер', 'направление', 'объём за раз', 'тайминг',
-  'до удара', 'сила', 'объём серии', 'статус',
+  'тикер', 'направление', 'объём за раз', 'тайминг', 'поток',
+  'до удара', 'сила', 'ход цены', 'объём серии', 'статус',
 ] as const;
 
 const COLUMNS_HISTORY = [
-  'тикер', 'направление', 'объём за раз', 'тайминг',
-  'уверенность', 'сила', 'объём серии', 'когда',
+  'тикер', 'направление', 'объём за раз', 'тайминг', 'поток',
+  'уверенность', 'сила', 'ход цены', 'объём серии', 'когда',
 ] as const;
 
 /** Класс сетки строки. Живая строка шире на колонку кнопки сигнала. */
@@ -302,11 +342,13 @@ interface RowProps {
   day?: DayVolume;
   /** Строка лежит внутри группы одной бумаги — тикер там уже назван выше. */
   nested?: boolean;
+  /** Справочные данные бумаги; подписываются под строкой, если она не вложенная. */
+  inst?: Instrument;
 }
 
 // RobotRow — один робот. В свёрнутом виде — графы таблицы, по клику раскрываются
 // подробности серии.
-function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested }: RowProps) {
+function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested, inst }: RowProps) {
   // Подробности строки рисуются только раскрытыми. Содержимое <details> лежит в
   // DOM независимо от того, открыт он или нет, и на истории за неделю это была
   // тысяча строк по полсотни узлов каждая: вкладка вставала на десятки секунд,
@@ -315,6 +357,7 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
   const long = r.side === 'B';
   const once = printOf(r);
   const volume = volumeOf(r);
+  const move = priceMove(r.price_first, r.price_last);
   const beatMs = live && r.active ? nextBeatAt(r, nowMs) : 0;
   const left = beatMs ? beatMs - nowMs : NaN;
 
@@ -351,6 +394,15 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           <span className="rb-val rb-period">{period(r.period_sec)}</span>
         </Cell>
 
+        <Cell label="поток">
+          <span
+            className="rb-val rb-dim"
+            title={`${volumeLabel(once)} каждые ${period(r.period_sec)}`}
+          >
+            {rateLabel(rateOf(r))}
+          </span>
+        </Cell>
+
         {live && (
           <Cell label="до удара">
             {r.active
@@ -382,8 +434,19 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
             : <Dash />}
         </Cell>
 
+        <Cell label="ход цены">
+          <span
+            className={`rb-val${moveClass(move)}`}
+            title={`${price(r.price_first)} → ${price(r.price_last)} за жизнь серии`}
+          >
+            {moveLabel(move)}
+          </span>
+        </Cell>
+
         <Cell label="объём серии">
-          <span className="rb-val rb-dim">{volumeLabel(volume)}</span>
+          <span className="rb-val rb-dim" title={`принтов: ${fmtLots.format(r.prints)}`}>
+            {volumeLabel(volume)}
+          </span>
         </Cell>
 
         <Cell label={live ? 'статус' : 'когда'} className="rb-status-col">
@@ -409,6 +472,10 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
         )}
 
         <span className="jrn-chevron" aria-hidden="true">▸</span>
+
+        {/* У бумаги с единственным роботом обёртки-группы нет, и подписать её
+            больше негде. */}
+        {!nested && inst && <InstrumentNote inst={inst} />}
       </summary>
 
       {open && <div className="jrn-details">
@@ -417,7 +484,10 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           <Detail label="Первый принт" value={dayClock(r.first_seen)} />
           <Detail label="Последний принт" value={dayClock(r.last_seen)} />
           <Detail label="Работает" value={duration(r)} />
-          <Detail label="Тактов периода" value={String(r.beats)} />
+          <Detail
+            label="Тактов сыграно"
+            value={r.hits > 0 ? `${r.hits} из ${r.beats}` : String(r.beats)}
+          />
           <Detail label="Пропущено тактов подряд" value={String(r.misses)} />
         </div>
 
@@ -425,6 +495,15 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
           <div className="jrn-detail-title">Лотовка и объём</div>
           <Detail label="Объём за раз" value={volumeLabel(once)} />
           <Detail label="Границы размера" value={lots(r)} />
+          {r.print_trades > 0 && (
+            <Detail
+              label="Сделок биржи в одном принте"
+              value={r.print_trades <= 1
+                ? '1 — приказ забирает одну заявку'
+                : `${r.print_trades.toFixed(0)} — приказ сметает несколько заявок`}
+            />
+          )}
+          <Detail label="Поток робота" value={rateLabel(rateOf(r))} />
           <Detail label="Суммарный объём серии" value={volumeLabel(volume)} />
           {r.hour_lots > 0 && (
             <Detail
@@ -441,7 +520,7 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
               value={volumeLabel(r.day_side_lots)}
             />
           )}
-          <Detail label="Сила: принт к часовому обороту" value={strengthLabel(r.strength_pct)} />
+          <Detail label="Сила: поток робота к потоку бумаги" value={strengthLabel(r.strength_pct)} />
         </div>
 
         <div className="jrn-detail-group">
@@ -464,15 +543,43 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day, nested
   );
 }
 
+// InstrumentNote — подпись бумаги под строкой-итогом: имя, шаг цены, размер лота.
+//
+// Без неё страница показывала голый код. «AFLT» ещё узнаваем, а «CRU6» — уже нет,
+// и главное: лотовка робота считается в лотах, и без размера лота непонятно, идёт
+// речь о трёхстах бумагах или о трёхстах тысячах. Шаг цены нужен, чтобы прочесть
+// графу «ход цены»: полпроцента на бумаге с шагом 0.0005 и с шагом рубль — это
+// совершенно разное число тиков.
+function InstrumentNote({ inst }: { inst: Instrument }) {
+  const parts: string[] = [];
+  if (inst.min_step > 0) parts.push(`шаг ${inst.min_step.toLocaleString('ru-RU', { maximumFractionDigits: 6 })}`);
+  if (inst.lot_size > 0) {
+    parts.push(inst.lot_size === 1 ? 'лот — 1 бумага' : `${fmtLots.format(inst.lot_size)} бумаг в лоте`);
+  }
+  if (!inst.name && parts.length === 0) return null;
+  return (
+    <div className="rb-instrument">
+      {inst.name && <span className="rb-instrument-name">{inst.name}</span>}
+      {parts.length > 0 && <span className="rb-instrument-spec">{parts.join(' · ')}</span>}
+    </div>
+  );
+}
+
 // SymbolGroup — все роботы одной бумаги под общей строкой-итогом.
 interface GroupProps extends Omit<RowProps, 'r' | 'armed'> {
   symbol: string;
   rows: RobotSession[];
   armedIds: Set<number>;
+  inst?: Instrument;
 }
 
-function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day }: GroupProps) {
+function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAlarm, day, inst }: GroupProps) {
   const [open, setOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
+  // В живом срезе робот, который замолчал, остаётся в ответе ещё сутки — это и есть
+  // «завершённые». В истории замолчали все, и делить там нечего.
+  const working = live ? rows.filter((r) => r.active) : rows;
+  const finished = live ? rows.filter((r) => !r.active) : [];
   const longs = rows.filter((r) => r.side === 'B');
   const shorts = rows.filter((r) => r.side === 'S');
   const sum = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + volumeOf(r), 0);
@@ -484,12 +591,19 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
   // свежее окно.
   const hourLots = Math.max(...rows.map((r) => r.hour_lots), 0);
 
-  // Итоговая сила берётся как сила самого крупного робота стороны, а не как
-  // сумма: сила — это вес одного принта, а такты роботов не синхронны, и складывать
-  // принты, приходящие в разные секунды, значило бы придумывать несуществующий залп.
-  const strongest = (xs: RobotSession[]) => Math.max(...xs.map((r) => r.strength_pct), 0);
-  const longPct = strongest(longs);
-  const shortPct = strongest(shorts);
+  // Итоговая сила складывается по стороне. Складывать теперь можно и нужно: сила —
+  // это доля потока бумаги, которую делает робот, а доли одного и того же потока
+  // суммируются. Раньше силой был вес одного принта, и сумма таких весов не значила
+  // ничего — приходилось брать максимум и терять всю остальную сторону.
+  const sumPct = (xs: RobotSession[]) => xs.reduce((acc, r) => acc + r.strength_pct, 0);
+  const longPct = sumPct(longs);
+  const shortPct = sumPct(shorts);
+  // Поток бумаги от роботов целиком — сколько лотов в минуту они прокачивают вместе.
+  const groupRate = rows.reduce((acc, r) => acc + rateOf(r), 0);
+  // Ход цены по бумаге: от самого раннего принта её роботов до самого свежего.
+  const earliest = rows.reduce((a, r) => (r.first_seen < a.first_seen ? r : a), rows[0]);
+  const latest = rows.reduce((a, r) => (r.last_seen > a.last_seen ? r : a), rows[0]);
+  const groupMove = priceMove(earliest.price_first, latest.price_last);
   const leadLong = longPct >= shortPct;
   const leadPct = Math.max(longPct, shortPct);
 
@@ -552,6 +666,12 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
           </span>
         </Cell>
 
+        <Cell label="поток">
+          <span className="rb-val rb-dim" title="Сколько лотов в минуту качают роботы бумаги вместе">
+            {rateLabel(groupRate)}
+          </span>
+        </Cell>
+
         {live && (
           <Cell label="до удара">
             {nextMs > 0
@@ -578,13 +698,22 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
                 <span
                   className={`rb-val rb-strength${strong ? (leadLong ? ' rb-strength-long' : ' rb-strength-short') : ''}`}
                   title={hourLots > 0
-                    ? `Самый крупный принт бумаги к её обороту ${volumeLabel(hourLots)} за час`
-                    : 'Сила самого крупного робота бумаги'}
+                    ? `Роботы ${leadLong ? 'лонга' : 'шорта'} делают ${strengthLabel(leadPct)} потока бумаги (оборот за час ${volumeLabel(hourLots)})`
+                    : 'Сила роботов ведущей стороны'}
               >
                 {strengthLabel(leadPct)}
               </span>
             )
             : <Dash />}
+        </Cell>
+
+        <Cell label="ход цены">
+          <span
+            className={`rb-val${moveClass(groupMove)}`}
+            title={`${price(earliest.price_first)} → ${price(latest.price_last)} за время работы роботов бумаги`}
+          >
+            {moveLabel(groupMove)}
+          </span>
         </Cell>
 
         <Cell label="объём серии">
@@ -605,10 +734,14 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
 
         {live && <span className="rb-group-spacer" />}
         <span className="jrn-chevron" aria-hidden="true">▸</span>
+
+        {/* Подпись занимает всю ширину строки, поэтому лежит внутри summary:
+            иначе она была бы видна только у раскрытой группы, а нужна всегда. */}
+        {inst && <InstrumentNote inst={inst} />}
       </summary>
 
       {open && <div className="rb-group-body">
-        {rows.map((r) => (
+        {working.map((r) => (
           <RobotRow
             key={`${r.id}-${r.first_seen}`}
             r={r}
@@ -621,6 +754,33 @@ function SymbolGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleA
             nested
           />
         ))}
+
+        {/* Замолчавшие роботы бумаги — отдельным свёрнутым списком, а не вперемешку
+            с работающими. Смешанными они мешали: живой список читают, чтобы понять,
+            что происходит прямо сейчас, а вчерашний робот выглядит в нём ровно как
+            сегодняшний. При этом выбрасывать их нельзя — по ним видно, кто на этой
+            бумаге работал и с каким тактом, и вернулся ли он. */}
+        {finished.length > 0 && (
+          <details className="rb-finished" onToggle={(e) => setDoneOpen(e.currentTarget.open)}>
+            <summary className="rb-finished-summary">
+              <span className="jrn-chevron" aria-hidden="true">▸</span>
+              Завершённые роботы: {finished.length}
+            </summary>
+            {doneOpen && finished.map((r) => (
+              <RobotRow
+                key={`${r.id}-${r.first_seen}`}
+                r={r}
+                nowMs={nowMs}
+                live={live}
+                threshold={threshold}
+                armed={armedIds.has(r.id)}
+                onToggleAlarm={onToggleAlarm}
+                day={day}
+                nested
+              />
+            ))}
+          </details>
+        )}
       </div>}
     </details>
   );
@@ -634,6 +794,7 @@ export function RobotsPage() {
   const [watching, setWatching] = useState<string[]>([]);
   const [watchRule, setWatchRule] = useState('');
   const [days, setDays] = useState<DayVolume[]>([]);
+  const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [stream, setStream] = useState<StreamStatus | null>(null);
   const [symbol, setSymbol] = useState('');
   const [confirmedOnly, setConfirmedOnly] = useState(false);
@@ -678,6 +839,7 @@ export function RobotsPage() {
         setWatching(data.watching ?? []);
         setWatchRule(data.watch_rule ?? '');
         setDays(data.day_volumes ?? []);
+        setInstruments(data.instruments ?? []);
         setStream(data.stream ?? null);
         const asOf = Date.parse(data.as_of);
         if (Number.isFinite(asOf)) skewRef.current = asOf - Date.now();
@@ -769,6 +931,12 @@ export function RobotsPage() {
     days.forEach((d) => m.set(d.symbol, d));
     return m;
   }, [days]);
+
+  const instBySymbol = useMemo(() => {
+    const m = new Map<string, Instrument>();
+    instruments.forEach((i) => m.set(i.symbol, i));
+    return m;
+  }, [instruments]);
 
   // Три предупреждения перед ударом, по одному на секунду. Проверяем на каждом
   // тике часов и помним уже отыгранные, чтобы один и тот же такт не пикал дважды.
@@ -876,7 +1044,7 @@ export function RobotsPage() {
           </select>
         </label>
 
-        <label className="rb-filter" title="Доля одного принта робота в часовом обороте бумаги, с которой он считается сильным">
+        <label className="rb-filter" title="Какую долю потока бумаги должен делать робот, чтобы считаться сильным. Поток робота — его принт, разложенный на такт; поток бумаги — её часовой оборот, приведённый к минуте">
           Сильный робот от
           <input
             className="rb-threshold"
@@ -893,7 +1061,7 @@ export function RobotsPage() {
             }}
             onBlur={() => setThresholdDraft(String(threshold))}
           />
-          % часового оборота
+          % потока бумаги
         </label>
 
         <label
@@ -977,6 +1145,7 @@ export function RobotsPage() {
                 armed={armedIds.has(g.rows[0].id)}
                 onToggleAlarm={toggleAlarm}
                 day={dayBySymbol.get(g.symbol)}
+                inst={instBySymbol.get(g.symbol)}
               />
             ) : (
               <SymbolGroup
@@ -989,6 +1158,7 @@ export function RobotsPage() {
                 armedIds={armedIds}
                 onToggleAlarm={toggleAlarm}
                 day={dayBySymbol.get(g.symbol)}
+                inst={instBySymbol.get(g.symbol)}
               />
             )
           ))}

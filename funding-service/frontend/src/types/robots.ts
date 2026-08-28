@@ -14,6 +14,10 @@ export interface RobotSession {
   jitter: number;
   prints: number;
   beats: number;
+  /** Сколько тактов серии реально заняты принтами: hits к beats — плотность игры. */
+  hits: number;
+  /** Из скольких сделок биржи в среднем собран один принт приказа. */
+  print_trades: number;
   confidence: number;
   /** Серия ещё короче той, на которой периодичность отличима от совпадения. */
   provisional: boolean;
@@ -48,7 +52,9 @@ export interface RobotSession {
   hour_to: string;
   /** Непустое — сбор начался внутри окна, час набран не целиком, сила завышена. */
   hour_since: string;
-  /** Сила: один принт робота в доле часового оборота бумаги, проценты. */
+  /** Поток робота: сколько лотов он прокачивает в минуту (принт, делённый на такт). */
+  lots_per_min: number;
+  /** Сила: поток робота в доле потока самой бумаги, проценты. */
   strength_pct: number;
 }
 
@@ -84,6 +90,19 @@ export interface StreamStatus {
   missing?: string[];
 }
 
+/** Справочные данные инструмента: то, что стоит рядом с тикером и не выводится из ленты. */
+export interface Instrument {
+  symbol: string;
+  /** Человеческое имя бумаги: «Аэрофлот», «Si-9.26». */
+  name: string;
+  /** Сколько бумаг в одном лоте. */
+  lot_size: number;
+  /** Шаг цены инструмента. */
+  min_step: number;
+  /** Сколько знаков после запятой держит биржевая цена. */
+  decimals: number;
+}
+
 export interface RobotsResponse {
   /** Инструменты, по которым сейчас идёт лента. */
   watching: string[];
@@ -93,6 +112,8 @@ export interface RobotsResponse {
   watch_rule: string;
   robots: RobotSession[];
   day_volumes: DayVolume[];
+  /** Справочник биржи по тикерам: имя бумаги, лот, шаг цены. */
+  instruments: Instrument[];
   /** Состояние быстрого источника — от него зависит свежесть всей страницы. */
   stream: StreamStatus;
   as_of: string;

@@ -88,8 +88,7 @@ func SessionOf(r RobotRow) Session {
 	s.VolumeLots = s.Volume()
 	s.HourLots = r.HourLots
 	s.DaySideLots = r.DaySideLots
-	if s.HourLots > 0 {
-		s.StrengthPct = 100 * s.PrintLots / s.HourLots
-	}
+	s.LotsPerMin = s.lotsPerMin()
+	s.StrengthPct = strengthPct(s.LotsPerMin, s.HourLots)
 	return s
 }

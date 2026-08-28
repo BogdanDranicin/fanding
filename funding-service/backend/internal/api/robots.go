@@ -19,6 +19,7 @@ type RobotSource interface {
 	Symbols() []string
 	DayVolumes() []robots.DayVolume
 	StreamStatus() robots.StreamStatus
+	Instruments() []robots.Instrument
 }
 
 // robotsResponse — ответ страницы «Роботы».
@@ -35,6 +36,10 @@ type robotsResponse struct {
 	// продажи. Страница берёт отсюда базу для силы робота и показывает, с какого
 	// времени оборот считается: после перезапуска среди дня база неполная.
 	DayVolumes []robots.DayVolume `json:"day_volumes"`
+	// Instruments — справочник биржи по тикерам: имя бумаги, лот, шаг цены.
+	// Страница подписывает им строку бумаги, чтобы «CRU6» читался как контракт,
+	// а не как код.
+	Instruments []robots.Instrument `json:"instruments"`
 	// Stream — каким источником приходят принты. Страница пишет про свежесть
 	// ленты то, что есть на самом деле, а не то, что было верно на прошлом источнике.
 	Stream robots.StreamStatus `json:"stream"`
@@ -46,11 +51,12 @@ type robotsResponse struct {
 func handleRobots(src RobotSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resp := robotsResponse{
-			Robots:     []robots.Session{},
-			Watching:   []string{},
-			Tapes:      []string{},
-			DayVolumes: []robots.DayVolume{},
-			AsOf:       time.Now(),
+			Robots:      []robots.Session{},
+			Watching:    []string{},
+			Tapes:       []string{},
+			DayVolumes:  []robots.DayVolume{},
+			Instruments: []robots.Instrument{},
+			AsOf:        time.Now(),
 		}
 		if src == nil {
 			writeJSON(w, http.StatusOK, resp)
@@ -62,6 +68,7 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 		resp.Watching = append(resp.Watching, src.Symbols()...)
 		resp.WatchRule = src.WatchDescription()
 		resp.DayVolumes = append(resp.DayVolumes, src.DayVolumes()...)
+		resp.Instruments = append(resp.Instruments, src.Instruments()...)
 		resp.Stream = src.StreamStatus()
 
 		sessions := src.Snapshot()

@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// Низкий порог обнаружения — привилегия валюты: там робот заявляется с третьего
-// повторяющегося принта. На остальных инструментах серия должна дорасти до длины,
-// на которой периодичность уже не объясняется совпадением: на ленте всего рынка
-// короткие серии давали около сотни ложных находок одновременно.
+// Низкий порог обнаружения — привилегия валюты: там робот заявляется со второго
+// повторяющегося принта, то есть с первого же интервала. На акциях и фьючерсах
+// нужен третий принт — второй интервал, на котором у периода впервые появляется
+// чем себя подтвердить (цену обоих порогов меряет TestCurrencyThresholdCostOnRandomTape).
 func TestDetectionThresholdDependsOnInstrument(t *testing.T) {
 	rnd := rand.New(rand.NewSource(1))
 
@@ -20,10 +20,10 @@ func TestDetectionThresholdDependsOnInstrument(t *testing.T) {
 		prints   int
 		want     bool
 	}{
-		{"валюта, три принта", "USDRUBF", true, 3, true},
-		{"валюта, два принта", "USDRUBF", true, 2, false},
-		{"акция, три принта", "SBER", false, 3, false},
-		{"акция, пять принтов", "SBER", false, 5, false},
+		{"валюта, два принта", "USDRUBF", true, 2, true},
+		{"валюта, один принт", "USDRUBF", true, 1, false},
+		{"акция, два принта", "SBER", false, 2, false},
+		{"акция, три принта", "SBER", false, 3, true},
 		{"акция, шесть принтов", "SBER", false, ConfidentPrints, true},
 	}
 
@@ -102,7 +102,7 @@ func registryFixture(t *testing.T) (*registry, *Session, Robot) {
 	t.Helper()
 	cfg := DefaultConfig()
 	reg := newRegistry(3*time.Minute, time.Hour, cfg.Window, 100, func(p float64) time.Duration {
-		return beatTol(cfg, p)
+		return beatTol(cfg, p, time.Second)
 	})
 	rb := Robot{
 		Symbol: "SBER", Side: SideBuy,
@@ -215,13 +215,13 @@ func TestNextBeatExtrapolatesForward(t *testing.T) {
 	}
 }
 
-// Сила робота — один его принт в доле часового оборота бумаги.
+// Сила робота — его поток в доле потока бумаги.
 func TestSessionStrength(t *testing.T) {
 	s := Session{Robot: Robot{
 		Symbol: "SBER", Side: SideSell, QtyTypical: 100, Prints: 20, PeriodSec: 30, LastSeen: base,
 	}}
 	day := DayVolume{Symbol: "SBER", Date: base.Format("2006-01-02"), Buy: 100000, Sell: 40000}
-	s.fill(base, day, HourVolume{Symbol: "SBER", Buy: 3000, Sell: 2000, Minutes: 60})
+	s.fill(base, day, HourVolume{Symbol: "SBER", Buy: 7000, Sell: 5000, Minutes: 60})
 
 	if s.PrintLots != 100 {
 		t.Errorf("PrintLots = %.0f, хотим 100 (объём робота за раз)", s.PrintLots)
@@ -232,12 +232,25 @@ func TestSessionStrength(t *testing.T) {
 	if s.DaySideLots != 40000 {
 		t.Errorf("DaySideLots = %.0f, хотим 40000 (шорт сравниваем с продажами)", s.DaySideLots)
 	}
-	if s.HourLots != 5000 {
-		t.Errorf("HourLots = %.0f, хотим 5000 (весь оборот бумаги за час)", s.HourLots)
+	if s.HourLots != 12000 {
+		t.Errorf("HourLots = %.0f, хотим 12000 (весь оборот бумаги за час)", s.HourLots)
 	}
-	// 100 лотов принта на 5000 лотов часового оборота — два процента.
-	if s.StrengthPct != 2 {
-		t.Errorf("StrengthPct = %.2f, хотим 2", s.StrengthPct)
+	// 100 лотов раз в 30 с — это 200 лотов в минуту. Бумага за минуту проходит
+	// 12000/60 = 200 лотов, значит робот делает весь её поток целиком.
+	if s.LotsPerMin != 200 {
+		t.Errorf("LotsPerMin = %.1f, хотим 200", s.LotsPerMin)
+	}
+	if s.StrengthPct != 100 {
+		t.Errorf("StrengthPct = %.2f, хотим 100", s.StrengthPct)
+	}
+
+	// Тот же принт вдвое реже — вдвое меньше давления. Отношение «принт к обороту»
+	// этой разницы не видело вовсе, и в этом была причина замены.
+	slow := s
+	slow.PeriodSec = 60
+	slow.fill(base, day, HourVolume{Symbol: "SBER", Buy: 7000, Sell: 5000, Minutes: 60})
+	if slow.StrengthPct != 50 {
+		t.Errorf("StrengthPct вдвое более редкого робота = %.2f, хотим 50", slow.StrengthPct)
 	}
 
 	// Без базы силу не выдумываем.

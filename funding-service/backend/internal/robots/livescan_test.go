@@ -127,9 +127,9 @@ func TestLiveScan(t *testing.T) {
 	// Контрольный прогон с ослабленными порогами: показывает, что детектор
 	// отбрасывает, и не задраны ли настройки по умолчанию.
 	loose := cfg
-	loose.MinUnitBeatRatio = 0.35
+	loose.MinOccupancy = 0.35
 	loose.MaxJitter = 0.30
-	loose.MinMatchRatio = 0.40
+	loose.NoiseSigma = 1.5
 	det2 := NewDetector(loose)
 	det2.maxLen = 1 << 30
 	for sym, tape := range det.tapes {

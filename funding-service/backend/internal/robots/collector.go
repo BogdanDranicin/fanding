@@ -3,6 +3,7 @@ package robots
 import (
 	"context"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -84,7 +85,7 @@ func DefaultCollectorOptions() CollectorOptions {
 		Tapes:        DefaultTapes(),
 		Watch:        watch,
 		PollInterval: 3 * time.Second,
-		ScanInterval: 15 * time.Second,
+		ScanInterval: 2 * time.Second,
 		StaleAfter:   3 * time.Minute,
 		KeepClosed:   12 * time.Hour,
 		Detector:     DefaultConfig(),
@@ -145,6 +146,9 @@ type Collector struct {
 	// страница отвечает на вопрос «почему вот эта бумага отстаёт»: всё, чего
 	// здесь нет, идёт лентой ISS и приходит на пятнадцать минут позже.
 	streamCovers map[string]bool
+	// instruments — справочник биржи по тикерам: имя, лот, шаг цены. Обновляется
+	// раз в сутки вместе с составом режимов торгов.
+	instruments map[string]Instrument
 }
 
 // NewCollector собирает коллектор поверх живого клиента ISS. store может быть nil —
@@ -168,6 +172,7 @@ func NewCollector(client issClient, store Store, opts CollectorOptions, log zero
 		hour:         newHourVolumes(),
 		streamHead:   make(map[string]time.Time),
 		streamCovers: make(map[string]bool),
+		instruments:  make(map[string]Instrument),
 	}
 }
 
@@ -260,15 +265,35 @@ func (c *Collector) universeLoop(ctx context.Context) {
 
 func (c *Collector) refreshUniverse(ctx context.Context) {
 	for _, tape := range c.opts.Tapes {
-		if tape.Engine != stockEngine || tape.Board == "" {
-			continue
-		}
 		list, err := c.client.FetchBoardSecurities(ctx, moexiss.TradeFeed{
 			Engine: tape.Engine, Market: tape.Market, Board: tape.Board,
 		})
 		if err != nil {
 			c.log.Warn().Err(err).Str("tape", tape.Name).
 				Msg("robots: справочник инструментов не прочитан, слежу за всем режимом")
+			continue
+		}
+
+		// Имена, лоты и шаги цены нужны со всех лент: страница подписывает ими
+		// строку бумаги независимо от того, акция это или фьючерс.
+		c.mu.Lock()
+		for _, sec := range list {
+			c.instruments[sec.SecID] = Instrument{
+				Symbol:   sec.SecID,
+				Name:     sec.ShortName,
+				LotSize:  sec.LotSize,
+				MinStep:  sec.MinStep,
+				Decimals: sec.Decimals,
+			}
+		}
+		c.mu.Unlock()
+
+		// А вот отбор по типу бумаги написан под режим акций: в нём рядом с акциями
+		// торгуются паи и облигации, которых на странице быть не должно. На срочном
+		// рынке отбор делает Watchlist по коду контракта.
+		if tape.Engine != stockEngine || tape.Board == "" {
+			c.log.Info().Str("tape", tape.Name).Int("securities", len(list)).
+				Msg("robots: справочник инструментов обновлён")
 			continue
 		}
 		shares := make(map[string]bool, len(list))
@@ -282,6 +307,19 @@ func (c *Collector) refreshUniverse(ctx context.Context) {
 			Int("securities", len(list)).Int("shares", len(shares)).
 			Msg("robots: справочник инструментов обновлён")
 	}
+}
+
+// Instruments — справочник по тикерам, которые сейчас на странице. Отдаётся весь
+// известный: страница сама берёт из него нужные строки.
+func (c *Collector) Instruments() []Instrument {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Instrument, 0, len(c.instruments))
+	for _, inst := range c.instruments {
+		out = append(out, inst)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out
 }
 
 // pollTape тянет ленту рынка инкрементально по курсору TRADENO.
@@ -524,8 +562,17 @@ func (c *Collector) scanOnce(ctx context.Context) {
 	now := c.now()
 
 	c.mu.Lock()
+	started := time.Now()
 	found := c.det.Scan(now)
 	c.reg.observe(found, now, c.det.Heads(now))
+	// Скан держит мьютекс, под которым в ленты кладутся принты потока. Пока он
+	// укладывается в долю интервала, это незаметно; если перестанет — принты
+	// начнут копиться в буфере канала, и об этом надо знать до того, как буфер
+	// переполнится.
+	if took := time.Since(started); took > c.opts.ScanInterval/2 {
+		c.log.Warn().Dur("took", took).Dur("interval", c.opts.ScanInterval).
+			Int("symbols", len(c.det.tapes)).Msg("robots: скан занимает больше половины интервала")
+	}
 	dirty := c.reg.takeDirty()
 	rows := make([]RobotRow, 0, len(dirty))
 	for _, s := range dirty {

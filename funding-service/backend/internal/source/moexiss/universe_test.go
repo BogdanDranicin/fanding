@@ -60,12 +60,11 @@ func TestFetchBoardSecuritiesEmpty(t *testing.T) {
 	}
 }
 
-// Без режима торгов запрос не имеет смысла — рынок целиком ISS справочником не отдаёт.
-func TestFetchBoardSecuritiesNeedsBoard(t *testing.T) {
-	_, err := NewClient().FetchBoardSecurities(context.Background(), TradeFeed{
-		Engine: "stock", Market: "shares",
-	})
+// Борд необязателен — срочный рынок отдаёт справочник целиком, — а вот без рынка
+// адресовать запрос нечем.
+func TestFetchBoardSecuritiesNeedsMarket(t *testing.T) {
+	_, err := NewClient().FetchBoardSecurities(context.Background(), TradeFeed{Engine: "stock"})
 	if err == nil {
-		t.Fatal("запрос без борда принят")
+		t.Fatal("запрос без рынка принят")
 	}
 }

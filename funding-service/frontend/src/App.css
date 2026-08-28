@@ -1578,18 +1578,18 @@ details[open] > .accordion-summary::before {
    в шапке; на узком экране, где сетка рассыпается, её возвращает .rb-col::before
    из data-label — там она и правда нужна.
 
-   Колонки: тикер · направление · объём за раз · тайминг · до удара · сила ·
-   объём серии · статус (+ кнопка сигнала в живом срезе) + шеврон. */
+   Колонки: тикер · направление · объём за раз · тайминг · поток · до удара ·
+   сила · ход цены · объём серии · статус (+ кнопка сигнала в живом срезе) + шеврон. */
 .rb-row {
   display: grid;
   grid-template-columns:
-    minmax(92px, 1fr)            /* тикер */
-    minmax(80px, 0.9fr)          /* направление */
-    repeat(5, minmax(76px, 1fr)) /* объём за раз … объём серии */
-    minmax(128px, 1.3fr)         /* статус */
+    minmax(84px, 1fr)            /* тикер */
+    minmax(72px, 0.8fr)          /* направление */
+    repeat(7, minmax(72px, 1fr)) /* объём за раз … объём серии */
+    minmax(120px, 1.2fr)         /* статус */
     14px;                        /* шеврон */
   align-items: center;
-  gap: 4px 14px;
+  gap: 4px 12px;
 }
 
 /* История: граф семь — «до удара» и «силы» в ней не бывает, вместо них
@@ -1597,20 +1597,20 @@ details[open] > .accordion-summary::before {
    живого среза и справа зияли бы две пустые графы. */
 .rb-row-hist {
   grid-template-columns:
-    minmax(92px, 1fr)            /* тикер */
-    minmax(80px, 0.9fr)          /* направление */
-    repeat(4, minmax(76px, 1fr)) /* объём за раз … объём серии */
-    minmax(150px, 1.5fr)         /* когда */
+    minmax(84px, 1fr)            /* тикер */
+    minmax(72px, 0.8fr)          /* направление */
+    repeat(6, minmax(72px, 1fr)) /* объём за раз … объём серии */
+    minmax(140px, 1.4fr)         /* когда */
     14px;                        /* шеврон */
 }
 
 /* В живом срезе к строке добавляется кнопка сигнала — ещё одна колонка. */
 .rb-row-live {
   grid-template-columns:
-    minmax(92px, 1fr)
-    minmax(80px, 0.9fr)
-    repeat(5, minmax(76px, 1fr))
-    minmax(128px, 1.3fr)
+    minmax(84px, 1fr)
+    minmax(72px, 0.8fr)
+    repeat(7, minmax(72px, 1fr))
+    minmax(120px, 1.2fr)
     28px
     14px;
 }
@@ -1757,6 +1757,46 @@ details[open] > .accordion-summary::before {
 /* Пустая клетка на месте кнопки сигнала: у итога по бумаге своего сигнала нет,
    но колонка должна остаться, иначе шеврон уедет под соседнюю графу. */
 .rb-group-spacer { display: block; }
+
+/* Подпись бумаги под строкой-итогом. Лежит внутри summary и занимает всю ширину
+   сетки: строка из имени и справочных величин не колонка таблицы, и втискивать
+   её в графу тикера значило бы обрезать многоточием и то, и другое. */
+.rb-instrument {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.rb-instrument-name { color: var(--text-secondary); }
+.rb-instrument-spec { color: var(--text-muted); }
+
+/* Завершённые роботы бумаги — свёрнутый список внутри группы. Раскрывается
+   строчкой-ссылкой, а не карточкой: это не самостоятельный раздел, а хвост. */
+.rb-finished {
+  border-top: 1px solid var(--border);
+}
+
+.rb-finished-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rb-finished-summary::-webkit-details-marker { display: none; }
+.rb-finished-summary::marker { content: none; }
+.rb-finished-summary:hover { color: var(--text-secondary); }
+.rb-finished[open] > .rb-finished-summary .jrn-chevron { transform: rotate(90deg); }
 
 /* Строки роботов внутри группы — продолжение той же таблицы, а не вложенные
    карточки. Раньше каждая лежала в собственной рамке внутри рамки группы:
