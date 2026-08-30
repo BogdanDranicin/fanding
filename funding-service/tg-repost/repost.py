@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import datetime as dt
 import logging
 import os
@@ -33,6 +34,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import (
     Channel,
     Chat,
+    MessageEntityBold,
     MessageMediaWebPage,
     MessageService,
     User,
@@ -77,6 +79,8 @@ class Config:
     dry_run: bool
     allow_retarget: bool
     send_canary: bool
+    show_author: bool
+    author_template: str
     include_media: bool
     include_documents: bool
     albums: bool
@@ -128,6 +132,10 @@ class Config:
             dry_run=env_bool("DRY_RUN", True),
             allow_retarget=env_bool("ALLOW_RETARGET", False),
             send_canary=env_bool("SEND_CANARY", True),
+            show_author=env_bool("SHOW_AUTHOR", True),
+            # Подпись автора первой строкой; {name} подставляется при отправке.
+            # \n в .env приезжает двумя символами — разворачиваем в перевод строки.
+            author_template=(os.getenv("AUTHOR_TEMPLATE") or "{name}:\n").replace("\\n", "\n"),
             include_media=env_bool("INCLUDE_MEDIA", True),
             include_documents=env_bool("INCLUDE_DOCUMENTS", True),
             albums=env_bool("ALBUMS", True),
@@ -139,6 +147,39 @@ class Config:
             state_db=os.getenv("STATE_DB") or "./state.db",
             proxy_url=(os.getenv("TG_PROXY_URL") or "").strip(),
         )
+
+
+def utf16len(s: str) -> int:
+    """Длина в кодовых единицах UTF-16 — именно в них Telegram считает смещения."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def shift_entities(entities, delta: int):
+    """Сдвигает разметку исходного сообщения на длину приписанной подписи автора.
+
+    Без сдвига жирный/курсив/ссылки уезжают на начало текста. Копируем объекты,
+    чтобы не портить сообщение, которое Telethon мог закэшировать.
+    """
+    out = []
+    for e in entities or []:
+        e = copy.copy(e)
+        e.offset += delta
+        out.append(e)
+    return out
+
+
+async def author_of(msg) -> str:
+    """Кто написал сообщение: пользователь, канал или подпись автора поста."""
+    try:
+        sender = await msg.get_sender()
+    except Exception:
+        sender = None
+    if sender is not None:
+        name = utils.get_display_name(sender)
+        if name:
+            return name
+    # У постов в канале отправителя как такового нет — есть подпись, если включена.
+    return getattr(msg, "post_author", None) or ""
 
 
 def session_path() -> str:
@@ -426,21 +467,50 @@ class Sender:
                 await asyncio.sleep(wait)
         raise RuntimeError("не удалось отправить после 5 попыток из-за FloodWait")
 
+    async def with_author(self, msg, text: str, entities, limit: int):
+        """Приписывает строку с автором и возвращает (текст, разметка, отдельная_строка).
+
+        Если подпись не влезает в лимит сообщения (4096) или подписи (1024),
+        отдаём её третьим элементом — она уйдёт отдельным сообщением перед контентом.
+        """
+        if not self.cfg.show_author:
+            return text, entities, None
+        name = await author_of(msg)
+        if not name:
+            return text, entities, None
+
+        prefix = self.cfg.author_template.replace("{name}", name)
+        delta = utf16len(prefix)
+        if delta + utf16len(text) > limit:
+            return text, entities, prefix.rstrip("\n")
+
+        # Имя выделяем жирным, перевод строки в выделение не включаем.
+        bold = MessageEntityBold(offset=0, length=utf16len(prefix.rstrip("\n")))
+        return prefix + text, [bold] + shift_entities(entities, delta), None
+
     async def send_text(self, msg):
         self.guard()
         preview = isinstance(msg.media, MessageMediaWebPage)
+        text, entities, separate = await self.with_author(
+            msg, msg.message or "", msg.entities, 4096)
+        if separate:
+            await self.call(lambda: self.client.send_message(self.dst, message=separate))
         res = await self.call(lambda: self.client.send_message(
             self.dst,
-            message=msg.message or "",
-            formatting_entities=msg.entities or None,
+            message=text,
+            formatting_entities=entities or None,
             link_preview=preview,
         ))
         return getattr(res, "id", None)
 
     async def send_single_media(self, msg):
         self.guard()
-        caption = msg.message or ""
-        entities = msg.entities or None
+        # У подписи к медиа лимит 1024 символа, а не 4096, как у текста.
+        caption, entities, separate = await self.with_author(
+            msg, msg.message or "", msg.entities, 1024)
+        entities = entities or None
+        if separate:
+            await self.call(lambda: self.client.send_message(self.dst, message=separate))
 
         if not self.src_protected:
             try:
@@ -467,6 +537,17 @@ class Sender:
     async def send_album(self, group):
         self.guard()
         captions = [(m.message or "") for m in group]
+        # В альбоме подписи уходят без разметки, поэтому автора приписываем
+        # обычным текстом к первой подписи.
+        if self.cfg.show_author:
+            name = await author_of(group[0])
+            if name:
+                prefix = self.cfg.author_template.replace("{name}", name)
+                if utf16len(prefix) + utf16len(captions[0]) <= 1024:
+                    captions[0] = prefix + captions[0]
+                else:
+                    await self.call(lambda: self.client.send_message(
+                        self.dst, message=prefix.rstrip("\n")))
 
         if not self.src_protected:
             try:

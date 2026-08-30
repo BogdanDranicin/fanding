@@ -26,10 +26,26 @@ def user(uid, name="Вася"):
     return User(id=uid, first_name=name, access_hash=1)
 
 
-def msg(mid, text="привет", media=None, grouped_id=None, document=None):
-    m = types.SimpleNamespace(id=mid, message=text, entities=None, media=media,
-                              grouped_id=grouped_id, document=document)
-    return m
+class FakeMsg:
+    """Минимум полей сообщения, которыми пользуется repost.py."""
+
+    def __init__(self, mid, text="привет", media=None, grouped_id=None,
+                 document=None, entities=None, sender=None, post_author=None):
+        self.id = mid
+        self.message = text
+        self.entities = entities
+        self.media = media
+        self.grouped_id = grouped_id
+        self.document = document
+        self.post_author = post_author
+        self._sender = sender
+
+    async def get_sender(self):
+        return self._sender
+
+
+def msg(mid, text="привет", **kw):
+    return FakeMsg(mid, text, **kw)
 
 
 class FakeClient:
@@ -38,6 +54,7 @@ class FakeClient:
         self.entities = entities  # {raw -> entity}
         self.messages = messages or []
         self.sent = []
+        self.sent_entities = []
 
     async def get_me(self):
         return self.me
@@ -58,6 +75,7 @@ class FakeClient:
 
     async def send_message(self, dst, message="", **kw):
         self.sent.append((repost.peer_key(dst), message))
+        self.sent_entities.append(kw.get("formatting_entities"))
         return types.SimpleNamespace(id=1000 + len(self.sent))
 
     async def send_file(self, dst, file, **kw):
@@ -264,6 +282,60 @@ def t_dry_run_does_not_touch_state():
     assert st.count(repost.peer_key(src)) == 0, "холостой прогон записал состояние"
 
 
+def t_author_prefix_and_entity_shift():
+    """Подпись автора приписывается, а разметка исходного текста сдвигается на её длину."""
+    from telethon.tl.types import MessageEntityBold
+
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("author")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", SHOW_AUTHOR="true")
+    # «жирным» выделено слово «мир» — 3 символа начиная с 7-го
+    m = msg(1, "привет мир", entities=[MessageEntityBold(offset=7, length=3)],
+            sender=user(42, "Пётр"))
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, [m])
+    s, d = run_preflight(cl, cfg, st)
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.backfill(cl, cfg, sender))
+
+    assert len(cl.sent) == 1, cl.sent
+    text = cl.sent[0][1]
+    assert text == "Пётр:\nпривет мир", repr(text)
+
+    ents = cl.sent_entities[0]
+    delta = repost.utf16len("Пётр:\n")
+    assert ents[0].offset == 0 and ents[0].length == repost.utf16len("Пётр:"), ents[0]
+    assert ents[1].offset == 7 + delta, "разметка не сдвинута: %r" % (ents[1].offset,)
+    assert ents[1].length == 3
+    # исходное сообщение не должно быть испорчено сдвигом
+    assert m.entities[0].offset == 7, "сдвинули разметку в исходном сообщении"
+
+
+def t_author_off_and_long_text():
+    """SHOW_AUTHOR=false ничего не приписывает; длинный текст уводит подпись в отдельное сообщение."""
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+
+    st = fresh_state("noauthor")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", SHOW_AUTHOR="false")
+    m = msg(1, "текст", sender=user(42, "Пётр"))
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, [m])
+    s, d = run_preflight(cl, cfg, st)
+    asyncio.run(repost.backfill(cl, cfg, repost.Sender(cl, cfg, st, s, d)))
+    assert cl.sent[0][1] == "текст", cl.sent
+
+    st2 = fresh_state("longauthor")
+    cfg2 = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", SHOW_AUTHOR="true")
+    long_text = "я" * 4095
+    m2 = msg(1, long_text, sender=user(42, "Пётр"))
+    cl2 = FakeClient(user(7), {-100111: src, -100222: dst}, [m2])
+    s2, d2 = run_preflight(cl2, cfg2, st2)
+    asyncio.run(repost.backfill(cl2, cfg2, repost.Sender(cl2, cfg2, st2, s2, d2)))
+    assert len(cl2.sent) == 2, "подпись должна уйти отдельным сообщением: %r" % (len(cl2.sent),)
+    assert cl2.sent[0][1] == "Пётр:", cl2.sent[0]
+    assert cl2.sent[1][1] == long_text
+
+
 def t_session_from_file():
     """Сессия читается из файла в /data, а битая строка отсекается до подключения."""
     from telethon.crypto import AuthKey
@@ -303,7 +375,8 @@ for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_titl
            t_happy_and_binding, t_dry_run_sends_nothing, t_real_run_and_dedup,
            t_send_guard, t_parse_peer,
            t_filter_skip_not_marked, t_dry_run_does_not_touch_state,
-           t_session_from_file]:
+           t_session_from_file,
+           t_author_prefix_and_entity_shift, t_author_off_and_long_text]:
     try:
         fn()
         results.append(("OK  ", fn.__name__))
