@@ -151,6 +151,26 @@ docker compose -f docker-compose.prod.yml logs -f tg-repost
 | `HISTORY_DELAY_MS` | пауза между отправками, по умолчанию 3000 мс |
 | `TG_PROXY_URL` | `socks5://…`, если Telegram недоступен напрямую |
 
+## Если что-то не заводится
+
+**`Attempt 1 at connecting failed: TimeoutError`** — сервер не ходит в Telegram напрямую.
+Это ожидаемо: бэкенд проекта по той же причине работает через SOCKS5. Возьмите значение
+`TELEGRAM_PROXY_URL` из корневого `.env` и пропишите его в `tg-repost/.env`:
+
+```bash
+grep TELEGRAM_PROXY_URL /opt/fanding/funding-service/.env
+# TG_PROXY_URL=socks5://host:port  -> в tg-repost/.env
+```
+
+Прокси-режим требует пакета `python-socks`, он уже в `requirements.txt`; после правки
+`.env` образ пересобирать не нужно, но если менялся `requirements.txt` — нужен `build`.
+
+**Compose печатает свою справку** — потерялся перенос строки при вставке, команда ушла
+без подкоманды `run`. Наберите её одной строкой.
+
+**`No matching distribution found`** при сборке — на сервере старая версия файлов,
+сделайте `git pull` перед `build`.
+
 ## Тесты
 
 `test_guards.py` проверяет предохранители на подставном клиенте, без сети и без

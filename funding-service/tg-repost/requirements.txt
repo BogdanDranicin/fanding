@@ -1,2 +1,5 @@
 telethon==1.36.0
 python-dotenv==1.0.1
+# Нужен для TG_PROXY_URL: сам Telethon в SOCKS5/HTTP-прокси не умеет.
+# На сервере проекта Telegram доступен только через прокси, так что зависимость обязательная.
+python-socks[asyncio]>=2.4,<3

@@ -41,6 +41,15 @@ async def main() -> None:
         StringSession(), int(api_id), api_hash,
         proxy=parse_proxy((os.getenv("TG_PROXY_URL") or "").strip()),
     )
+    try:
+        await client.connect()
+    except Exception as e:
+        print("\n[СТОП] не удалось подключиться к Telegram (" + type(e).__name__ + "): " + str(e))
+        print("       Если сервер не ходит в Telegram напрямую — задайте в .env")
+        print("       TG_PROXY_URL=socks5://host:port (тот же прокси, что TELEGRAM_PROXY_URL")
+        print("       у бэкенда) и запустите login.py снова.\n")
+        raise SystemExit(1)
+
     async with client:
         me = await client.get_me()
         print("\nВход выполнен: " + (me.first_name or "") + " (id=" + str(me.id) + ")")

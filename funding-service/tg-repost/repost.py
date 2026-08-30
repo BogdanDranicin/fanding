@@ -641,7 +641,13 @@ async def amain(args) -> None:
     # а не парсится заново (иначе символы _ * ` в тексте ломают сообщение).
     client.parse_mode = None
 
-    await client.connect()
+    try:
+        await client.connect()
+    except Exception as e:
+        die("не удалось подключиться к Telegram (" + type(e).__name__ + "): " + str(e) + "\n"
+            "       Если сервер не ходит в Telegram напрямую — задайте TG_PROXY_URL\n"
+            "       (тот же SOCKS5, что у бэкенда в TELEGRAM_PROXY_URL), например\n"
+            "       TG_PROXY_URL=socks5://host:port", code=1)
     if not await client.is_user_authorized():
         die("сессия недействительна: выполните login.py и пропишите свежий TG_SESSION", code=1)
 
