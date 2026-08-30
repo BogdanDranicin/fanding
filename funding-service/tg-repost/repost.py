@@ -668,15 +668,36 @@ async def handle_group(sender: Sender, cfg: Config, group, delay_ms: int) -> Non
 # ------------------------------------------------------------------------ backfill
 
 
-async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
-    print("\n--- Перенос истории (от старых к новым) ---")
-    kwargs = {"reverse": True}  # reverse=True => хронологический порядок
+async def source_messages(client: TelegramClient, cfg: Config, src):
+    """Сообщения источника в хронологическом порядке, от старых к новым.
+
+    HISTORY_LIMIT=N означает «последние N», как этого и ждёшь: сначала берём N
+    новейших, потом разворачиваем. Просто limit при обходе от старых дал бы
+    N САМЫХ СТАРЫХ сообщений чата — совсем не то.
+    """
     if cfg.history_limit:
-        kwargs["limit"] = cfg.history_limit
+        kwargs = {"limit": cfg.history_limit}
+        if cfg.history_min_id:
+            kwargs["min_id"] = cfg.history_min_id
+        if cfg.history_since:
+            log.warning("HISTORY_SINCE игнорируется: задан HISTORY_LIMIT (последние %s)",
+                        cfg.history_limit)
+        for msg in reversed(await client.get_messages(src, **kwargs)):
+            yield msg
+        return
+
+    kwargs = {"reverse": True}  # reverse=True => от старых к новым
     if cfg.history_min_id:
         kwargs["min_id"] = cfg.history_min_id
     if cfg.history_since:
         kwargs["offset_date"] = cfg.history_since
+    async for msg in client.iter_messages(src, **kwargs):
+        yield msg
+
+
+async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
+    what = ("последние " + str(cfg.history_limit)) if cfg.history_limit else "вся история"
+    print("\n--- Перенос истории (" + what + ", от старых к новым) ---")
 
     pending = []
     pending_group = None
@@ -687,7 +708,7 @@ async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
             await handle_group(sender, cfg, pending, cfg.history_delay_ms)
             pending, pending_group = [], None
 
-    async for msg in client.iter_messages(sender.src, **kwargs):
+    async for msg in source_messages(client, cfg, sender.src):
         gid = getattr(msg, "grouped_id", None)
         if cfg.albums and gid is not None:
             if pending_group is not None and gid != pending_group:

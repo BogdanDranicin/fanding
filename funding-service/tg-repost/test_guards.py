@@ -64,8 +64,9 @@ class FakeClient:
             return self.entities[peer]
         raise ValueError("нет такого чата: %r" % (peer,))
 
-    async def get_messages(self, chat, limit=1):
-        return self.messages[:limit]
+    async def get_messages(self, chat, limit=1, **kw):
+        # Telegram отдаёт сообщения от новых к старым — фейк повторяет этот порядок.
+        return list(reversed(self.messages))[:limit]
 
     def iter_messages(self, chat, **kw):
         async def gen():
@@ -371,12 +372,29 @@ def t_session_from_file():
 
 
 
+
+def t_history_limit_takes_latest():
+    """HISTORY_LIMIT=N — это последние N сообщений, отправленные от старых к новым."""
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("limit")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false",
+                   SHOW_AUTHOR="false", HISTORY_LIMIT="2")
+    msgs = [msg(i, "сообщение %d" % i) for i in range(1, 6)]  # 1..5, 5 — самое новое
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, msgs)
+    s, d = run_preflight(cl, cfg, st)
+    asyncio.run(repost.backfill(cl, cfg, repost.Sender(cl, cfg, st, s, d)))
+    assert [t[1] for t in cl.sent] == ["сообщение 4", "сообщение 5"], cl.sent
+
+
+
 for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_title_mismatch,
            t_happy_and_binding, t_dry_run_sends_nothing, t_real_run_and_dedup,
            t_send_guard, t_parse_peer,
            t_filter_skip_not_marked, t_dry_run_does_not_touch_state,
            t_session_from_file,
-           t_author_prefix_and_entity_shift, t_author_off_and_long_text]:
+           t_author_prefix_and_entity_shift, t_author_off_and_long_text,
+           t_history_limit_takes_latest]:
     try:
         fn()
         results.append(("OK  ", fn.__name__))
