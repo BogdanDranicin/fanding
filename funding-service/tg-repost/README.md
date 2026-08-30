@@ -45,8 +45,9 @@ cp .env.example .env        # вписать TG_API_ID и TG_API_HASH
 python login.py             # интерактивно: телефон, код, при 2FA — пароль
 ```
 
-Скрипт напечатает строку сессии — вписать её в `.env` как `TG_SESSION`.
-Это доступ к аккаунту наравне с паролем: не коммитить, не пересылать.
+Скрипт сохранит строку сессии в файл рядом с состоянием (`STATE_DB`), и `repost.py`
+возьмёт её оттуда — вручную в `.env` ничего переносить не надо. Это доступ к аккаунту
+наравне с паролем: файл не коммитить, не пересылать.
 
 ### 3. Узнать точные id чатов
 
@@ -96,9 +97,9 @@ nano tg-repost/.env          # TG_API_ID, TG_API_HASH; TG_SESSION пока пу�
 C="docker compose -f docker-compose.prod.yml --profile repost"
 $C build tg-repost
 
-# вход: спросит телефон, код из Telegram, при 2FA — пароль
+# вход: спросит телефон, код из Telegram, при 2FA — пароль.
+# Сессия сама ляжет в том, в /data/session.txt — копировать её никуда не нужно.
 $C run --rm --entrypoint python tg-repost login.py
-nano tg-repost/.env          # вставить напечатанную строку в TG_SESSION
 
 $C run --rm tg-repost --dialogs   # точные id чатов
 nano tg-repost/.env               # SRC_CHAT, DST_CHAT, DST_TITLE_EXPECTED
@@ -149,7 +150,8 @@ docker compose -f docker-compose.prod.yml logs -f tg-repost
 | `ALLOW_RETARGET` | разрешить смену пары чатов после первого запуска |
 | `HISTORY_LIMIT` / `HISTORY_MIN_ID` / `HISTORY_SINCE` | с какого места переносить историю |
 | `HISTORY_DELAY_MS` | пауза между отправками, по умолчанию 3000 мс |
-| `TG_PROXY_URL` | `socks5://…`, если Telegram недоступен напрямую |
+| `TG_PROXY_URL` | `socks5://…`; на сервере проекта обязателен |
+| `TG_SESSION` / `SESSION_FILE` | строка сессии или путь к файлу с ней (по умолчанию `/data/session.txt`) |
 
 ## Если что-то не заводится
 
@@ -171,15 +173,20 @@ grep TELEGRAM_PROXY_URL /opt/fanding/funding-service/.env
 **`No matching distribution found`** при сборке — на сервере старая версия файлов,
 сделайте `git pull` перед `build`.
 
+**`binascii.Error: Incorrect padding`** — строка сессии в `.env` порвана при вставке.
+Не чините её руками: очистите `TG_SESSION`, снова выполните `login.py`, и сессия
+сохранится в `/data/session.txt` целиком.
+
 ## Тесты
 
 `test_guards.py` проверяет предохранители на подставном клиенте, без сети и без
 реального аккаунта: совпадение источника и цели, цель-пользователь, отсутствие прав,
 несовпадение названия, смену пары чатов, отсутствие отправок в `DRY_RUN`, отсутствие
-дублей при повторном прогоне и срабатывание `send_guard` при подмене цели.
+дублей при повторном прогоне, срабатывание `send_guard` при подмене цели
+и чтение сессии из файла (включая отказ на порванной строке).
 
 ```bash
-python test_guards.py      # 12 проверок, код возврата 0 = всё в порядке
+python test_guards.py      # 13 проверок, код возврата 0 = всё в порядке
 ```
 
 ## Ограничения

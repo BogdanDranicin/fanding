@@ -1,12 +1,13 @@
 """Проверка предохранителей tg-repost без обращения к сети."""
 import asyncio
 import datetime as dt
+import io
 import os
 import sys
 import tempfile
 import types
 
-sys.path.insert(0, r"C:\porjects\22.21.1\fanding\funding-service\tg-repost")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from telethon.tl.types import Channel, User
 
@@ -263,10 +264,46 @@ def t_dry_run_does_not_touch_state():
     assert st.count(repost.peer_key(src)) == 0, "холостой прогон записал состояние"
 
 
+def t_session_from_file():
+    """Сессия читается из файла в /data, а битая строка отсекается до подключения."""
+    from telethon.crypto import AuthKey
+    from telethon.sessions import StringSession
+
+    # Пустая сессия сохраняется в пустую строку, поэтому собираем настоящую:
+    # с dc и ключом — это и есть те ~350 символов, что рвутся при копировании.
+    ss = StringSession()
+    ss.set_dc(2, "149.154.167.51", 443)
+    ss.auth_key = AuthKey(os.urandom(256))
+    good = ss.save()
+    assert len(good) > 300, len(good)
+
+    d = tempfile.mkdtemp()
+    os.environ.pop("TG_SESSION", None)
+    os.environ["STATE_DB"] = os.path.join(d, "state.db")
+    with open(os.path.join(d, "session.txt"), "w", encoding="utf-8") as f:
+        f.write(good + "\n")
+    assert repost.read_session() == good, "сессия не подхватилась из файла"
+
+    os.environ["TG_SESSION"] = good
+    assert repost.read_session() == good, "переменная окружения должна иметь приоритет"
+
+    repost.check_session(good)  # корректная строка проходит
+    try:
+        repost.check_session(good[:-7])  # обрезанная при копировании в .env
+    except SystemExit as e:
+        assert e.code == 1, e.code
+    else:
+        raise AssertionError("битая строка сессии прошла проверку")
+    os.environ.pop("STATE_DB", None)
+
+
+
+
 for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_title_mismatch,
            t_happy_and_binding, t_dry_run_sends_nothing, t_real_run_and_dedup,
            t_send_guard, t_parse_peer,
-           t_filter_skip_not_marked, t_dry_run_does_not_touch_state]:
+           t_filter_skip_not_marked, t_dry_run_does_not_touch_state,
+           t_session_from_file]:
     try:
         fn()
         results.append(("OK  ", fn.__name__))

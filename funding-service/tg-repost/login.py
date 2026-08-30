@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """
-Разовый вход в Telegram под своим аккаунтом: печатает строку сессии для TG_SESSION.
+Разовый вход в Telegram под своим аккаунтом: сохраняет строку сессии для repost.py.
 
-Запускать ТОЛЬКО локально, вручную, в обычном терминале — нужен ввод кода из Telegram.
-На сервере интерактивного ввода нет, поэтому туда уезжает уже готовая строка сессии.
+Запускать вручную в интерактивном терминале — нужен ввод кода из Telegram. На сервере
+это делается в контейнере:
+    docker compose -f docker-compose.prod.yml run --rm --entrypoint python tg-repost login.py
 
-Строка сессии = полноценный доступ к аккаунту. Не коммитить, не пересылать,
-хранить только в .env (он в .gitignore).
+Сессия пишется в файл рядом с состоянием (том /data), поэтому переносить её руками
+в .env не нужно: длинная строка при копировании легко рвётся, и Telethon падает
+на `Incorrect padding`.
+
+Строка сессии = полноценный доступ к аккаунту. Не коммитить и не пересылать.
 """
 
 import asyncio
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+
+from repost import session_path
 
 
 def parse_proxy(url: str):
@@ -53,8 +60,21 @@ async def main() -> None:
     async with client:
         me = await client.get_me()
         print("\nВход выполнен: " + (me.first_name or "") + " (id=" + str(me.id) + ")")
-        print("\nСкопируйте строку ниже в .env как TG_SESSION (одной строкой):\n")
-        print(client.session.save())
+
+        session = client.session.save()
+        path = Path(session_path())
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(session, encoding="utf-8")
+            path.chmod(0o600)
+            print("\nСессия сохранена в " + str(path) + " — копировать её в .env не нужно,")
+            print("repost.py возьмёт её оттуда сам. TG_SESSION в .env оставьте пустым.")
+        except OSError as e:
+            # Файл недоступен (запуск без тома) — тогда остаётся ручной перенос.
+            print("\nНе удалось сохранить сессию в " + str(path) + ": " + str(e))
+            print("Скопируйте строку ниже в .env как TG_SESSION, ОДНОЙ строкой без переносов:\n")
+            print(session)
+
         print("\nЭта строка даёт полный доступ к аккаунту — храните как пароль.")
 
 

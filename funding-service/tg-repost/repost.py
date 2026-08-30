@@ -92,12 +92,17 @@ class Config:
     def load(require_chats: bool = True) -> "Config":
         # --dialogs запускают как раз для того, чтобы УЗНАТЬ id чатов: требовать их
         # заранее нельзя, иначе список чатов не посмотреть.
-        need = ["TG_API_ID", "TG_API_HASH", "TG_SESSION"]
+        need = ["TG_API_ID", "TG_API_HASH"]
         if require_chats:
             need += ["SRC_CHAT", "DST_CHAT"]
         missing = [k for k in need if not os.getenv(k)]
         if missing:
             die("не заданы обязательные переменные: " + ", ".join(missing) + " (см. .env.example)")
+
+        session = read_session()
+        if not session:
+            die("нет строки сессии: ни TG_SESSION в .env, ни файла " + session_path() + "\n"
+                "       Выполните login.py — он сохранит сессию в этот файл сам.")
 
         since_raw = (os.getenv("HISTORY_SINCE") or "").strip()
         since = None
@@ -114,7 +119,7 @@ class Config:
         return Config(
             api_id=env_int("TG_API_ID", 0),
             api_hash=os.environ["TG_API_HASH"].strip(),
-            session=os.environ["TG_SESSION"].strip(),
+            session=session,
             src_raw=(os.getenv("SRC_CHAT") or "").strip(),
             dst_raw=(os.getenv("DST_CHAT") or "").strip(),
             dst_title_expected=(os.getenv("DST_TITLE_EXPECTED") or "").strip(),
@@ -134,6 +139,41 @@ class Config:
             state_db=os.getenv("STATE_DB") or "./state.db",
             proxy_url=(os.getenv("TG_PROXY_URL") or "").strip(),
         )
+
+
+def session_path() -> str:
+    """Файл со строкой сессии — рядом с состоянием, то есть в томе /data."""
+    explicit = (os.getenv("SESSION_FILE") or "").strip()
+    if explicit:
+        return explicit
+    return str(Path(os.getenv("STATE_DB") or "./state.db").parent / "session.txt")
+
+
+def read_session() -> str:
+    """TG_SESSION из окружения, иначе файл в /data.
+
+    Файл надёжнее: строка сессии длиной ~350 символов при копировании в .env
+    легко рвётся переносом, и Telethon падает на `Incorrect padding`.
+    """
+    env = (os.getenv("TG_SESSION") or "").strip()
+    if env:
+        return env
+    path = Path(session_path())
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def check_session(session: str) -> None:
+    """Ранняя проверка строки сессии: понятная ошибка вместо трейсбека base64."""
+    try:
+        StringSession(session)
+    except Exception as e:
+        die("строка сессии повреждена (" + type(e).__name__ + ": " + str(e) + ").\n"
+            "       Длина: " + str(len(session)) + " символов, ожидается около 350 в одну строку.\n"
+            "       Чаще всего она рвётся при вставке в .env. Проще всего перевыпустить:\n"
+            "       login.py сохранит её в " + session_path() + " сам, тогда TG_SESSION\n"
+            "       в .env можно оставить пустым.", code=1)
 
 
 def parse_proxy(url: str):
@@ -637,6 +677,7 @@ async def amain(args) -> None:
     logging.getLogger("telethon").setLevel(logging.WARNING)
 
     cfg = Config.load(require_chats=not args.dialogs)
+    check_session(cfg.session)
     client = TelegramClient(
         StringSession(cfg.session), cfg.api_id, cfg.api_hash,
         proxy=parse_proxy(cfg.proxy_url),
