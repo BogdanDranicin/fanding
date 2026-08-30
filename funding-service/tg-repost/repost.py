@@ -89,9 +89,13 @@ class Config:
     proxy_url: str
 
     @staticmethod
-    def load() -> "Config":
-        missing = [k for k in ("TG_API_ID", "TG_API_HASH", "TG_SESSION", "SRC_CHAT", "DST_CHAT")
-                   if not os.getenv(k)]
+    def load(require_chats: bool = True) -> "Config":
+        # --dialogs запускают как раз для того, чтобы УЗНАТЬ id чатов: требовать их
+        # заранее нельзя, иначе список чатов не посмотреть.
+        need = ["TG_API_ID", "TG_API_HASH", "TG_SESSION"]
+        if require_chats:
+            need += ["SRC_CHAT", "DST_CHAT"]
+        missing = [k for k in need if not os.getenv(k)]
         if missing:
             die("не заданы обязательные переменные: " + ", ".join(missing) + " (см. .env.example)")
 
@@ -111,8 +115,8 @@ class Config:
             api_id=env_int("TG_API_ID", 0),
             api_hash=os.environ["TG_API_HASH"].strip(),
             session=os.environ["TG_SESSION"].strip(),
-            src_raw=os.environ["SRC_CHAT"].strip(),
-            dst_raw=os.environ["DST_CHAT"].strip(),
+            src_raw=(os.getenv("SRC_CHAT") or "").strip(),
+            dst_raw=(os.getenv("DST_CHAT") or "").strip(),
             dst_title_expected=(os.getenv("DST_TITLE_EXPECTED") or "").strip(),
             mode=mode,
             # Ключевой дефолт: без явного DRY_RUN=false скрипт ничего не отправляет.
@@ -632,7 +636,7 @@ async def amain(args) -> None:
     )
     logging.getLogger("telethon").setLevel(logging.WARNING)
 
-    cfg = Config.load()
+    cfg = Config.load(require_chats=not args.dialogs)
     client = TelegramClient(
         StringSession(cfg.session), cfg.api_id, cfg.api_hash,
         proxy=parse_proxy(cfg.proxy_url),
