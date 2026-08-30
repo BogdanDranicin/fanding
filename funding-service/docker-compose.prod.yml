@@ -63,5 +63,23 @@ services:
     networks:
       - funding-net
 
+  # Перепост из закрытого чата в закрытый канал от имени пользователя (Telethon).
+  # Профиль repost: сервис НЕ поднимается вместе с остальным стеком, только явно —
+  #   docker compose -f docker-compose.prod.yml --profile repost up -d --build tg-repost
+  # Так обычный деплой сайта не может случайно запустить перепост.
+  tg-repost:
+    build: ./tg-repost
+    profiles: ["repost"]
+    # Гвардов у скрипта три, и все они завершают процесс с ошибкой. unless-stopped
+    # крутил бы такой отказ бесконечно, поэтому ограничиваем число перезапусков.
+    restart: on-failure:5
+    env_file:
+      - ./tg-repost/.env
+    volumes:
+      - tg-repost-data:/data
+    networks:
+      - funding-net
+
 volumes:
   postgres-data:
+  tg-repost-data:

@@ -11,3 +11,9 @@ funding-service/logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# tg-repost: состояние и локальная сессия — не в гит
+funding-service/tg-repost/state.db*
+funding-service/tg-repost/*.session
+funding-service/tg-repost/.venv/
+__pycache__/
