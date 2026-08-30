@@ -82,6 +82,33 @@ python repost.py            # DRY_RUN=true — только список тог�
 Если история большая, разумно сначала прогнать кусок: `HISTORY_LIMIT=20`,
 посмотреть результат в канале, потом вернуть `0`.
 
+## Всё то же самое, но сразу на сервере (без Python на хосте)
+
+Шаги 2–6 можно не делать локально: на сервере есть Docker, и вход в аккаунт
+выполняется прямо в контейнере. Виндовые команды выше на Linux не работают —
+там `python3`, а активация venv это `source .venv/bin/activate`.
+
+```bash
+cd /opt/fanding/funding-service
+cp tg-repost/.env.example tg-repost/.env
+nano tg-repost/.env          # TG_API_ID, TG_API_HASH; TG_SESSION пока пустой
+
+C="docker compose -f docker-compose.prod.yml --profile repost"
+$C build tg-repost
+
+# вход: спросит телефон, код из Telegram, при 2FA — пароль
+$C run --rm --entrypoint python tg-repost login.py
+nano tg-repost/.env          # вставить напечатанную строку в TG_SESSION
+
+$C run --rm tg-repost --dialogs   # точные id чатов
+nano tg-repost/.env               # SRC_CHAT, DST_CHAT, DST_TITLE_EXPECTED
+$C run --rm tg-repost --check     # проверить строку «ЦЕЛЬ» глазами
+$C run --rm tg-repost             # холостой прогон, DRY_RUN=true
+```
+
+`run --rm` подключает тот же том `tg-repost-data`, что и постоянный контейнер,
+поэтому привязка и список перенесённого не теряются между запусками.
+
 ## Деплой на сервер
 
 Код едет вместе с репозиторием, сервис описан в `docker-compose.prod.yml` под
