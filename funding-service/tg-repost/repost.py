@@ -5,6 +5,13 @@
 Зачем userbot, а не bot API: бота нельзя добавить в чат, куда нет доступа, поэтому
 читаем источник обычным аккаунтом через MTProto (Telethon).
 
+Доставка бывает двух видов, переключается FORWARD:
+  пересылка (FORWARD=true, по умолчанию) — Telegram сам ставит «Переслано из …»,
+      сохраняет автора, разметку, альбомы и медиа, ничего не качая;
+  копирование (FORWARD=false) — сообщение собирается заново, автор приписывается
+      строкой. Нужно, когда источник запрещает пересылку (защита контента).
+Оба пути живут рядом: если пересылку запретят, достаточно поставить FORWARD=false.
+
 ГЛАВНОЕ ПРАВИЛО МОДУЛЯ: сообщение не должно уйти в чат-источник или в любой другой
 чат, кроме подтверждённой цели. Поэтому проверки цели продублированы на трёх уровнях:
   1. preflight   — разбор и сверка обоих чатов до единой отправки;
@@ -29,7 +36,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, utils
-from telethon.errors import FloodWaitError
+from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     Channel,
@@ -79,6 +86,7 @@ class Config:
     dry_run: bool
     allow_retarget: bool
     send_canary: bool
+    forward: bool
     show_author: bool
     author_template: str
     include_media: bool
@@ -132,6 +140,9 @@ class Config:
             dry_run=env_bool("DRY_RUN", True),
             allow_retarget=env_bool("ALLOW_RETARGET", False),
             send_canary=env_bool("SEND_CANARY", True),
+            # Пересылка вместо копии. Если Telegram или чат-источник её запретит —
+            # FORWARD=false возвращает прежнее поведение, остальной код не меняется.
+            forward=env_bool("FORWARD", True),
             show_author=env_bool("SHOW_AUTHOR", True),
             # Подпись автора первой строкой; {name} подставляется при отправке.
             # \n в .env приезжает двумя символами — разворачиваем в перевод строки.
@@ -425,6 +436,15 @@ async def preflight(client: TelegramClient, cfg: Config, state: State):
         state.set("dst_id", str(dst_key))
         state.set("dst_title", getattr(dst, "title", "") or "")
 
+    if cfg.forward and getattr(src, "noforwards", False):
+        log.warning("в источнике включена защита контента: пересылка невозможна, "
+                    "сообщения пойдут копиями")
+        print("ДОСТАВКА : копирование (источник запрещает пересылку)")
+    elif cfg.forward:
+        print("ДОСТАВКА : пересылка — в цели будет пометка «Переслано из …»")
+    else:
+        print("ДОСТАВКА : копирование (FORWARD=false) — без пометки «переслано»")
+
     print("Проверки пройдены. Ранее уже перенесено: " + str(state.count(src_key)) + " сообщений.")
     if cfg.dry_run:
         print("РЕЖИМ: DRY_RUN — ничего не отправляется, только лог того, что было бы отправлено.")
@@ -448,6 +468,17 @@ class Sender:
         self.failed = 0
         # Источник с защитой контента: пересылать нельзя, только скачать и загрузить заново.
         self.src_protected = bool(getattr(src, "noforwards", False))
+        # Пересылка ссылается на исходное сообщение, поэтому чат с защитой контента
+        # её не отдаст — такой источник сразу переводим на копирование.
+        self.forwarding = cfg.forward and not self.src_protected
+
+    def verb(self) -> str:
+        """Что уже сделано с сообщением — для лога после отправки."""
+        return "переслано" if self.forwarding else "скопировано"
+
+    def plan(self) -> str:
+        """Что было бы сделано — для холостого прогона, где ещё ничего не ушло."""
+        return "переслать" if self.forwarding else "скопировать"
 
     def guard(self):
         # Последний рубеж: даже если объект цели где-то подменили, дальше не пойдём.
@@ -487,6 +518,41 @@ class Sender:
         # Имя выделяем жирным, перевод строки в выделение не включаем.
         bold = MessageEntityBold(offset=0, length=utf16len(prefix.rstrip("\n")))
         return prefix + text, [bold] + shift_entities(entities, delta), None
+
+    async def forward(self, msgs):
+        """Пересылка пачки сообщений одним вызовом.
+
+        Telegram сам ставит «Переслано из …», сохраняет разметку, медиа и склейку
+        альбома, ничего не скачивая. Возвращает id сообщений в цели.
+        """
+        self.guard()
+        res = await self.call(lambda: self.client.forward_messages(
+            self.dst, [m.id for m in msgs], self.src,
+        ))
+        if not isinstance(res, list):
+            res = [res]
+        return [getattr(r, "id", None) for r in res]
+
+    async def deliver(self, group):
+        """Единственный вход для доставки 1..N сообщений. Возвращает id в цели.
+
+        Сначала пробуем переслать. Если чат-источник запрещает пересылку, Telegram
+        отвечает ChatForwardsRestrictedError — тогда переключаемся на копирование
+        до конца запуска, чтобы не биться в запрет на каждом сообщении.
+        """
+        if self.forwarding:
+            try:
+                return await self.forward(group)
+            except ChatForwardsRestrictedError:
+                log.warning("источник запрещает пересылку — дальше копируем "
+                            "(поставьте FORWARD=false, чтобы не пробовать её впредь)")
+                self.forwarding = False
+        if len(group) == 1:
+            msg = group[0]
+            if has_real_media(msg):
+                return [await self.send_single_media(msg)]
+            return [await self.send_text(msg)]
+        return [getattr(r, "id", None) for r in await self.send_album(group)]
 
     async def send_text(self, msg):
         self.guard()
@@ -621,17 +687,15 @@ async def handle_one(sender: Sender, cfg: Config, msg, delay_ms: int) -> None:
 
     if cfg.dry_run:
         sender.sent += 1
-        print("[DRY] -> " + short(msg))
+        print("[DRY] " + sender.plan() + ": " + short(msg))
         return
 
     try:
-        if has_real_media(msg):
-            dst_msg_id = await sender.send_single_media(msg)
-        else:
-            dst_msg_id = await sender.send_text(msg)
+        dst_ids = await sender.deliver([msg])
+        dst_msg_id = dst_ids[0] if dst_ids else None
         sender.state.mark(sender.src_key, msg.id, sender.dst_key, dst_msg_id)
         sender.sent += 1
-        log.info("перенесено %s -> #%s", short(msg), dst_msg_id)
+        log.info("%s %s -> #%s", sender.verb(), short(msg), dst_msg_id)
     except Exception as e:
         sender.failed += 1
         log.error("ОШИБКА на %s: %s: %s", short(msg), type(e).__name__, e)
@@ -649,16 +713,17 @@ async def handle_group(sender: Sender, cfg: Config, group, delay_ms: int) -> Non
 
     if cfg.dry_run:
         sender.sent += len(group)
-        print("[DRY] -> альбом из " + str(len(group)) + ": " + ", ".join(short(m) for m in group))
+        print("[DRY] " + sender.plan() + " альбом из " + str(len(group)) + ": "
+              + ", ".join(short(m) for m in group))
         return
 
     try:
-        res = await sender.send_album(group)
+        dst_ids = await sender.deliver(group)
         for i, m in enumerate(group):
-            dst_msg_id = getattr(res[i], "id", None) if i < len(res) else None
+            dst_msg_id = dst_ids[i] if i < len(dst_ids) else None
             sender.state.mark(sender.src_key, m.id, sender.dst_key, dst_msg_id)
         sender.sent += len(group)
-        log.info("перенесён альбом из %s (первое %s)", len(group), short(group[0]))
+        log.info("%s альбом из %s (первое %s)", sender.verb(), len(group), short(group[0]))
     except Exception as e:
         sender.failed += len(group)
         log.error("ОШИБКА на альбоме %s: %s: %s", short(group[0]), type(e).__name__, e)
@@ -729,7 +794,9 @@ async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
 
 
 async def run_live(client: TelegramClient, cfg: Config, sender: Sender) -> None:
-    print("--- Онлайн-режим: ждём новые сообщения (Ctrl+C для выхода) ---")
+    # Без упоминания Ctrl+C: в логах фонового контейнера такая подсказка вводит
+    # в заблуждение — там Ctrl+C закрывает только просмотр логов.
+    print("--- Онлайн-режим: ждём новые сообщения ---")
 
     @client.on(events.NewMessage(chats=sender.src))
     async def on_new(event):

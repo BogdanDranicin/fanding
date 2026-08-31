@@ -55,6 +55,9 @@ class FakeClient:
         self.messages = messages or []
         self.sent = []
         self.sent_entities = []
+        self.forwarded = []
+        # Ошибка, которую пересылка выбросит на ближайшем вызове (и только на нём).
+        self.forward_error = None
 
     async def get_me(self):
         return self.me
@@ -83,10 +86,19 @@ class FakeClient:
         self.sent.append((repost.peer_key(dst), "FILE"))
         return types.SimpleNamespace(id=2000 + len(self.sent))
 
+    async def forward_messages(self, dst, ids, from_peer, **kw):
+        if self.forward_error is not None:
+            err, self.forward_error = self.forward_error, None
+            raise err
+        self.forwarded.append((repost.peer_key(dst), repost.peer_key(from_peer), list(ids)))
+        return [types.SimpleNamespace(id=3000 + i) for i in ids]
 
+
+# FORWARD="false" — база для тестов копирования. Пересылку тесты включают явно,
+# а дефолт самого скрипта (пересылка) проверяется отдельно в t_forward_is_default.
 BASE_ENV = dict(
     TG_API_ID="1", TG_API_HASH="h", TG_SESSION="s",
-    MODE="history", DRY_RUN="true", SEND_CANARY="false",
+    MODE="history", DRY_RUN="true", SEND_CANARY="false", FORWARD="false",
     HISTORY_DELAY_MS="0", LIVE_DELAY_MS="0", LOG_LEVEL="CRITICAL",
 )
 
@@ -96,7 +108,8 @@ def make_cfg(**over):
     env.update(over)
     for k in list(os.environ):
         if k.startswith(("TG_", "SRC_", "DST_", "MODE", "DRY_", "SEND_", "ALLOW_",
-                         "HISTORY_", "LIVE_", "INCLUDE_", "ALBUMS", "STATE_DB")):
+                         "HISTORY_", "LIVE_", "INCLUDE_", "ALBUMS", "STATE_DB",
+                         "FORWARD", "SHOW_AUTHOR", "AUTHOR_")):
             del os.environ[k]
     os.environ.update({k: v for k, v in env.items() if v is not None})
     return repost.Config.load()
@@ -373,6 +386,108 @@ def t_session_from_file():
 
 
 
+def t_forward_is_default():
+    """Без переменной FORWARD скрипт пересылает, а не копирует."""
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", FORWARD=None)
+    assert cfg.forward is True, "дефолт FORWARD должен быть пересылкой"
+    assert make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", FORWARD="false").forward is False
+
+
+def t_forward_history_and_dedup():
+    """FORWARD=true: сообщения уходят пересылкой, копий не создаётся, дублей нет."""
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("fwd")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", FORWARD="true")
+    msgs = [msg(1, "раз"), msg(2, "два"), msg(3, "")]  # третье пустое -> пропуск
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, msgs)
+    s, d = run_preflight(cl, cfg, st)
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.backfill(cl, cfg, sender))
+
+    assert cl.sent == [], "в режиме пересылки не должно быть копий: %r" % (cl.sent,)
+    assert cl.forwarded == [
+        (repost.peer_key(dst), repost.peer_key(src), [1]),
+        (repost.peer_key(dst), repost.peer_key(src), [2]),
+    ], cl.forwarded
+    assert sender.sent == 2
+
+    # повторный запуск не должен переслать то же самое ещё раз
+    cl2 = FakeClient(user(7), {-100111: src, -100222: dst}, msgs)
+    s2, d2 = run_preflight(cl2, cfg, st)
+    asyncio.run(repost.backfill(cl2, cfg, repost.Sender(cl2, cfg, st, s2, d2)))
+    assert cl2.forwarded == [], "повторный прогон продублировал пересылку: %r" % (cl2.forwarded,)
+
+
+def t_forward_album_one_call():
+    """Альбом пересылается одним вызовом — иначе он рассыплется на отдельные посты."""
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("fwdalbum")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", FORWARD="true")
+    photo = object()
+    msgs = [msg(1, "подпись", media=photo, grouped_id=77),
+            msg(2, "", media=photo, grouped_id=77)]
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, msgs)
+    s, d = run_preflight(cl, cfg, st)
+    asyncio.run(repost.backfill(cl, cfg, repost.Sender(cl, cfg, st, s, d)))
+    assert cl.forwarded == [(repost.peer_key(dst), repost.peer_key(src), [1, 2])], cl.forwarded
+    assert st.count(repost.peer_key(src)) == 2, "оба сообщения альбома должны быть помечены"
+
+
+def t_forward_restricted_falls_back_to_copy():
+    """Запрет пересылки -> копирование, и повторно в запрет не упираемся."""
+    from telethon.errors import ChatForwardsRestrictedError
+
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("fwdban")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false",
+                   FORWARD="true", SHOW_AUTHOR="false")
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, [msg(1, "раз"), msg(2, "два")])
+    cl.forward_error = ChatForwardsRestrictedError(request=None)  # падает только первый вызов
+    s, d = run_preflight(cl, cfg, st)
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.backfill(cl, cfg, sender))
+
+    assert [t[1] for t in cl.sent] == ["раз", "два"], cl.sent
+    assert cl.forwarded == [], "после запрета пересылку пробовать больше не должны: %r" % (cl.forwarded,)
+    assert sender.forwarding is False
+    assert sender.sent == 2 and sender.failed == 0
+
+
+def t_protected_source_copies():
+    """Источник с защитой контента: пересылка невозможна, сразу копируем."""
+    src = channel(111, "Чат")
+    src.noforwards = True
+    dst = channel(222, "Мой архив")
+    st = fresh_state("noforwards")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false",
+                   FORWARD="true", SHOW_AUTHOR="false")
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, [msg(1, "раз")])
+    s, d = run_preflight(cl, cfg, st)
+    sender = repost.Sender(cl, cfg, st, s, d)
+    assert sender.forwarding is False
+    asyncio.run(repost.backfill(cl, cfg, sender))
+    assert cl.forwarded == [], cl.forwarded
+    assert [t[1] for t in cl.sent] == ["раз"], cl.sent
+
+
+def t_forward_dry_run_sends_nothing():
+    """Холостой прогон в режиме пересылки: ни одной пересылки и ни одной копии."""
+    src = channel(111, "Чат")
+    dst = channel(222, "Мой архив")
+    st = fresh_state("fwddry")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="true", FORWARD="true")
+    cl = FakeClient(user(7), {-100111: src, -100222: dst}, [msg(1), msg(2)])
+    s, d = run_preflight(cl, cfg, st)
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.backfill(cl, cfg, sender))
+    assert cl.forwarded == [] and cl.sent == [], (cl.forwarded, cl.sent)
+    assert sender.sent == 2
+    assert st.count(repost.peer_key(src)) == 0
+
+
 def t_history_limit_takes_latest():
     """HISTORY_LIMIT=N — это последние N сообщений, отправленные от старых к новым."""
     src = channel(111, "Чат")
@@ -394,6 +509,9 @@ for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_titl
            t_filter_skip_not_marked, t_dry_run_does_not_touch_state,
            t_session_from_file,
            t_author_prefix_and_entity_shift, t_author_off_and_long_text,
+           t_forward_is_default, t_forward_history_and_dedup, t_forward_album_one_call,
+           t_forward_restricted_falls_back_to_copy, t_protected_source_copies,
+           t_forward_dry_run_sends_nothing,
            t_history_limit_takes_latest]:
     try:
         fn()
