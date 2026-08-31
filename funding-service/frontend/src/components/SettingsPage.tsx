@@ -3,6 +3,7 @@ import { fetchTelegramLink } from '../api/auth';
 import { useAuthStore } from '../store/authStore';
 import { TimeAlarmsSettings } from './TimeAlarmsSettings';
 import {
+  alertAudioContext,
   clearCustomSound,
   getAlertVolume,
   getCustomSoundName,
@@ -12,9 +13,28 @@ import {
   setAlertVolume,
   setCustomSound,
 } from '../lib/alertSound';
+import {
+  isToneForced,
+  keepAliveStatus,
+  setToneForced,
+  type KeepAliveStatus,
+} from '../lib/tabKeepAlive';
 
 interface Props {
   onBack: () => void;
+}
+
+/** Одной строкой: чем вкладка удерживается прямо сейчас. */
+function aliveText(a: KeepAliveStatus): string {
+  if (!a.wanted) return 'удерживать нечего — ни сигналов, ни ожидания фандинга';
+  if (a.mode === 'tone') return 'неслышимый звук (значок динамика на вкладке)';
+  if (a.mode === 'lock') return 'тихое удержание, Web Lock';
+  return a.locks ? 'удержание не взято' : 'браузер не умеет Web Lock';
+}
+
+function frozeDate(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
 export function SettingsPage({ onBack }: Props) {
@@ -30,6 +50,8 @@ export function SettingsPage({ onBack }: Props) {
   const [volume, setVolume] = useState(getAlertVolume);
   const [soundName, setSoundName] = useState<string | null>(getCustomSoundName);
   const [soundError, setSoundError] = useState<string | null>(null);
+  const [tone, setTone] = useState(isToneForced);
+  const [alive, setAlive] = useState<KeepAliveStatus | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Ссылка нужна только непривязанному — за привязанного всё уже сказал /api/v1/me.
@@ -90,6 +112,23 @@ export function SettingsPage({ onBack }: Props) {
     setSoundName(null);
     setSoundError(null);
   };
+
+  const toggleTone = (on: boolean) => {
+    setToneForced(on);
+    setTone(on);
+    setAlive(keepAliveStatus(alertAudioContext()));
+  };
+
+  // Удержание заводится эффектами в корне приложения — на первом рендере этой
+  // страницы его ещё нет, и прочитанное состояние соврало бы. К тому же оно
+  // меняется само: браузер разрешает звук по клику, лок выдаётся не мгновенно,
+  // сигналы включают и выключают на соседней вкладке. Дешевле переспрашивать.
+  useEffect(() => {
+    const read = () => setAlive(keepAliveStatus(alertAudioContext()));
+    read();
+    const id = setInterval(read, 2000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="settings-page">
@@ -193,6 +232,38 @@ export function SettingsPage({ onBack }: Props) {
             ▶ Проверить звук
           </button>
         </div>
+      </div>
+
+      <div className="settings-section">
+        <h3>Вкладка в фоне</h3>
+        <p>
+          Браузер замораживает вкладку, которую не открывали минут пять: в ней
+          перестают выполняться таймеры, и сигнал не приходит вовсе. Пока чего-то
+          ждём — публикации фандинга или сигнала по времени, — страница держит
+          Web Lock: браузер такую вкладку не морозит, и стоит это ничего.
+        </p>
+
+        <div className="settings-row">
+          <span className="settings-row-label">Сейчас</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+            {alive ? aliveText(alive) : '…'}
+          </span>
+        </div>
+
+        {alive?.frozeAt != null && (
+          <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+            Браузер всё-таки заморозил вкладку {frozeDate(alive.frozeAt)} — на неделю
+            включён запасной неслышимый звук.
+          </span>
+        )}
+
+        <label className="settings-row">
+          <input type="checkbox" checked={tone} onChange={(e) => toggleTone(e.target.checked)} />
+          <span>
+            Держать вкладку неслышимым звуком (надёжнее всего, но на вкладке
+            появится значок динамика)
+          </span>
+        </label>
       </div>
 
       <TimeAlarmsSettings />

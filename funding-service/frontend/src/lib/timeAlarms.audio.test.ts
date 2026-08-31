@@ -80,11 +80,11 @@ describe('постановка звука в очередь WebAudio', () => {
     mod.scheduleAlarmTone('beep', 0.5, now + 60_000);
 
     const started = ctx.nodes.map((n) => n.startedAt).filter((v): v is number => v !== null);
-    // Первым в контексте заводится удерживающий тон — он идёт с нуля и без
-    // конца: пока в очереди есть звук, вкладку нельзя отдавать на заморозку.
-    expect(started).toContain(0);
     // currentTime = 0, до отметки минута → нота назначена на 60-ю секунду.
-    expect(started.filter((v) => v > 0)[0]).toBeCloseTo(60, 3);
+    // Ничего, кроме самой ноты, в контексте не заводится: вкладку от заморозки
+    // держит Web Lock, а не звук.
+    expect(started).toHaveLength(1);
+    expect(started[0]).toBeCloseTo(60, 3);
   });
 
   it('видит снос, когда часы аудиопотока стояли', () => {

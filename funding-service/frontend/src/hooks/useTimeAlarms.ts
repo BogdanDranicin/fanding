@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useAlarmStore } from '../store/alarmStore';
 import { alertAudioContext } from '../lib/alertSound';
-import { keepAudioAlive, releaseAudio } from '../lib/audioKeepAlive';
+import { keepTabAlive, releaseTabAlive } from '../lib/tabKeepAlive';
 import { notifyAlarm } from '../lib/alarmNotify';
 import {
   ALARM_ARM_MS,
@@ -34,11 +34,12 @@ function mskClock(ms: number): string {
  *
  * Как это выживает в свёрнутом окне — три независимых слоя, и нужны все три:
  *
- *  1. УДЕРЖАНИЕ ВКЛАДКИ (audioKeepAlive). Пока заведён хотя бы один сигнал,
- *     страница проигрывает неслышимый тон. Вкладку, которая играет звук, Chrome
- *     не замораживает и не душит её таймеры, а её аудиоконтекст не
- *     останавливает. Без этого слоя два остальных бесполезны: у замороженной
- *     страницы не выполняется ни один таймер, ставить звук в очередь некому.
+ *  1. УДЕРЖАНИЕ ВКЛАДКИ (tabKeepAlive). Пока заведён хотя бы один сигнал,
+ *     страница держит Web Lock — Chrome не замораживает вкладку, которая его
+ *     держит. Без этого слоя два остальных бесполезны: у замороженной страницы
+ *     не выполняется ни один таймер, ставить звук в очередь некому. Таймеры при
+ *     этом всё равно тормозятся до одного пробуждения в минуту — этого хватает,
+ *     потому что горизонт постановки звука десять минут.
  *  2. ЗАРАНЕЕ ПОСТАВЛЕННЫЙ ЗВУК. Ноты назначаются на будущий момент по часам
  *     аудиопотока за десять минут до отметки, поэтому даже разбуженный с
  *     опозданием таймер уже ничего не портит: звук к тому времени в очереди.
@@ -59,8 +60,8 @@ export function useTimeAlarms(): void {
   const hasAlarms = enabled && alarms.some((a) => a.enabled);
   useEffect(() => {
     if (!hasAlarms) return;
-    keepAudioAlive(alertAudioContext(), 'time-alarms');
-    return () => releaseAudio('time-alarms');
+    keepTabAlive(alertAudioContext(), 'time-alarms');
+    return () => releaseTabAlive('time-alarms');
   }, [hasAlarms]);
 
   useEffect(() => {

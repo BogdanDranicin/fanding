@@ -7,7 +7,6 @@
 // с переходами, зато принёс бы в арифметику расписания разбор строк.
 
 import { alertAudioContext, getCustomSoundDataURL } from './alertSound';
-import { keepAudioAlive } from './audioKeepAlive';
 
 const ALARMS_KEY = 'time_alarms.v1';
 const ENABLED_KEY = 'time_alarms_enabled';
@@ -289,10 +288,10 @@ export const ALARM_STALE_MS = 60_000;
  * у замороженной страницы таймеров нет вообще, и поставить звук за полторы
  * минуты она не успевает, потому что не просыпается ни разу.
  *
- * Теперь горизонт — десять минут, а от заморозки страницу держит непрерывный
- * неслышимый тон (см. audioKeepAlive). Расхождение часов аудиопотока и
- * системных на таком плече — единицы миллисекунд, и планировщик всё равно
- * сверяет его на каждом такте (ALARM_DRIFT_TOLERANCE_MS).
+ * Теперь горизонт — десять минут, а от заморозки страницу держит Web Lock
+ * (см. tabKeepAlive). Расхождение часов аудиопотока и системных на таком плече —
+ * единицы миллисекунд, и планировщик всё равно сверяет его на каждом такте
+ * (ALARM_DRIFT_TOLERANCE_MS).
  */
 export const ALARM_ARM_MS = 600_000;
 
@@ -453,10 +452,6 @@ export function scheduleAlarmTone(
 ): ScheduledTone {
   const c = alertAudioContext();
   if (!c) return SILENT;
-
-  // Пока в очереди есть звук, вкладку надо держать живой: у замороженной
-  // страницы браузер останавливает и аудиоконтекст, и очередь вместе с ним.
-  keepAudioAlive(c, 'time-alarms');
 
   let live = true;
   let queued: ScheduledTone = SILENT;
