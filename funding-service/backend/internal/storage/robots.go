@@ -15,15 +15,15 @@ func (s *Store) UpsertRobot(ctx context.Context, in robots.RobotRow) (int64, err
 	if in.ID == 0 {
 		const q = `
 			INSERT INTO robots
-				(symbol, side, qty_min, qty_max, qty_typical, period_sec, jitter,
+				(symbol, side, qty_min, qty_max, qty_typical, ranged, period_sec, jitter,
 				 prints, beats, confidence, price_first, price_last,
 				 first_seen, last_seen, detected_at, updated_at, active,
 				 hour_lots, day_side_lots)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 			RETURNING id`
 		var id int64
 		err := s.pool.QueryRow(ctx, q,
-			in.Symbol, in.Side, in.QtyMin, in.QtyMax, in.QtyTypical, in.PeriodSec, in.Jitter,
+			in.Symbol, in.Side, in.QtyMin, in.QtyMax, in.QtyTypical, in.Ranged, in.PeriodSec, in.Jitter,
 			in.Prints, in.Beats, in.Confidence, in.PriceFirst, in.PriceLast,
 			in.FirstSeen, in.LastSeen, in.DetectedAt, in.UpdatedAt, in.Active,
 			in.HourLots, in.DaySideLots,
@@ -82,7 +82,7 @@ func (s *Store) RecentRobots(ctx context.Context, f RobotFilter) ([]robots.Robot
 		limit = 200
 	}
 	const q = `
-		SELECT id, symbol, side, qty_min, qty_max, qty_typical, period_sec, jitter,
+		SELECT id, symbol, side, qty_min, qty_max, qty_typical, ranged, period_sec, jitter,
 		       prints, beats, confidence, price_first, price_last,
 		       first_seen, last_seen, detected_at, updated_at, active,
 		       hour_lots, day_side_lots
@@ -112,7 +112,7 @@ func (s *Store) RecentRobots(ctx context.Context, f RobotFilter) ([]robots.Robot
 	for rows.Next() {
 		var r robots.RobotRow
 		if err := rows.Scan(
-			&r.ID, &r.Symbol, &r.Side, &r.QtyMin, &r.QtyMax, &r.QtyTypical, &r.PeriodSec, &r.Jitter,
+			&r.ID, &r.Symbol, &r.Side, &r.QtyMin, &r.QtyMax, &r.QtyTypical, &r.Ranged, &r.PeriodSec, &r.Jitter,
 			&r.Prints, &r.Beats, &r.Confidence, &r.PriceFirst, &r.PriceLast,
 			&r.FirstSeen, &r.LastSeen, &r.DetectedAt, &r.UpdatedAt, &r.Active,
 			&r.HourLots, &r.DaySideLots,

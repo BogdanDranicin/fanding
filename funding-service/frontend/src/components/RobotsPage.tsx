@@ -393,7 +393,19 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
         </Cell>
 
         <Cell label="объём за раз">
-          <span className="rb-val">{volumeLabel(once)}</span>
+          {/* У диапазонного робота одно число — обман: он и заведён тем, что
+              каждый раз печатает разное. Показываем размах, типичный размер
+              уходит в подсказку и в подробности. */}
+          {r.ranged
+            ? (
+              <span
+                className="rb-val rb-ranged"
+                title={`объём плавает, чаще всего ${volumeLabel(once)}`}
+              >
+                {lots(r)}
+              </span>
+            )
+            : <span className="rb-val">{volumeLabel(once)}</span>}
         </Cell>
 
         <Cell label="тайминг">
@@ -508,8 +520,14 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
 
         <div className="jrn-detail-group">
           <div className="jrn-detail-title">Лотовка и объём</div>
-          <Detail label="Объём за раз" value={volumeLabel(once)} />
+          <Detail label={r.ranged ? 'Объём за раз, чаще всего' : 'Объём за раз'} value={volumeLabel(once)} />
           <Detail label="Границы размера" value={lots(r)} />
+          {r.ranged && (
+            <Detail
+              label="Как найден"
+              value="по такту: объём робот меняет каждый раз"
+            />
+          )}
           {r.print_trades > 0 && (
             <Detail
               label="Сделок биржи в одном принте"
@@ -596,12 +614,16 @@ function PaperHead({ symbol, rows, inst, live, threshold }: {
 
   return (
     <div className="rb-paper-head">
-      <span className={`rb-ticker${strong ? (leadLong ? ' rb-ticker-long' : ' rb-ticker-short') : ''}`}>
-        {symbol}
+      {/* Впереди имя контракта, следом код: «Eu-12.26 EUZ6». Имя — то, чем бумагу
+          называют, код — чем её ищут; читать список удобнее по названиям. */}
+      <span className="rb-paper-title">
+        {inst?.name && <span className="rb-paper-name">{inst.name}</span>}
+        <span className={`rb-ticker${strong ? (leadLong ? ' rb-ticker-long' : ' rb-ticker-short') : ''}`}>
+          {symbol}
+        </span>
       </span>
 
       <span className="rb-paper-about">
-        {inst?.name && <span className="rb-paper-name">{inst.name}</span>}
         {spec.length > 0 && <span className="rb-paper-spec">{spec.join(' · ')}</span>}
       </span>
 

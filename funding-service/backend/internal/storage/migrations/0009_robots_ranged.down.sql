@@ -1,0 +1,1 @@
+ALTER TABLE robots DROP COLUMN IF EXISTS ranged;

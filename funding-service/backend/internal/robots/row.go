@@ -11,6 +11,8 @@ type RobotRow struct {
 	QtyMin     float64
 	QtyMax     float64
 	QtyTypical float64
+	// Ranged — робота нашли по одному такту, объём он меняет каждый раз.
+	Ranged     bool
 	PeriodSec  float64
 	Jitter     float64
 	Prints     int
@@ -39,6 +41,7 @@ func rowOf(s Session) RobotRow {
 		QtyMin:     s.QtyMin,
 		QtyMax:     s.QtyMax,
 		QtyTypical: s.QtyTypical,
+		Ranged:     s.Ranged,
 		PeriodSec:  s.PeriodSec,
 		Jitter:     s.Jitter,
 		Prints:     s.Prints,
@@ -67,6 +70,7 @@ func SessionOf(r RobotRow) Session {
 			QtyMin:     r.QtyMin,
 			QtyMax:     r.QtyMax,
 			QtyTypical: r.QtyTypical,
+			Ranged:     r.Ranged,
 			PeriodSec:  r.PeriodSec,
 			Jitter:     r.Jitter,
 			Prints:     r.Prints,

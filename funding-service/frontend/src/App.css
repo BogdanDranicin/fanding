@@ -624,12 +624,12 @@ details[open] > .accordion-summary::before {
   font-size: 13px;
 }
 
-/* Active rows: dot | sym | name | lots | price | value | funding | fav | del
+/* Active rows: dot | name | sym | lots | price | value | funding | fav | del
    Columns are FIXED (not auto/minmax) so the separate header grid and each row
    grid compute identical widths and stay aligned. Only `name` flexes (1fr). */
 /* .pos-row-bottom uses display:contents so its children are direct grid items */
 .pos-row-active {
-  grid-template-columns: 8px 74px minmax(60px, 1fr) 54px 72px 132px 104px 26px 26px;
+  grid-template-columns: 8px minmax(60px, 1fr) 74px 54px 72px 132px 104px 26px 26px;
   background: rgba(255,255,255,0.03);
   border: 1px solid var(--border);
 }
@@ -641,7 +641,7 @@ details[open] > .accordion-summary::before {
 /* Header row matches active row exactly (same fixed columns → aligned). */
 .pos-header-row {
   display: grid;
-  grid-template-columns: 8px 74px minmax(60px, 1fr) 54px 72px 132px 104px 26px 26px;
+  grid-template-columns: 8px minmax(60px, 1fr) 74px 54px 72px 132px 104px 26px 26px;
   gap: 6px;
   padding: 0 9px 2px;
 }
@@ -655,9 +655,9 @@ details[open] > .accordion-summary::before {
   opacity: 0.6;
 }
 
-/* Search rows: dot | sym | name | hint | fav | add */
+/* Search rows: dot | name | sym | hint | fav | add */
 .pos-row-search {
-  grid-template-columns: 8px 80px 1fr auto auto auto;
+  grid-template-columns: 8px 1fr 80px auto auto auto;
 }
 
 .pos-row-search:hover {
@@ -1271,15 +1271,15 @@ details[open] > .accordion-summary::before {
 
   /* Active row: 2 lines */
   .pos-row-active {
-    grid-template-columns: 8px auto 1fr auto auto;
+    grid-template-columns: 8px 1fr auto auto auto;
     grid-template-rows: auto auto;
     row-gap: 6px;
   }
 
-  /* Row 1: dot | sym | name | fav | del */
+  /* Row 1: dot | name | sym | fav | del */
   .pos-row-active > .pos-dot    { grid-column: 1; grid-row: 1; }
-  .pos-row-active > .pos-sym    { grid-column: 2; grid-row: 1; }
-  .pos-row-active > .pos-name   { grid-column: 3; grid-row: 1; }
+  .pos-row-active > .pos-name   { grid-column: 2; grid-row: 1; }
+  .pos-row-active > .pos-sym    { grid-column: 3; grid-row: 1; }
   .pos-row-active > .pos-fav    { grid-column: 4; grid-row: 1; }
   .pos-row-active > .pos-delete { grid-column: 5; grid-row: 1; }
 
@@ -1678,6 +1678,13 @@ details[open] > .accordion-summary::before {
 /* Период — главная величина на странице, выделяем его. */
 .rb-period { color: var(--accent-up); }
 
+/* Диапазонный робот: в графе «объём за раз» стоит не число, а размах. Пунктир
+   под ним и говорит, что это границы, а не размер приказа. */
+.rb-ranged {
+  border-bottom: 1px dotted var(--text-muted);
+  cursor: help;
+}
+
 /* Пара меток времени идёт мельче: это справка о том, давно ли робот работает,
    а не число, которое сравнивают между строками. */
 .rb-span { font-size: 12px; }
@@ -1784,6 +1791,15 @@ details[open] > .accordion-summary::before {
   border-bottom: 1px solid var(--border-strong);
 }
 
+/* Имя и код бумаги идут одной парой: сначала имя, следом код. */
+.rb-paper-title {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
 .rb-ticker {
   flex: 0 0 auto;
   padding: 2px 8px;
@@ -1820,8 +1836,11 @@ details[open] > .accordion-summary::before {
   overflow: hidden;
 }
 
+/* Имя стоит первым и стало подписью бумаги, а не припиской к коду. */
 .rb-paper-name {
-  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

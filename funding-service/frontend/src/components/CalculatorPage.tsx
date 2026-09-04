@@ -201,8 +201,8 @@ function ActiveRow({ inst, lots, price, priceAuto, isFav, onLotsChange, onPriceC
   return (
     <div className="pos-row pos-row-active">
       <span className={`pos-dot pos-dot-${inst.market_type}`} title={inst.market_type === 'future' ? 'Фьючерс' : 'Акция'} />
-      <span className="pos-sym">{inst.symbol}</span>
       <span className="pos-name">{inst.short_name}</span>
+      <span className="pos-sym">{inst.symbol}</span>
       <div className="pos-row-bottom">
         <input
           className="calc-input calc-input-lots"
@@ -262,8 +262,8 @@ function SearchRow({ inst, isFav, onAdd, onToggleFav }: SearchRowProps) {
   return (
     <div className="pos-row pos-row-search">
       <span className={`pos-dot pos-dot-${inst.market_type}`} title={inst.market_type === 'future' ? 'Фьючерс' : 'Акция'} />
-      <span className="pos-sym">{inst.symbol}</span>
       <span className="pos-name">{inst.short_name}</span>
+      <span className="pos-sym">{inst.symbol}</span>
       <span className="pos-margin-hint">{hint}</span>
       <button className={`pos-fav ${isFav ? 'pos-fav-active' : ''}`} onClick={onToggleFav} title="Избранное">★</button>
       <button className="pos-add" onClick={onAdd}>+</button>
