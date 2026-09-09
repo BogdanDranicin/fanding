@@ -9,9 +9,6 @@ const fmtDayClock = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
-const fmtShort = new Intl.DateTimeFormat('ru-RU', {
-  timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit',
-});
 const fmtLots = new Intl.NumberFormat('ru-RU');
 
 // TICK_MS — с этим шагом пересчитываются обратные отсчёты и проверяется, не пора
@@ -27,12 +24,6 @@ const DEFAULT_THRESHOLD = 10;
 
 function clock(iso: string): string {
   try { return fmtClock.format(new Date(iso)); } catch { return iso; }
-}
-// shortClock — часы и минуты. Полное время с секундами уезжает в подсказку и в
-// подробности: пара меток «12:13:57–17:40:29» в одной графе не помещается ни на
-// каком разумном экране, а на вопрос «давно ли работает» отвечают и минуты.
-function shortClock(iso: string): string {
-  try { return fmtShort.format(new Date(iso)); } catch { return iso; }
 }
 function dayClock(iso: string): string {
   try { return fmtDayClock.format(new Date(iso)); } catch { return iso; }
@@ -271,6 +262,12 @@ function RangeFilter({ label, unit, value, onChange }: {
 // каждой ячейки и повторялась столько раз, сколько на странице строк, — на полусотне
 // роботов это сотня одинаковых слов «НАПРАВЛЕНИЕ», между которыми терялись числа.
 //
+// Порядок здесь обязан совпадать с порядком ячеек в RobotRow: это одна и та же
+// сетка, шапка просто нарисована отдельной строкой. Разъехавшись, списки не ломают
+// вёрстку и ничем себя не выдают — над «первым–последним» просто стоит слово
+// «сила», над «силой» — «до удара», и вся правая половина таблицы читается как
+// чужая. Ширины граф в .rb-row идут тем же порядком и от него же зависят.
+//
 // Графы одни и те же в обоих режимах, кроме одной. «До удара» в истории не
 // бывает по существу: серия закончилась, бить нечему, и обратный отсчёт для
 // робота, замолчавшего вчера, — не пустая графа, а неверная. На её месте стоит
@@ -287,13 +284,13 @@ function RangeFilter({ label, unit, value, onChange }: {
 // 0008), а не пряталось в разметке: теперь оба знаменателя сохраняются вместе
 // со строкой, и сила у сохранённых роботов настоящая.
 const COLUMNS_LIVE = [
-  '', 'объём за раз', 'тайминг', 'поток', 'сила',
-  'перв/последн', 'до удара', 'ход цены', 'объём серии', 'статус',
+  '', 'объём за раз', 'тайминг', 'поток',
+  'перв/последн', 'следующий удар', 'сила', 'ход цены', 'объём серии', 'статус',
 ] as const;
 
 const COLUMNS_HISTORY = [
-  '', 'объём за раз', 'тайминг', 'поток', 'сила',
-  'перв/последн', 'уверенность', 'ход цены', 'объём серии', 'когда',
+  '', 'объём за раз', 'тайминг', 'поток',
+  'перв/последн', 'уверенность', 'сила', 'ход цены', 'объём серии', 'когда',
 ] as const;
 
 /** Класс сетки строки. Живая строка шире на колонку кнопки сигнала. */
@@ -369,7 +366,6 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
   // Сильный робот подсвечивается в свою сторону: зелёный — набирает, красный — льёт.
   const strong = r.strength_pct >= threshold && r.strength_pct > 0;
   const classes = ['rb-card'];
-  if (r.misses > 0) classes.push('rb-missed');
   if (strong) classes.push(long ? 'rb-strong-long' : 'rb-strong-short');
 
   const beatSoon = Number.isFinite(left) && left <= ALARM_LEAD * 1000;
@@ -421,21 +417,25 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
           </span>
         </Cell>
 
+        {/* Секунды включения нужны наравне с часами: робота узнают по фазе, и
+            «17:40» вместо «17:40:29» стирает ровно то, чем один робот отличается
+            от другого на том же такте. */}
         <Cell label="перв/последн">
           <span className="rb-val rb-dim rb-span" title={`${dayClock(r.first_seen)} — ${dayClock(r.last_seen)}`}>
-            {shortClock(r.first_seen)}–{shortClock(r.last_seen)}
+            {clock(r.first_seen)}–{clock(r.last_seen)}
           </span>
         </Cell>
 
+        {/* Впереди само время удара, обратный отсчёт под ним. «Через 7.4 с» не
+            говорит, к какой секунде готовиться: пока читаешь строку, оно уже
+            другое, а «18:42:07» держится и записывается. */}
         {live && (
-          <Cell label="до удара">
-            {r.active
+          <Cell label="следующий удар">
+            {r.active && beatMs
               ? (
-                <span
-                  className={`rb-val rb-beat${beatSoon ? ' rb-beat-soon' : ''}`}
-                  title={beatMs ? `следующий принт в ${clock(new Date(beatMs).toISOString())}` : ''}
-                >
-                  {countdown(left)}
+                <span className={`rb-beat${beatSoon ? ' rb-beat-soon' : ''}`}>
+                  <span className="rb-val rb-beat-at">{clock(new Date(beatMs).toISOString())}</span>
+                  <span className="rb-beat-left">через {countdown(left)}</span>
                 </span>
               )
               : <Dash />}
@@ -483,11 +483,9 @@ function RobotRow({ r, nowMs, live, threshold, armed, onToggleAlarm, day }: RowP
         <Cell label={live ? 'статус' : 'когда'} className="rb-status-col">
           {!live
             ? <span className="rb-status rb-stopped">{dayClock(r.first_seen)} – {clock(r.last_seen)}</span>
-            : r.misses > 0
-              ? <span className="rb-status rb-warn">пропустил такт</span>
-              : r.active
-                ? <span className="rb-status rb-active">{r.provisional ? 'предварительно' : 'работает'}</span>
-                : <span className="rb-status rb-stopped">замолчал в {clock(r.last_seen)}</span>}
+            : r.active
+              ? <span className="rb-status rb-active">{r.provisional ? 'предварительно' : 'работает'}</span>
+              : <span className="rb-status rb-stopped">замолчал в {clock(r.last_seen)}</span>}
         </Cell>
 
         {live && (
@@ -713,7 +711,10 @@ export function RobotsPage() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [stream, setStream] = useState<StreamStatus | null>(null);
   const [symbol, setSymbol] = useState('');
-  const [confirmedOnly, setConfirmedOnly] = useState(false);
+  // Предварительные находки скрыты по умолчанию. Серия короче шести принтов —
+  // это ещё гипотеза, и на валюте таких гипотез больше, чем роботов: список
+  // открывается тем, что подтверждено, а остальное показывается по галочке.
+  const [showProvisional, setShowProvisional] = useState(false);
   // Фильтры по графам таблицы. Намеренно не сохраняются между сеансами: пустая
   // страница назавтра из-за забытого фильтра выглядит как сломанный сбор.
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -810,23 +811,25 @@ export function RobotsPage() {
 
   const shown = useMemo(
     () => rows.filter((r) => (!symbol || r.symbol === symbol)
-      && (!confirmedOnly || !r.provisional)
+      && (showProvisional || !r.provisional)
       && (!dirFilter || r.side === dirFilter)
       && inRange(r.period_sec, periodRange)
       && inRange(printOf(r), qtyRange)
       && inRange(volumeOf(r), volumeRange)
       && inRange(r.strength_pct, strengthRange)),
-    [rows, symbol, confirmedOnly, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
+    [rows, symbol, showProvisional, dirFilter, periodRange, qtyRange, volumeRange, strengthRange],
   );
 
-  const filtersOn = Boolean(symbol) || confirmedOnly || Boolean(dirFilter)
+  // Скрытые предварительные — это состояние по умолчанию, а не фильтр: считать
+  // их «включённым фильтром» значило бы вечно держать кнопку «Сбросить» активной.
+  const filtersOn = Boolean(symbol) || Boolean(dirFilter)
     || rangeActive(periodRange) || rangeActive(qtyRange)
     || rangeActive(volumeRange) || rangeActive(strengthRange);
 
   const resetFilters = () => {
     setSymbol('');
     setFiltersOpen(false);
-    setConfirmedOnly(false);
+    setShowProvisional(false);
     setDirFilter('');
     setPeriodRange(EMPTY_RANGE);
     setQtyRange(EMPTY_RANGE);
@@ -926,7 +929,7 @@ export function RobotsPage() {
           className="rb-hint"
           title={'Робот — это повтор: сделка одного размера (±1 лот) через ровный промежуток времени. '
             + 'На валюте серия засчитывается с третьего принта, на остальном — с шестого. '
-            + 'Пропустил такт — строка желтеет, пропустил второй подряд — уходит в историю.'
+            + 'Пропустил такт — сразу уходит в историю.'
             + (watching.length > 0 ? `
 
 В наблюдении ${watching.length} инструментов: ${watchRule}` : '')}
@@ -986,10 +989,10 @@ export function RobotsPage() {
         >
           <input
             type="checkbox"
-            checked={confirmedOnly}
-            onChange={(e) => setConfirmedOnly(e.target.checked)}
+            checked={showProvisional}
+            onChange={(e) => setShowProvisional(e.target.checked)}
           />
-          только подтверждённые
+          показать предварительные
           {provisionalCount > 0 && <span className="rb-badge">{provisionalCount}</span>}
         </label>
       </div>

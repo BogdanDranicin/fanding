@@ -1584,9 +1584,10 @@ details[open] > .accordion-summary::before {
   display: grid;
   grid-template-columns:
     22px                          /* сторона */
-    repeat(4, minmax(70px, 1fr))  /* объём за раз … сила */
-    minmax(92px, 1.1fr)           /* первый–последний */
-    minmax(64px, 0.85fr)          /* до удара либо уверенность */
+    repeat(3, minmax(70px, 1fr))  /* объём за раз, тайминг, поток */
+    minmax(124px, 1.3fr)          /* первый–последний, с секундами */
+    minmax(96px, 1fr)             /* следующий удар либо уверенность */
+    minmax(70px, 1fr)             /* сила */
     minmax(64px, 0.85fr)          /* ход цены */
     minmax(76px, 1fr)             /* объём серии */
     minmax(104px, 1.2fr)          /* статус либо когда */
@@ -1599,9 +1600,10 @@ details[open] > .accordion-summary::before {
 .rb-row-live {
   grid-template-columns:
     22px
-    repeat(4, minmax(70px, 1fr))
-    minmax(92px, 1.1fr)
-    minmax(64px, 0.85fr)
+    repeat(3, minmax(70px, 1fr))
+    minmax(124px, 1.3fr)
+    minmax(96px, 1fr)
+    minmax(70px, 1fr)
     minmax(64px, 0.85fr)
     minmax(76px, 1fr)
     minmax(104px, 1.2fr)
@@ -1914,14 +1916,33 @@ details[open] > .accordion-summary::before {
 
 .rb-dim { color: var(--text-muted); font-weight: 500; }
 
-/* Обратный отсчёт до удара. За три секунды до принта — та же граница, на которой
-   начинают звучать предупреждения, поэтому цифра меняет цвет вместе со звуком. */
-.rb-beat { color: var(--text-primary); }
+/* Следующий удар: время крупно, обратный отсчёт под ним и приглушённо — оба
+   значения об одном и том же, и второе не должно спорить с первым за взгляд.
+   За три секунды до принта графа меняет цвет: это та же граница, на которой
+   начинают звучать предупреждения, и глаз ловит её вместе со звуком. */
+.rb-beat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+.rb-beat-at { font-variant-numeric: tabular-nums; }
+
+.rb-beat-left {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
 
 .rb-beat-soon {
   color: var(--accent);
   animation: rb-pulse 1s ease-in-out infinite;
 }
+
+.rb-beat-soon .rb-beat-left { color: var(--accent); }
 
 @keyframes rb-pulse {
   0%, 100% { opacity: 1; }
@@ -1950,20 +1971,10 @@ details[open] > .accordion-summary::before {
 }
 
 /* Полоса слева — как быстрая метка строки: зелёная у сильного лонга, красная у
-   сильного шорта, жёлтая у пропустившего такт. Пропуск важнее силы и перекрывает
-   её: следующий несостоявшийся принт уберёт робота со страницы совсем. */
+   сильного шорта. Жёлтой метки «пропустил такт» больше нет: пропустивший уходит
+   со страницы тем же обходом, в котором пропуск замечен. */
 .rb-strong-long { box-shadow: inset 3px 0 0 var(--accent-up); }
 .rb-strong-short { box-shadow: inset 3px 0 0 var(--accent-down); }
-
-.rb-missed {
-  box-shadow: inset 3px 0 0 var(--accent-warn);
-  background: var(--accent-warn-soft);
-}
-
-.rb-warn {
-  color: var(--accent-warn);
-  font-weight: 600;
-}
 
 /* Кнопка звукового предупреждения о ближайшем ударе. */
 .rb-alarm {

@@ -117,28 +117,18 @@ func registryFixture(t *testing.T) (*registry, *Session, Robot) {
 	return reg, reg.sessions[0], rb
 }
 
-// Пропущенный такт подсвечивается, второй подряд убирает робота со страницы.
-func TestMissedBeatDropsRobotOnSecondMiss(t *testing.T) {
+// Первый же пропущенный такт убирает робота со страницы.
+func TestMissedBeatDropsRobotAtOnce(t *testing.T) {
 	reg, s, rb := registryFixture(t)
 	if s.Misses != 0 {
 		t.Fatalf("Misses = %d сразу после находки, хотим 0", s.Misses)
 	}
 
-	// Лента ушла на такт вперёд, а робот не напечатал — первый пропуск.
+	// Лента ушла на такт вперёд, а робот не напечатал — этого достаточно.
 	head := rb.LastSeen.Add(32 * time.Second)
 	reg.observe(nil, base.Add(5*time.Minute), map[string]time.Time{"SBER": head})
-	if len(reg.sessions) != 1 {
-		t.Fatalf("после первого пропуска сессий %d, хотим 1", len(reg.sessions))
-	}
-	if got := reg.sessions[0].Misses; got != 1 {
-		t.Fatalf("Misses = %d после первого пропуска, хотим 1", got)
-	}
-
-	// Второй такт подряд мимо — робота снимаем.
-	head = rb.LastSeen.Add(62 * time.Second)
-	reg.observe(nil, base.Add(6*time.Minute), map[string]time.Time{"SBER": head})
 	if len(reg.sessions) != 0 {
-		t.Fatalf("после второго пропуска сессий %d, хотим 0: %+v", len(reg.sessions), reg.sessions)
+		t.Fatalf("после пропуска сессий %d, хотим 0: %+v", len(reg.sessions), reg.sessions)
 	}
 
 	// Но в базу закрытая строка уйти обязана.
@@ -149,21 +139,20 @@ func TestMissedBeatDropsRobotOnSecondMiss(t *testing.T) {
 	if dirty[0].Active {
 		t.Error("снятая сессия должна закрыться в базе, а не остаться активной")
 	}
+	if dirty[0].Misses != 1 {
+		t.Errorf("Misses = %d у снятой строки, хотим 1: по нему видно, за что сняли", dirty[0].Misses)
+	}
 }
 
-// Робот, отработавший такт после пропуска, снова считается чистым.
-func TestMissCounterResetsOnNewPrint(t *testing.T) {
+// Робот, отработавший такт вовремя, остаётся на странице: голова ленты ушла на
+// период вперёд вместе с его собственным принтом, и пропуска тут нет.
+func TestPrintOnTimeKeepsRobot(t *testing.T) {
 	reg, _, rb := registryFixture(t)
 
-	reg.observe(nil, base.Add(5*time.Minute), map[string]time.Time{"SBER": rb.LastSeen.Add(32 * time.Second)})
-	if got := reg.sessions[0].Misses; got != 1 {
-		t.Fatalf("Misses = %d, хотим 1", got)
-	}
-
 	printed := rb
-	printed.LastSeen = rb.LastSeen.Add(60 * time.Second)
+	printed.LastSeen = rb.LastSeen.Add(30 * time.Second)
 	printed.Prints = rb.Prints + 1
-	reg.observe([]Robot{printed}, base.Add(6*time.Minute), map[string]time.Time{"SBER": printed.LastSeen})
+	reg.observe([]Robot{printed}, base.Add(5*time.Minute), map[string]time.Time{"SBER": printed.LastSeen})
 
 	if len(reg.sessions) != 1 {
 		t.Fatalf("сессий %d, хотим 1", len(reg.sessions))
@@ -178,7 +167,6 @@ func TestDroppedRobotIsNotRecreated(t *testing.T) {
 	reg, _, rb := registryFixture(t)
 
 	reg.observe(nil, base.Add(5*time.Minute), map[string]time.Time{"SBER": rb.LastSeen.Add(32 * time.Second)})
-	reg.observe(nil, base.Add(6*time.Minute), map[string]time.Time{"SBER": rb.LastSeen.Add(62 * time.Second)})
 	if len(reg.sessions) != 0 {
 		t.Fatalf("робот должен быть снят, сессий %d", len(reg.sessions))
 	}
