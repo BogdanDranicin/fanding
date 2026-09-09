@@ -306,6 +306,13 @@ func main() {
 	go func() { runDone <- runner.Run(ctx) }()
 	go writer.Run(ctx)
 
+	// Страховка ноги фьючерса: своим клиентом, а не клиентом опроса котировок.
+	// Чтение ленты за день тяжёлое и редкое, и делить с ним пул соединений, на
+	// котором висит секундный таймаут котировок, незачем.
+	go newSettlBackstop(moexiss.NewClient(), eng, []string{
+		source.SymbolUSDRUBF, source.SymbolEURRUBF, source.SymbolCNYRUBF,
+	}, log.Logger).Run(ctx)
+
 	go func() {
 		log.Info().Int("port", cfg.Port).Msg("http server listening")
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

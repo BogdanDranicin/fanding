@@ -103,7 +103,9 @@ type InstrumentFunding struct {
 	// SettlSource — чем посчитана нога: "live" — живой поток сделок брокера
 	// (окно закрыто своими же сделками в 15:30, отставание миллисекунды),
 	// "iss-trades" — точная лента MOEX ISS (запаздывает ~15 минут),
-	// "voltoday" — приближение по приросту VOLTODAY. Пустое — нога не заморожена.
+	// "iss-rebuild" — та же лента, перечитанная за день целиком, когда окно не
+	// закрыл ни один поток, "voltoday" — приближение по приросту VOLTODAY.
+	// Пустое — нога не заморожена.
 	SettlSource         string
 	CBFundingNoDeadband *float64 // CBFunding БЕЗ мёртвой зоны K1 — clamp(d, ±l2); чтобы видеть, зануляет ли K1
 }
@@ -706,6 +708,12 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 
 	// Заморозка, при которой лента сама не перешагнула 15:30, — аварийная: хвост
 	// окна мог не доехать. Помечаем значение предварительным, оно ещё уточнится.
+	//
+	// Уточнить его есть чем даже тогда, когда оба потоковых источника легли
+	// насовсем: с 15:50 ногу добирает бэкстоп, перечитывая ленту за день целиком
+	// (см. SettlNeedsRebuild). До 09.09.2026 такого источника не было, и
+	// приближение по ΔVOLTODAY доживало до рассылки: EURRUBF ушёл подписчикам
+	// как +0.06208 при биржевом SWAPRATE 0.15075 — нога 99.41258 вместо 99.50425.
 	provisional := !iss.crossed
 	if provisional {
 		e.log.Warn().
@@ -720,9 +728,10 @@ func (e *Engine) maybeFreezeSettl(sym string, mskTime time.Time) {
 
 // Значения settlSource — чем посчитана нога фьючерса.
 const (
-	settlSourceLive     = "live"       // живой поток сделок брокера
-	settlSourceISS      = "iss-trades" // точная лента сделок MOEX ISS
-	settlSourceVolToday = "voltoday"   // приближение по приросту VOLTODAY
+	settlSourceLive     = "live"        // живой поток сделок брокера
+	settlSourceISS      = "iss-trades"  // точная лента сделок MOEX ISS
+	settlSourceRebuild  = "iss-rebuild" // лента ISS, перечитанная за день целиком
+	settlSourceVolToday = "voltoday"    // приближение по приросту VOLTODAY
 )
 
 // issLeg — что лента MOEX ISS может предложить в качестве ноги фьючерса.
@@ -804,6 +813,74 @@ func (e *Engine) refineSettl(sym, mskDate string, liveV float64, liveOK bool, is
 	e.settlVWAP[sym] = ptr(iss.tradeV)
 	e.settlSource[sym] = settlSourceISS
 	e.resetCBLog(sym)
+}
+
+// settlRebuildFrom — с какого часа МСК имеет смысл перечитывать ленту за день
+// целиком. Окно закрывается в 15:30, публичная лента ISS отстаёт на пятнадцать
+// минут, так что раньше 15:50 в ней хвоста окна заведомо нет.
+const settlRebuildFrom = 15*time.Hour + 50*time.Minute
+
+// SettlNeedsRebuild — стоит ли добрать ногу фьючерса, перечитав ленту сделок за
+// день целиком.
+//
+// Оба потоковых источника могут не довезти окно: живой поток рвётся или
+// поднимается среди дня, а инкрементальный опрос ленты ISS держит курсор TRADENO
+// и после сбоя восстанавливается только вместе с процессом. Когда не сработал ни
+// один, движок остаётся либо вовсе без ноги, либо с приближением по ΔVOLTODAY, и
+// подписчикам уходит цифра, разъехавшаяся с биржей в третьем знаке (09.09.2026:
+// EURRUBF +0.06208 против SWAPRATE 0.15075).
+//
+// Разовое чтение ленты за день от TRADENO=0 не зависит ни от курсора, ни от
+// непрерывности подписки: это ровно те же сделки, что уже лежат на ISS, и
+// перечитать их можно в любой момент. Возвращает МСК-дату, за которую нужна нога.
+func (e *Engine) SettlNeedsRebuild(sym string, now time.Time) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, tracked := e.tradeVWAPs[sym]; !tracked {
+		return "", false
+	}
+	t := now.In(msk)
+	if since := time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute; since < settlRebuildFrom {
+		return "", false
+	}
+	// Нога есть и она не аварийная — трогать нечего.
+	if e.settlVWAP[sym] != nil && !e.settlProvisional[sym] {
+		return "", false
+	}
+	return t.Format("2006-01-02"), true
+}
+
+// SetSettlFromTape ставит ногу фьючерса, посчитанную по перечитанной ленте сделок.
+//
+// Значение считается точным: вызывающий обязан доказать, что лента перешагнула
+// 15:30 своими сделками, — то же доказательство, по которому морозится нога из
+// потока. Уже стоящую окончательную ногу не трогает: она посчитана источником,
+// закрывшим окно на наших глазах, и переписывать её задним числом незачем.
+// Возвращает true, если нога принята.
+func (e *Engine) SetSettlFromTape(sym, mskDate string, vwap float64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if vwap <= 0 {
+		return false
+	}
+	if _, tracked := e.tradeVWAPs[sym]; !tracked {
+		return false
+	}
+	if e.settlVWAP[sym] != nil && !e.settlProvisional[sym] {
+		return false
+	}
+	if e.settlVWAP[sym] == nil {
+		e.log.Warn().
+			Str("sym", sym).
+			Str("date", mskDate).
+			Float64("settl_vwap", vwap).
+			Str("settl_source", settlSourceRebuild).
+			Msg("нога фьючерса заморожена по перечитанной ленте ISS")
+		e.commitSettl(sym, mskDate, vwap, settlSourceRebuild, false)
+		return true
+	}
+	e.replaceSettl(sym, mskDate, vwap, settlSourceRebuild, "лента ISS перечитана за день целиком")
+	return true
 }
 
 // replaceSettl переписывает предварительную ногу точным значением.

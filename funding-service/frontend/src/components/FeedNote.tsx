@@ -11,6 +11,7 @@ function lagLabel(ms: number): string {
 const SETTL_SOURCE: Record<string, string> = {
   live: 'по живому потоку сделок',
   'iss-trades': 'по ленте сделок MOEX ISS',
+  'iss-rebuild': 'по ленте MOEX ISS, перечитанной за день целиком',
   voltoday: 'по приросту дневного объёма (лента сделок молчала)',
 };
 
