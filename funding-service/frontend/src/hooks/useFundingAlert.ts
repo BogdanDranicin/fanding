@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useFundingStore } from '../store/fundingStore';
-import { alertAudioContext, isAlertEnabled, playAlert } from '../lib/alertSound';
+import { isAlertEnabled, playAlert } from '../lib/alertSound';
 import { keepTabAlive, releaseTabAlive } from '../lib/tabKeepAlive';
 
 // Сигналит в момент, когда в снапшоте ПОЯВЛЯЕТСЯ точный фандинг (cb_funding):
@@ -19,7 +19,7 @@ export function useFundingAlert(): void {
 
   useEffect(() => {
     if (!isAlertEnabled()) return;
-    keepTabAlive(alertAudioContext(), 'funding-alert');
+    keepTabAlive('funding-alert');
     return () => releaseTabAlive('funding-alert');
   }, []);
 

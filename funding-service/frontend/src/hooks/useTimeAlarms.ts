@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { useAlarmStore } from '../store/alarmStore';
-import { alertAudioContext } from '../lib/alertSound';
 import { keepTabAlive, releaseTabAlive } from '../lib/tabKeepAlive';
 import { notifyAlarm } from '../lib/alarmNotify';
 import {
@@ -60,7 +59,7 @@ export function useTimeAlarms(): void {
   const hasAlarms = enabled && alarms.some((a) => a.enabled);
   useEffect(() => {
     if (!hasAlarms) return;
-    keepTabAlive(alertAudioContext(), 'time-alarms');
+    keepTabAlive('time-alarms');
     return () => releaseTabAlive('time-alarms');
   }, [hasAlarms]);
 

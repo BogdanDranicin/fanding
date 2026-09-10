@@ -1,57 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Тесты гоняют настоящий модуль на подменённых глобальных объектах: проверять
-// надо именно его логику выбора удержания, а не пересказ этой логики в моке.
-// Ради этого — минимальные заглушки localStorage, document/window, LockManager
-// и WebAudio.
-
-class FakeOscillator {
-  type = 'sine';
-  frequency = { value: 0 };
-  started = false;
-  stopped = false;
-  connect(next: unknown) { return next as FakeGain; }
-  disconnect() {}
-  start() { this.started = true; }
-  stop() { this.stopped = true; }
-}
-
-class FakeGain {
-  gain = { value: 0 };
-  connect(next: unknown) { return next; }
-  disconnect() {}
-}
+let audioContexts = 0;
 
 class FakeAudioContext {
-  state: 'suspended' | 'running' | 'closed' = 'running';
+  state = 'running';
   destination = {};
-  oscillators: FakeOscillator[] = [];
-  resumeCalls = 0;
 
-  createOscillator() {
-    const o = new FakeOscillator();
-    this.oscillators.push(o);
-    return o;
-  }
-
-  createGain() { return new FakeGain(); }
+  constructor() { audioContexts++; }
+  createOscillator() { return { start() {}, stop() {}, connect: (n: unknown) => n, disconnect() {} }; }
+  createGain() { return { gain: { value: 0 }, connect: (n: unknown) => n, disconnect() {} }; }
   addEventListener() {}
-
-  resume() {
-    this.resumeCalls++;
-    this.state = 'running';
-    return Promise.resolve();
-  }
-
-  /** Живые (не остановленные) осцилляторы — это и есть запасной тон. */
-  live() { return this.oscillators.filter((o) => o.started && !o.stopped); }
 }
 
-/**
- * Заглушка Web Locks. Держит счётчик выданных и отпущенных локов: именно по
- * нему видно, что вкладка удерживается тихо, — снаружи у лока нет никаких
- * признаков вроде значка на вкладке.
- */
 class FakeLocks {
   granted = 0;
   released = 0;
@@ -78,10 +38,14 @@ function fakeStorage() {
 
 let mod: typeof import('./tabKeepAlive');
 let locks: FakeLocks;
+let storage: Storage;
 
 async function load(withLocks = true) {
   locks = new FakeLocks();
-  vi.stubGlobal('localStorage', fakeStorage());
+  storage = fakeStorage();
+  audioContexts = 0;
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  vi.stubGlobal('localStorage', storage);
   vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal('window', { addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal('navigator', withLocks ? { locks } : {});
@@ -96,29 +60,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function ctx(): FakeAudioContext {
-  return new FakeAudioContext();
-}
-
 describe('удержание вкладки', () => {
   it('держит вкладку локом и молча: звука на вкладке нет', async () => {
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+    mod.keepTabAlive('alarms');
     await Promise.resolve();
 
     expect(locks.held).toBe(1);
-    expect(c.live()).toHaveLength(0);
-    expect(mod.keepAliveStatus(c as unknown as AudioContext).mode).toBe('lock');
+    expect(audioContexts).toBe(0);
+    expect(mod.keepAliveStatus().mode).toBe('lock');
   });
 
   it('держит один лок на любое число владельцев и отпускает на последнем', async () => {
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
-    mod.keepTabAlive(c as unknown as AudioContext, 'funding');
+    mod.keepTabAlive('alarms');
+    mod.keepTabAlive('funding');
     await Promise.resolve();
     expect(locks.granted).toBe(1);
 
-    // Выключили сигналы по времени — уведомление о фандинге всё ещё ждёт.
     mod.releaseTabAlive('alarms');
     expect(locks.held).toBe(1);
 
@@ -127,68 +84,64 @@ describe('удержание вкладки', () => {
     expect(locks.held).toBe(0);
   });
 
-  it('без Web Locks сразу берётся за запасной тон', async () => {
+  it('без Web Locks вкладка остаётся без удержания, но звук не заводит', async () => {
     await load(false);
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+    mod.keepTabAlive('alarms');
+    await Promise.resolve();
 
-    expect(c.live()).toHaveLength(1);
-    expect(mod.keepAliveStatus(c as unknown as AudioContext).mode).toBe('tone');
+    expect(mod.keepAliveStatus().mode).toBe('none');
+    expect(mod.keepAliveStatus().locks).toBe(false);
+    expect(audioContexts).toBe(0);
   });
 
-  it('включает тон, если браузер заморозил вкладку вопреки локу', async () => {
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+  it('заморозка вопреки локу только записывается, звук не включает', async () => {
+    mod.keepTabAlive('alarms');
     await Promise.resolve();
-    expect(c.live()).toHaveLength(0);
 
-    // Браузер сообщил о заморозке и вернул страницу к жизни.
     mod.__freezeForTests();
     await Promise.resolve();
 
-    expect(c.live()).toHaveLength(1);
-    expect(mod.keepAliveStatus(c as unknown as AudioContext).frozeAt).not.toBeNull();
+    expect(mod.keepAliveStatus().frozeAt).not.toBeNull();
+    expect(mod.keepAliveStatus().mode).toBe('lock');
+    expect(locks.held).toBe(1);
+    expect(audioContexts).toBe(0);
   });
 
   it('не считает отказом заморозку при уходе страницы в bfcache', async () => {
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+    mod.keepTabAlive('alarms');
     await Promise.resolve();
 
     mod.__leavingForTests();
     mod.__freezeForTests();
     await Promise.resolve();
 
-    expect(c.live()).toHaveLength(0);
-    expect(mod.keepAliveStatus(c as unknown as AudioContext).frozeAt).toBeNull();
+    expect(mod.keepAliveStatus().frozeAt).toBeNull();
   });
 
-  it('слушается настройки: тон включается и снимается без перезагрузки', async () => {
-    const c = ctx();
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+  it('забывает старую настройку постоянного звука', async () => {
+    locks = new FakeLocks();
+    const s = fakeStorage();
+    s.setItem('tab_keepalive_tone', '1');
+    vi.stubGlobal('localStorage', s);
+    vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {} });
+    vi.stubGlobal('window', { addEventListener() {}, removeEventListener() {} });
+    vi.stubGlobal('navigator', { locks });
+    vi.resetModules();
+    mod = await import('./tabKeepAlive');
+
+    mod.keepTabAlive('alarms');
     await Promise.resolve();
-    expect(c.live()).toHaveLength(0);
 
-    mod.setToneForced(true);
-    expect(c.live()).toHaveLength(1);
-    // Лок при этом никуда не девается: тон — добавка к нему, а не замена.
-    expect(locks.held).toBe(1);
-
-    mod.setToneForced(false);
-    expect(c.live()).toHaveLength(0);
+    expect(s.getItem('tab_keepalive_tone')).toBeNull();
+    expect(mod.keepAliveStatus().mode).toBe('lock');
+    expect(audioContexts).toBe(0);
   });
 
-  it('не звучит, пока браузер не разрешил звук, и включается сам после разрешения', async () => {
-    await load(false);
-    const c = ctx();
-    c.state = 'suspended';
-    mod.keepTabAlive(c as unknown as AudioContext, 'alarms');
+  it('забывает заморозку старше недели', async () => {
+    storage.setItem('tab_keepalive_froze_at', String(Date.now() - 8 * 24 * 60 * 60 * 1000));
+    mod.keepTabAlive('alarms');
+    await Promise.resolve();
 
-    expect(c.live()).toHaveLength(0);
-    expect(c.resumeCalls).toBeGreaterThan(0);
-
-    // Пользователь щёлкнул по странице — браузер разрешил звук.
-    mod.__reviveForTests();
-    expect(c.live()).toHaveLength(1);
+    expect(mod.keepAliveStatus().frozeAt).toBeNull();
   });
 });
