@@ -111,7 +111,7 @@ async function parseMoexMD(raw: { marketdata: { columns: string[]; data: unknown
     const price =
       ((row as unknown[])[idx['LAST']] as number) ||
       ((row as unknown[])[idx['SETTLEPRICE']] as number) ||
-      ((row as unknown[])[idx['PREVPRICE']] as number) ||
+      ((row as unknown[])[idx['LCLOSEPRICE']] as number) ||
       0;
     if (price > 0) result[sym] = price;
   }
@@ -121,8 +121,8 @@ async function parseMoexMD(raw: { marketdata: { columns: string[]; data: unknown
 async function fetchPricesDirect(): Promise<Record<string, number>> {
   const base = 'https://iss.moex.com/iss';
   const [fr, sr] = await Promise.all([
-    fetch(`${base}/engines/futures/markets/forts/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,SETTLEPRICE,PREVPRICE`).then((r) => r.json()),
-    fetch(`${base}/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,PREVPRICE`).then((r) => r.json()),
+    fetch(`${base}/engines/futures/markets/forts/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,SETTLEPRICE`).then((r) => r.json()),
+    fetch(`${base}/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,LCLOSEPRICE`).then((r) => r.json()),
   ]);
   const [a, b] = await Promise.all([parseMoexMD(fr), parseMoexMD(sr)]);
   return { ...a, ...b };

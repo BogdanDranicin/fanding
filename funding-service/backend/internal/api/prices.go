@@ -12,13 +12,28 @@ import (
 
 const pricesTTL = 60 * time.Second
 
+const (
+	fortsPricesURL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities.json" +
+		"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,SETTLEPRICE"
+	tqbrPricesURL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json" +
+		"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,LCLOSEPRICE"
+)
+
 type pricesCache struct {
 	mu        sync.RWMutex
 	data      map[string]float64
 	fetchedAt time.Time
 }
 
-var globalPrices = &pricesCache{}
+type marketPricesCache struct {
+	pricesCache
+	lastGoodForts map[string]float64
+	lastGoodTQBR  map[string]float64
+}
+
+var globalPrices = &marketPricesCache{}
+
+var errEmptyLeg = errors.New("moex iss: market leg returned no rows")
 
 func (c *pricesCache) get() (map[string]float64, bool) {
 	c.mu.RLock()
@@ -29,32 +44,42 @@ func (c *pricesCache) get() (map[string]float64, bool) {
 	return c.data, time.Since(c.fetchedAt) <= pricesTTL
 }
 
-func (c *pricesCache) refresh(ctx context.Context) error {
-	futures, err := fetchMoexPrices(ctx,
-		"https://iss.moex.com/iss/engines/futures/markets/forts/securities.json"+
-			"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,SETTLEPRICE,PREVPRICE",
-	)
-	if err != nil {
-		return err
-	}
-	stocks, _ := fetchMoexPrices(ctx,
-		"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"+
-			"?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST,PREVPRICE",
-	)
+func (c *marketPricesCache) refresh(ctx context.Context) error {
+	return c.refreshFrom(ctx, fortsPricesURL, tqbrPricesURL)
+}
 
-	result := make(map[string]float64, len(futures)+len(stocks))
-	for k, v := range futures {
-		result[k] = v
+func (c *marketPricesCache) refreshFrom(ctx context.Context, fortsURL, tqbrURL string) error {
+	forts, fortsErr := fetchMoexPrices(ctx, fortsURL)
+	tqbr, tqbrErr := fetchMoexPrices(ctx, tqbrURL)
+	if fortsErr == nil && len(forts) == 0 {
+		fortsErr = errEmptyLeg
 	}
-	for k, v := range stocks {
-		result[k] = v
+	if tqbrErr == nil && len(tqbr) == 0 {
+		tqbrErr = errEmptyLeg
+	}
+	if fortsErr != nil && tqbrErr != nil {
+		return fortsErr
 	}
 
 	c.mu.Lock()
-	c.data = result
+	defer c.mu.Unlock()
+	if fortsErr == nil {
+		c.lastGoodForts = forts
+	}
+	if tqbrErr == nil {
+		c.lastGoodTQBR = tqbr
+	}
+
+	merged := make(map[string]float64, len(c.lastGoodForts)+len(c.lastGoodTQBR))
+	for sym, price := range c.lastGoodForts {
+		merged[sym] = price
+	}
+	for sym, price := range c.lastGoodTQBR {
+		merged[sym] = price
+	}
+	c.data = merged
 	c.fetchedAt = time.Now()
-	c.mu.Unlock()
-	return nil
+	return errors.Join(fortsErr, tqbrErr)
 }
 
 type moexMDResp struct {
@@ -96,7 +121,7 @@ func fetchMoexPrices(ctx context.Context, url string) (map[string]float64, error
 			price = floatAt(row, idx, "SETTLEPRICE")
 		}
 		if price == 0 {
-			price = floatAt(row, idx, "PREVPRICE")
+			price = floatAt(row, idx, "LCLOSEPRICE")
 		}
 		if price > 0 {
 			result[sym] = price
@@ -114,7 +139,7 @@ func handlePrices(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), fetchTimeout)
 	defer cancel()
 	if err := globalPrices.refresh(ctx); err != nil {
-		if data != nil {
+		if data, _ = globalPrices.get(); len(data) > 0 {
 			writeJSON(w, http.StatusOK, data)
 			return
 		}

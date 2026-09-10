@@ -77,3 +77,77 @@ func TestFetchMoexSwapRatesNoPerpetuals(t *testing.T) {
 		t.Fatalf("want error when no contract matches the sentinel, got rates %v", got)
 	}
 }
+
+func TestFetchMoexPricesFallsBackToClosePrice(t *testing.T) {
+	const body = `{"marketdata":{"columns":["SECID","LAST","SETTLEPRICE","LCLOSEPRICE"],"data":[
+		["GAZP",93.0,null,92.4],
+		["AMEZ",null,null,68.05],
+		["USDRUBF",null,84.5,null],
+		["DEAD",null,null,null]
+	]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	got, err := fetchMoexPrices(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("fetchMoexPrices: %v", err)
+	}
+	want := map[string]float64{"GAZP": 93.0, "AMEZ": 68.05, "USDRUBF": 84.5}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for sym, price := range want {
+		if got[sym] != price {
+			t.Errorf("%s = %v, want %v", sym, got[sym], price)
+		}
+	}
+}
+
+func TestPricesRefreshKeepsMarketWhenOneLegFails(t *testing.T) {
+	forts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"marketdata":{"columns":["SECID","LAST"],"data":[["USDRUBF",84.19]]}}`)
+	}))
+	defer forts.Close()
+
+	tqbrUp := true
+	tqbr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !tqbrUp {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("response writer is not a Hijacker")
+				return
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		fmt.Fprint(w, `{"marketdata":{"columns":["SECID","LAST"],"data":[["GAZP",93.0]]}}`)
+	}))
+	defer tqbr.Close()
+
+	c := &marketPricesCache{}
+	if err := c.refreshFrom(context.Background(), forts.URL, tqbr.URL); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if data, _ := c.get(); data["GAZP"] != 93.0 || data["USDRUBF"] != 84.19 {
+		t.Fatalf("first refresh gave %v", data)
+	}
+
+	tqbrUp = false
+	if err := c.refreshFrom(context.Background(), forts.URL, tqbr.URL); err == nil {
+		t.Error("want error reported for the failed TQBR leg")
+	}
+	data, _ := c.get()
+	if data["GAZP"] != 93.0 {
+		t.Errorf("stock prices dropped after a failed TQBR leg: %v", data)
+	}
+	if data["USDRUBF"] != 84.19 {
+		t.Errorf("futures prices lost: %v", data)
+	}
+}

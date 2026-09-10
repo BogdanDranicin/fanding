@@ -20,6 +20,15 @@ const (
 	retryInterval = 30 * time.Second
 )
 
+const (
+	fortsSpecsURL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities.json" +
+		"?iss.meta=off&iss.only=securities" +
+		"&securities.columns=SECID,SHORTNAME,INITIALMARGIN,LOTVOLUME,STEPPRICE,MINSTEP"
+	tqbrSpecsURL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json" +
+		"?iss.meta=off&iss.only=securities" +
+		"&securities.columns=SECID,SHORTNAME,LOTSIZE,MINSTEP"
+)
+
 // InstrumentInfo holds static contract parameters for a single instrument.
 type InstrumentInfo struct {
 	Symbol        string  `json:"symbol"`
@@ -32,10 +41,12 @@ type InstrumentInfo struct {
 }
 
 type allSpecsCache struct {
-	mu         sync.RWMutex
-	data       []InstrumentInfo
-	fetchedAt  time.Time
-	httpClient *http.Client
+	mu            sync.RWMutex
+	data          []InstrumentInfo
+	lastGoodForts []InstrumentInfo
+	lastGoodTQBR  []InstrumentInfo
+	fetchedAt     time.Time
+	httpClient    *http.Client
 }
 
 var globalAllSpecs = &allSpecsCache{
@@ -86,21 +97,37 @@ func (c *allSpecsCache) startWarmup() {
 }
 
 func (c *allSpecsCache) refresh(ctx context.Context) error {
-	futures, err := c.fetchFORTS(ctx)
-	if err != nil {
-		return err
-	}
-	stocks, _ := c.fetchTQBR(ctx)
+	return c.refreshFrom(ctx, fortsSpecsURL, tqbrSpecsURL)
+}
 
-	result := make([]InstrumentInfo, 0, len(futures)+len(stocks))
-	result = append(result, futures...)
-	result = append(result, stocks...)
+func (c *allSpecsCache) refreshFrom(ctx context.Context, fortsURL, tqbrURL string) error {
+	forts, fortsErr := c.fetch(ctx, fortsURL, "future", "LOTVOLUME")
+	tqbr, tqbrErr := c.fetch(ctx, tqbrURL, "stock", "LOTSIZE")
+	if fortsErr == nil && len(forts) == 0 {
+		fortsErr = errEmptyLeg
+	}
+	if tqbrErr == nil && len(tqbr) == 0 {
+		tqbrErr = errEmptyLeg
+	}
+	if fortsErr != nil && tqbrErr != nil {
+		return fortsErr
+	}
 
 	c.mu.Lock()
-	c.data = result
+	defer c.mu.Unlock()
+	if fortsErr == nil {
+		c.lastGoodForts = forts
+	}
+	if tqbrErr == nil {
+		c.lastGoodTQBR = tqbr
+	}
+
+	merged := make([]InstrumentInfo, 0, len(c.lastGoodForts)+len(c.lastGoodTQBR))
+	merged = append(merged, c.lastGoodForts...)
+	merged = append(merged, c.lastGoodTQBR...)
+	c.data = merged
 	c.fetchedAt = time.Now()
-	c.mu.Unlock()
-	return nil
+	return errors.Join(fortsErr, tqbrErr)
 }
 
 // get returns cached data immediately (from live fetch or embedded fallback).
@@ -128,20 +155,6 @@ type moexISSResp struct {
 		Columns []string `json:"columns"`
 		Data    [][]any  `json:"data"`
 	} `json:"securities"`
-}
-
-func (c *allSpecsCache) fetchFORTS(ctx context.Context) ([]InstrumentInfo, error) {
-	const url = "https://iss.moex.com/iss/engines/futures/markets/forts/securities.json" +
-		"?iss.meta=off&iss.only=securities" +
-		"&securities.columns=SECID,SHORTNAME,INITIALMARGIN,LOTVOLUME,STEPPRICE,MINSTEP"
-	return c.fetch(ctx, url, "future", "LOTVOLUME")
-}
-
-func (c *allSpecsCache) fetchTQBR(ctx context.Context) ([]InstrumentInfo, error) {
-	const url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json" +
-		"?iss.meta=off&iss.only=securities" +
-		"&securities.columns=SECID,SHORTNAME,LOTSIZE,MINSTEP"
-	return c.fetch(ctx, url, "stock", "LOTSIZE")
 }
 
 func (c *allSpecsCache) fetch(ctx context.Context, url, marketType, lotField string) ([]InstrumentInfo, error) {
