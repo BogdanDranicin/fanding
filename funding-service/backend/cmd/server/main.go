@@ -135,6 +135,11 @@ func main() {
 		log.Info().Msg("robots: сбор выключен (ROBOTS_ENABLED=false)")
 	}
 
+	// Push-уведомления: единственный канал, который доходит до заморожённой
+	// браузером вкладки. Без ключей VAPID сервис работает как раньше.
+	pushSender := newPushSender(cfg, log.Logger)
+	go runPushDispatcher(ctx, store, pushSender, log.Logger)
+
 	apiRouter := api.NewRouter(
 		store,
 		cfg.TelegramBotName,
@@ -142,6 +147,7 @@ func main() {
 		log.Logger,
 		moexSrc.GetSpecs,
 		robotSource(robotCollector),
+		pushPublicKey(pushSender),
 	)
 
 	router := http.NewServeMux()
@@ -245,6 +251,11 @@ func main() {
 	// Fan-out cbrSrc.OnNewPublication: always count metric and journal it;
 	// forward to the Telegram dispatcher too if the bot is enabled.
 	dispPubCh := make(chan time.Time, 1)
+	// Push о публикации идёт четвёртым получателем того же сигнала: в
+	// заморожённой вкладке WebSocket мёртв, снапшот не приходит, и звук о
+	// зафиксированном фандинге играть некому.
+	pushPubCh := make(chan time.Time, 1)
+	go runPushPublications(ctx, store, pushSender, eng.Snapshot, pushPubCh, log.Logger)
 	go func() {
 		fwd := func(ch chan time.Time, t time.Time) {
 			select {
@@ -261,6 +272,7 @@ func main() {
 				metrics.CBPublications.Inc()
 				fwd(journalPubCh, t)
 				fwd(dispPubCh, t)
+				fwd(pushPubCh, t)
 			case <-ctx.Done():
 				return
 			}

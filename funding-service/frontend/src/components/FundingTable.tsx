@@ -2,6 +2,14 @@ import type { FundingSnapshot, InstrumentFunding } from '../types/funding';
 import { useFlashOnChange } from '../hooks/useFlashOnChange';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuthStore } from '../store/authStore';
+import { useScaleStore } from '../store/scaleStore';
+import {
+  fundingLevel,
+  levelClass,
+  LEVEL_MARK,
+  LEVEL_TITLE,
+  type FundingScale,
+} from '../lib/fundingScale';
 
 interface Props {
   current: FundingSnapshot | null;
@@ -41,13 +49,13 @@ function DeltaCell({ value, reference }: { value: number | null | undefined; ref
   );
 }
 
-function FundingCell({ value, reference }: { value: number | null | undefined; reference: number }) {
+function FundingCell({ value, reference, scale }: {
+  value: number | null | undefined;
+  reference: number;
+  scale: FundingScale;
+}) {
   const flash = useFlashOnChange(value ?? null);
-
-  const highlight =
-    value == null ? '' :
-    value >= 0.1  ? 'funding-positive' :
-    value <= -0.1 ? 'funding-negative' : '';
+  const level = value == null ? 'none' : fundingLevel(value, reference, scale);
 
   let pctStr = '';
   if (value != null && reference > 0) {
@@ -56,9 +64,13 @@ function FundingCell({ value, reference }: { value: number | null | undefined; r
   }
 
   return (
-    <td className={['cell', flash, highlight].filter(Boolean).join(' ')}>
+    <td
+      className={['cell', flash, levelClass(level)].filter(Boolean).join(' ')}
+      title={value != null ? LEVEL_TITLE[level] : undefined}
+    >
       {value != null ? (
         <>
+          {LEVEL_MARK[level] && <span className="fnd-mark" aria-hidden="true">{LEVEL_MARK[level]}</span>}
           {fmt6.format(value)}
           {pctStr && <span className="pct"> {pctStr}</span>}
         </>
@@ -108,17 +120,17 @@ function rowValue(row: Row, inst: InstrumentFunding | undefined): number | undef
   return row.field ? (inst[row.field] as number | undefined) : undefined;
 }
 
-function formatFundingRow(value: number | undefined, ref: number | undefined): { text: string; cls: string } {
+function formatFundingRow(
+  value: number | undefined, ref: number | undefined, scale: FundingScale,
+): { text: string; cls: string } {
   if (value == null) return { text: '—', cls: 'accordion-cell' };
-  let text = fmt6.format(value);
+  const level = fundingLevel(value, ref, scale);
+  let text = `${LEVEL_MARK[level]} ${fmt6.format(value)}`.trim();
   if (ref != null && ref > 0) {
     const pct = (value / ref) * 100;
     text += ` (${pct >= 0 ? '+' : ''}${pct.toFixed(3)}%)`;
   }
-  const cls = value >= 0.1 ? 'accordion-cell funding-positive'
-    : value <= -0.1 ? 'accordion-cell funding-negative'
-    : 'accordion-cell';
-  return { text, cls };
+  return { text, cls: ['accordion-cell', levelClass(level)].filter(Boolean).join(' ') };
 }
 
 function formatDeltaRow(value: number | undefined, ref: number | undefined): string {
@@ -131,17 +143,20 @@ function formatDeltaRow(value: number | undefined, ref: number | undefined): str
   return text;
 }
 
-function FundingTableMobile({ current, rows }: Props & { rows: Row[] }) {
+function FundingTableMobile({ current, rows, scale }: Props & { rows: Row[]; scale: FundingScale }) {
   return (
     <div className="accordion">
       {SYMS.map((sym) => {
         const inst = current?.[sym];
         const primaryFunding = inst?.cb_funding ?? inst?.moex_funding;
         const primaryLabel = inst?.cb_funding != null ? 'CB' : 'MOEX';
-        const badgeCls = primaryFunding == null ? '' :
-          primaryFunding >= 0.1  ? 'accordion-badge funding-positive' :
-          primaryFunding <= -0.1 ? 'accordion-badge funding-negative' :
-          'accordion-badge';
+        const primaryRef = inst?.cb_funding != null ? inst?.official_rate : inst?.last_price;
+        const primaryLevel = primaryFunding == null
+          ? 'none'
+          : fundingLevel(primaryFunding, primaryRef, scale);
+        const badgeCls = primaryFunding == null
+          ? ''
+          : ['accordion-badge', levelClass(primaryLevel)].filter(Boolean).join(' ');
 
         return (
           <details key={sym} className="accordion-item">
@@ -149,7 +164,7 @@ function FundingTableMobile({ current, rows }: Props & { rows: Row[] }) {
               <span className="accordion-title">{sym}</span>
               {primaryFunding != null && (
                 <span className={badgeCls}>
-                  {primaryLabel}: {fmt6.format(primaryFunding)}
+                  {LEVEL_MARK[primaryLevel]} {primaryLabel}: {fmt6.format(primaryFunding)}
                 </span>
               )}
             </summary>
@@ -173,7 +188,7 @@ function FundingTableMobile({ current, rows }: Props & { rows: Row[] }) {
                 } else if (kind === 'delta') {
                   text = formatDeltaRow(value, ref);
                 } else {
-                  ({ text, cls } = formatFundingRow(value, ref));
+                  ({ text, cls } = formatFundingRow(value, ref, scale));
                 }
                 return (
                   <div key={label} className="accordion-row">
@@ -193,11 +208,14 @@ function FundingTableMobile({ current, rows }: Props & { rows: Row[] }) {
 export function FundingTable({ current, previous }: Props) {
   const isMobile = useIsMobile();
   const isAdmin = useAuthStore((s) => s.me.is_admin);
+  const scale = useScaleStore((s) => s.scale);
   // Пока права не загрузились, is_admin === false, то есть прогнозные строки не
   // мелькают у обычного пользователя и появляются у админа, как только придёт /me.
   const rows = isAdmin ? ROWS : ROWS.filter((r) => !r.adminOnly);
 
-  if (isMobile) return <FundingTableMobile current={current} previous={previous} rows={rows} />;
+  if (isMobile) {
+    return <FundingTableMobile current={current} previous={previous} rows={rows} scale={scale} />;
+  }
 
   return (
     <table className="funding-table">
@@ -220,7 +238,7 @@ export function FundingTable({ current, previous }: Props) {
               if (row.kind === 'rate') return <RateCell key={sym} value={value} />;
               const ref = (row.refField ? inst?.[row.refField] : undefined) as number | undefined;
               if (row.kind === 'delta') return <DeltaCell key={sym} value={value} reference={ref ?? 0} />;
-              return <FundingCell key={sym} value={value} reference={ref ?? 0} />;
+              return <FundingCell key={sym} value={value} reference={ref ?? 0} scale={scale} />;
             })}
           </tr>
         ))}

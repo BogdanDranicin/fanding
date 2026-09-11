@@ -29,12 +29,18 @@ var instruments = []instrumentMeta{
 
 // NewRouter builds and returns the chi router for the HTTP API.
 // robotSrc может быть nil — тогда страница «Роботы» работает по одной истории из базы.
-func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec, robotSrc RobotSource) http.Handler {
+// pushKey — открытый ключ VAPID; пустой означает, что push не настроен и
+// страница не будет предлагать уведомления.
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec, robotSrc RobotSource, pushKey string) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(allowedOrigin))
 	r.Use(zerologMiddleware(log))
-	r.Use(maxBodyMiddleware(1 << 10)) // 1 KB limit
+	// Общий потолок тела запроса — по самому большому из них: расписание
+	// будильников это до шести десятков отметок. Там, где тело обязано быть
+	// коротким, потолок ниже и стоит на самом маршруте (вложенный ограничитель
+	// срабатывает первым, так что снизить его можно, а поднять — нет).
+	r.Use(maxBodyMiddleware(32 << 10))
 
 	userLimiter := newIPLimiter()
 
@@ -51,12 +57,21 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	// доступна всем, как и таблица фандинга.
 	r.Get("/api/v1/robots", handleRobots(robotSrc))
 	r.Get("/api/v1/robots/history", handleRobotsHistory(store))
+	r.Get("/api/v1/robots/tape", handleRobotsTape(robotSrc))
 
 	// Сессия браузера: анонимная при создании, становится аккаунтом после /start в боте.
-	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute)).
+	r.With(rateLimitMiddleware(userLimiter, 5, time.Minute), maxBodyMiddleware(1<<10)).
 		Post("/api/v1/session", handleCreateSession(store))
 
 	auth := authMiddleware(store)
+
+	// Push-уведомления: ими сигнал доходит до заморожённой вкладки и до
+	// закрытого браузера. Ключ открытый и нужен странице до всякой авторизации.
+	r.Get("/api/v1/push/key", handlePushKey(pushKey))
+	r.With(auth, maxBodyMiddleware(2<<10)).Post("/api/v1/push/subscribe", handlePushSubscribe(store))
+	r.With(auth, maxBodyMiddleware(2<<10)).Post("/api/v1/push/unsubscribe", handlePushUnsubscribe(store))
+	r.With(auth).Post("/api/v1/push/wakeups", handlePushWakeups(store))
+	r.With(auth, maxBodyMiddleware(2<<10)).Post("/api/v1/push/test", handlePushTest(store))
 	r.With(auth).Get("/api/v1/me", handleMe())
 	r.With(auth).Get("/api/v1/me/telegram-link", handleTelegramLink(store, botUsername))
 

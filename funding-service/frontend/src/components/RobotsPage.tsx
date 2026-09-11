@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DayVolume, Instrument, RobotSession, RobotsResponse, StreamStatus } from '../types/robots';
 import { authFetch } from '../api/auth';
+import { TradeTape } from './TradeTape';
 
 const fmtClock = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -165,6 +166,11 @@ function lagLabel(ms: number): string {
 // Читать его каждый раз незачем: в работе нужно ровно одно — чем сейчас
 // приходят принты и насколько они свежие. Всё остальное уехало под «Как это
 // работает» и открывается, когда действительно понадобится.
+//
+// Тикеры, не покрытые потоком, из строки убраны совсем. Их три десятка, они
+// занимали всю ширину экрана и менялись от ответа к ответу, а сказать могли
+// только одно: этих бумаг нет в каталоге брокера. Кому нужно — видит их число
+// в подсказке.
 function SourceChip({ stream }: { stream: StreamStatus | null }) {
   if (!stream || !stream.enabled || !stream.connected) {
     return (
@@ -177,13 +183,12 @@ function SourceChip({ stream }: { stream: StreamStatus | null }) {
   const missing = stream.missing ?? [];
   return (
     <span className="rb-chip rb-chip-ok" title={missing.length > 0
-      ? `Мимо потока идут ${missing.join(', ')} — их нет в каталоге брокера`
+      ? `${missing.length} инструментов идут мимо потока — их нет в каталоге брокера`
       : 'Потоком покрыто всё наблюдение'}>
       <span className="rb-chip-dot" />
       поток брокера
       {stream.lag_ms > 0 && <> · {lagLabel(stream.lag_ms)}</>}
       {stream.symbols > 0 && <> · {stream.symbols} инструментов</>}
-      {missing.length > 0 && <> · кроме {missing.join(', ')}</>}
     </span>
   );
 }
@@ -700,7 +705,11 @@ function PaperGroup({ symbol, rows, nowMs, live, threshold, armedIds, onToggleAl
   );
 }
 
-type Tab = 'live' | 'history';
+// Вкладки страницы: найденные роботы сейчас, они же за неделю и сырая лента
+// обезличенных сделок по одной бумаге. Лента живёт здесь, а не отдельной
+// страницей: это тот же поток принтов, из которого собраны роботы, и ходят
+// между ними постоянно — увидел робота, пошёл посмотреть его принты в ленте.
+type Tab = 'live' | 'history' | 'tape';
 
 export function RobotsPage() {
   const [tab, setTab] = useState<Tab>('live');
@@ -744,8 +753,12 @@ export function RobotsPage() {
   const firedRef = useRef<Set<string>>(new Set());
 
   const live = tab === 'live';
+  const tapeTab = tab === 'tape';
 
   const load = useCallback(async (which: Tab) => {
+    // Лента грузит себя сама и живёт своим тикером — списку роботов её запрос
+    // ничего не даёт.
+    if (which === 'tape') return;
     try {
       const path = which === 'live' ? '/api/v1/robots' : '/api/v1/robots/history?days=7&limit=500';
       const resp = await authFetch(path);
@@ -910,16 +923,20 @@ export function RobotsPage() {
     <div className="race-page">
       <div className="race-header">
         <h2 className="race-title">Поиск роботов</h2>
-        <button className="race-btn-run" onClick={refresh} disabled={loading}>
-          {loading ? '⏳ Загрузка…' : '↻ Обновить'}
-        </button>
+        {/* Лента обновляется сама раз в секунду — кнопка над ней означала бы,
+            что без неё данные устаревают, а это неправда. */}
+        {!tapeTab && (
+          <button className="race-btn-run" onClick={refresh} disabled={loading}>
+            {loading ? '⏳ Загрузка…' : '↻ Обновить'}
+          </button>
+        )}
       </div>
 
       <div className="rb-status-line">
         {/* Чип описывает ЖИВУЮ ленту. В истории за неделю он не значит ничего:
             там показаны находки прошедших дней, и «задержка 15 минут» рядом с
             ними — просто неверная подпись. */}
-        {live && <SourceChip stream={stream} />}
+        {(live || tapeTab) && <SourceChip stream={stream} />}
         {/* Робот — это повтор: один и тот же размер через один и тот же промежуток.
             Больше про методику на странице знать незачем; всё остальное — пороги,
             ленты, правила отбора — это внутренности сервиса, а не то, с чем
@@ -948,13 +965,21 @@ export function RobotsPage() {
             Сейчас
           </button>
           <button
-            className={`rb-tab${!live ? ' rb-tab-active' : ''}`}
+            className={`rb-tab${tab === 'history' ? ' rb-tab-active' : ''}`}
             onClick={() => { setTab('history'); setLoading(true); }}
           >
             История за неделю
           </button>
+          <button
+            className={`rb-tab${tapeTab ? ' rb-tab-active' : ''}`}
+            onClick={() => setTab('tape')}
+            title="Лента обезличенных сделок: сделки одного приказа сложены в один принт"
+          >
+            Обезличенные сделки
+          </button>
         </div>
 
+        {!tapeTab && (<>
         <label className="rb-filter">
           Тикер
           <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
@@ -995,9 +1020,13 @@ export function RobotsPage() {
           показать предварительные
           {provisionalCount > 0 && <span className="rb-badge">{provisionalCount}</span>}
         </label>
+        </>)}
       </div>
 
+      {tapeTab && <TradeTape symbols={symbols} instruments={instBySymbol} />}
+
       {/* Фильтры по графам таблицы: сужают список строк, не трогая сам поиск роботов. */}
+      {!tapeTab && (
       <details
         className="rb-colfilters"
         open={filtersOpen}
@@ -1034,10 +1063,11 @@ export function RobotsPage() {
           </button>
         </div>
       </details>
+      )}
 
-      {error && <p className="race-error">Ошибка загрузки: {error}</p>}
+      {!tapeTab && error && <p className="race-error">Ошибка загрузки: {error}</p>}
 
-      {!error && groups.length === 0 && !loading && (
+      {!tapeTab && !error && groups.length === 0 && !loading && (
         <p className="race-empty">
           {rows.length > 0
             ? 'Под фильтр не попал ни один робот — найдено ' + rows.length + ', показано 0.'
@@ -1047,7 +1077,7 @@ export function RobotsPage() {
         </p>
       )}
 
-      {groups.length > 0 && (
+      {!tapeTab && groups.length > 0 && (
         <div className="jrn-list rb-list">
           <TableHead live={live} />
           {groups.map((g) => (

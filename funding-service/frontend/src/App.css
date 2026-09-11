@@ -275,8 +275,34 @@
 }
 
 /* Persistent funding highlight */
-.funding-positive { background: var(--accent-up-soft); }
-.funding-negative { background: var(--accent-down-soft); }
+/* Подсветка фандинга — те же пять ступеней, что у индикаторов в телеграме.
+   Пороги задаёт пользователь в настройках (lib/fundingScale.ts). */
+.fnd-strong-up   { background: var(--accent-up-soft); }
+.fnd-up          { background: var(--accent-warn-soft); }
+.fnd-down        { background: var(--accent-orange-soft); }
+.fnd-strong-down { background: var(--accent-down-soft); }
+.fnd-flat        { color: var(--text-muted); }
+
+.fnd-mark {
+  margin-right: 5px;
+  font-size: 11px;
+  vertical-align: 1px;
+}
+
+/* Лестница порогов в настройках: что и когда красится. */
+.fnd-ladder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fnd-ladder-step { white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* Percentage annotation next to funding value */
 .pct {
@@ -2470,3 +2496,96 @@ details[open] > .accordion-summary::before {
 }
 
 .rb-howto-body p { margin: 0; }
+
+/* ── Лента обезличенных сделок ─────────────────────────────────────────────
+   Четыре графы фиксированной ширины: лента читается сверху вниз одним
+   столбцом цифр, и «резиновые» колонки, дёргающиеся на каждом обновлении,
+   этому мешают. Моноширинные цифры — по той же причине. */
+
+.tape-about {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.tape-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.tape-table {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  /* Лента длинная и обновляется сама: прокрутка живёт внутри таблицы, иначе
+     страница прыгала бы под курсором на каждом обновлении. */
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.tape-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 1.1fr) minmax(80px, 1fr) minmax(80px, 1fr) 46px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--border);
+}
+
+.tape-row:last-child { border-bottom: 0; }
+
+.tape-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-strong);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.tape-time { color: var(--text-muted); }
+.tape-price { font-weight: 600; text-align: right; }
+
+/* Шапка стоит над теми же графами: числовые подписи прижаты вправо, как и сами
+   числа под ними. */
+.tape-head span:nth-child(2),
+.tape-head span:nth-child(3),
+.tape-head span:nth-child(4) { text-align: right; }
+
+.tape-qty {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  justify-content: flex-end;
+}
+
+.tape-side { font-size: 10px; }
+.tape-trades { color: var(--text-dim); font-size: 11px; text-align: right; }
+
+.tape-buy .tape-price,
+.tape-buy .tape-qty { color: var(--accent-up); }
+.tape-sell .tape-price,
+.tape-sell .tape-qty { color: var(--accent-down); }
+
+@media (max-width: 640px) {
+  .tape-row { grid-template-columns: minmax(88px, 1fr) minmax(70px, 1fr) minmax(70px, 1fr) 36px; }
+}

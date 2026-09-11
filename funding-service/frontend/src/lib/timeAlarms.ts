@@ -506,3 +506,72 @@ export function scheduleAlarmTone(
 export function playAlarmTone(tone: AlarmTone, volume = getAlarmVolume()): void {
   scheduleAlarmTone(tone, volume, Date.now());
 }
+
+// ── Расписание для push ─────────────────────────────────────────────────────
+//
+// Всё, что выше, работает, пока страница жива. Замороженную браузером вкладку
+// это не спасает: в ней не выполняется ни один таймер, и звук, поставленный в
+// очередь заранее, не звучит — аудиопоток остановлен вместе со страницей.
+//
+// Поэтому ближайшие отметки уезжают на сервер, и он будит браузер push-ом. На
+// сервер уходит не расписание, а его выжимка: список моментов с готовой
+// подписью. Так серверу не нужно знать ни про шаги, ни про выходные, ни про
+// предупреждения за N секунд — и правка расписания доезжает одним запросом.
+
+/** Насколько вперёд отдаём отметки. Полсуток накрывают торговый день целиком. */
+export const PUSH_HORIZON_MS = 12 * 60 * 60 * 1000;
+
+/** Сколько отметок отдаём за раз. Столько же принимает сервер. */
+export const PUSH_MAX_WAKEUPS = 60;
+
+/** Отметка расписания для push: момент и готовая подпись уведомления. */
+export interface AlarmWakeup {
+  at: number;
+  title: string;
+  body: string;
+  tag: string;
+}
+
+/** «ЧЧ:ММ» МСК из момента времени. */
+export function mskClock(ms: number): string {
+  return clockOf(Math.round((ms - mskDayStart(ms)) / 60_000));
+}
+
+/**
+ * Ближайшие срабатывания расписания, от самого раннего. Отметки считаются тем
+ * же nextFireAt, что и в самой странице: разойдись эти два расчёта — push
+ * звонил бы не тогда, когда звонит вкладка.
+ */
+export function alarmWakeups(
+  alarms: TimeAlarm[],
+  from = Date.now(),
+  horizonMs = PUSH_HORIZON_MS,
+  max = PUSH_MAX_WAKEUPS,
+): AlarmWakeup[] {
+  const until = from + horizonMs;
+  const out: AlarmWakeup[] = [];
+
+  for (const a of alarms) {
+    if (!a.enabled) continue;
+    let cursor = from;
+    // Потолок на сигнал тот же, что общий: минутный сигнал иначе занял бы
+    // собой весь список ещё до того, как дойдёт очередь до остальных.
+    for (let i = 0; i < max; i++) {
+      const at = nextFireAt(a, cursor);
+      if (!at || at > until) break;
+      const title = alarmTitle(a);
+      const mark = mskClock(at + a.leadSec * 1000);
+      out.push({
+        at,
+        title,
+        body: a.leadSec > 0 ? `Скоро ${mark} МСК` : `${mark} МСК`,
+        // Тег тот же, что у уведомления со страницы: повтор одного сигнала
+        // заменяет предыдущее уведомление, а не копится стопкой.
+        tag: `time-alarm:${title}`,
+      });
+      cursor = at;
+    }
+  }
+
+  return out.sort((x, y) => x.at - y.at).slice(0, max);
+}

@@ -123,3 +123,25 @@ export interface RobotsResponse {
   stream: StreamStatus;
   as_of: string;
 }
+
+/** Строка ленты обезличенных сделок: сделка биржи или сложенный из них приказ. */
+export interface TapePrint {
+  /** Биржевое время сделки, ISO. У потока брокера — с миллисекундами. */
+  time: string;
+  price: number;
+  /** Объём в лотах. У склеенного принта — объём всего приказа. */
+  qty: number;
+  side: 'B' | 'S';
+  /** Сколько сделок биржи в этой строке. 1 — приказ забрал одну заявку. */
+  trades: number;
+}
+
+export interface TapeResponse {
+  symbol: string;
+  /** Сделки сложены в приказы. Ложь — сырая лента биржи. */
+  merged: boolean;
+  prints: TapePrint[];
+  instrument?: Instrument;
+  stream: StreamStatus;
+  as_of: string;
+}

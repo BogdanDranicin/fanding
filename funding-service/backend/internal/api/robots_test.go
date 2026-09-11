@@ -17,6 +17,7 @@ type fakeRobotSource struct {
 	days        []robots.DayVolume
 	stream      robots.StreamStatus
 	instruments []robots.Instrument
+	tape        []robots.TapePrint
 }
 
 func (f fakeRobotSource) Snapshot() []robots.Session        { return f.sessions }
@@ -26,6 +27,16 @@ func (f fakeRobotSource) WatchDescription() string          { return "тесто
 func (f fakeRobotSource) DayVolumes() []robots.DayVolume    { return f.days }
 func (f fakeRobotSource) StreamStatus() robots.StreamStatus { return f.stream }
 func (f fakeRobotSource) Instruments() []robots.Instrument  { return f.instruments }
+
+func (f fakeRobotSource) Tape(symbol string, limit int, merged bool) []robots.TapePrint {
+	if symbol != "SBER" || !merged {
+		return []robots.TapePrint{}
+	}
+	if limit < len(f.tape) {
+		return f.tape[:limit]
+	}
+	return f.tape
+}
 
 func testSource() fakeRobotSource {
 	now := time.Date(2026, 8, 17, 15, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
@@ -196,5 +207,56 @@ func TestRobotsResponseCarriesStreamStatus(t *testing.T) {
 func TestRobotsStreamStatusWithoutCollector(t *testing.T) {
 	if got := getRobots(t, nil, "").Stream; got.Enabled || got.Connected {
 		t.Errorf("Stream = %+v, хотим выключенный источник", got)
+	}
+}
+
+func getTape(t *testing.T, src RobotSource, query string) tapeResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/robots/tape"+query, nil)
+	rec := httptest.NewRecorder()
+	handleRobotsTape(src)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("статус %d, хотим 200", rec.Code)
+	}
+	var resp tapeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("разбор ответа: %v (тело %s)", err, rec.Body.String())
+	}
+	return resp
+}
+
+// Лента отдаётся склеенной по умолчанию и вместе со справкой по бумаге: без неё
+// страница не знает ни имени контракта, ни шага цены.
+func TestHandleRobotsTape(t *testing.T) {
+	src := testSource()
+	src.instruments = []robots.Instrument{{Symbol: "SBER", Name: "Сбербанк", LotSize: 10, MinStep: 0.01}}
+	src.tape = []robots.TapePrint{
+		{Price: 250.1, Qty: 372, Side: robots.SideBuy, Trades: 3},
+		{Price: 250, Qty: 7, Side: robots.SideSell, Trades: 1},
+	}
+
+	resp := getTape(t, src, "?symbol=sber")
+	if resp.Symbol != "SBER" || !resp.Merged {
+		t.Fatalf("ответ про %q, склейка %v", resp.Symbol, resp.Merged)
+	}
+	if len(resp.Prints) != 2 || resp.Prints[0].Qty != 372 {
+		t.Fatalf("лента %+v", resp.Prints)
+	}
+	if resp.Instrument == nil || resp.Instrument.Name != "Сбербанк" {
+		t.Errorf("справка по бумаге %+v", resp.Instrument)
+	}
+	if resp.Stream.Symbols != 305 {
+		t.Errorf("состояние потока не доехало: %+v", resp.Stream)
+	}
+}
+
+// Запрос без тикера и запрос при выключенном сборе отвечают пустой лентой, а не
+// ошибкой: страница в обоих случаях показывает «сделок нет».
+func TestHandleRobotsTapeEmpty(t *testing.T) {
+	if got := getTape(t, testSource(), ""); len(got.Prints) != 0 {
+		t.Errorf("без тикера ждали пустую ленту, пришло %+v", got.Prints)
+	}
+	if got := getTape(t, nil, "?symbol=SBER"); len(got.Prints) != 0 {
+		t.Errorf("без сбора ждали пустую ленту, пришло %+v", got.Prints)
 	}
 }

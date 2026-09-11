@@ -41,6 +41,20 @@ type Config struct {
 	// TInvestToken — токен T-Invest API. Пусто — поиск роботов работает по
 	// публичной ленте MOEX ISS, а она приходит с задержкой в 15 минут.
 	TInvestToken string `envconfig:"TINVEST_TOKEN"`
+	// Ключи VAPID для push-уведомлений: ими сигнал доходит до заморожённой
+	// вкладки и до закрытого браузера. Печатает пару `go run ./cmd/vapidkeys`.
+	// Пусто — push выключен, страница уведомления не предлагает.
+	//
+	// Менять пару без нужды нельзя: открытый ключ вшит в каждую выданную
+	// браузером подписку, и с новой парой все они перестают приниматься.
+	VAPIDPublicKey  string `envconfig:"VAPID_PUBLIC_KEY"`
+	VAPIDPrivateKey string `envconfig:"VAPID_PRIVATE_KEY"`
+	// VAPIDSubject — контакт владельца сервиса (mailto: или адрес сайта):
+	// push-сервис требует его в подписи и по нему ищет, кому жаловаться.
+	VAPIDSubject string `envconfig:"VAPID_SUBJECT"`
+	// PushProxyURL — прокси до push-сервиса, если он недоступен напрямую
+	// (та же беда, что с api.telegram.org). Пусто — соединяемся сами.
+	PushProxyURL string `envconfig:"PUSH_PROXY_URL"`
 	Port         int    `envconfig:"BACKEND_PORT"          default:"8080"`
 	LogLevel     string `envconfig:"LOG_LEVEL"             default:"info"`
 }

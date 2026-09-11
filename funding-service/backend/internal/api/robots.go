@@ -20,6 +20,9 @@ type RobotSource interface {
 	DayVolumes() []robots.DayVolume
 	StreamStatus() robots.StreamStatus
 	Instruments() []robots.Instrument
+	// Tape — лента обезличенных сделок инструмента: то же, что в терминале,
+	// только подряд идущие сделки одного приказа сложены в один принт.
+	Tape(symbol string, limit int, merged bool) []robots.TapePrint
 }
 
 // robotsResponse — ответ страницы «Роботы».
@@ -89,6 +92,64 @@ func handleRobots(src RobotSource) http.HandlerFunc {
 				continue
 			}
 			resp.Robots = append(resp.Robots, s)
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// tapeResponse — ответ ленты обезличенных сделок одного инструмента.
+type tapeResponse struct {
+	Symbol string `json:"symbol"`
+	// Merged — сделки в ответе сложены в приказы. Ложь означает сырую ленту биржи.
+	Merged bool               `json:"merged"`
+	Prints []robots.TapePrint `json:"prints"`
+	// Instrument — справка по бумаге: имя, лот, шаг цены. Пусто, если биржа о
+	// тикере ещё не рассказала.
+	Instrument *robots.Instrument  `json:"instrument,omitempty"`
+	Stream     robots.StreamStatus `json:"stream"`
+	AsOf       time.Time           `json:"as_of"`
+}
+
+// tapeLimitDefault/tapeLimitMax — сколько строк ленты отдаём за раз. Больше
+// тысячи на экране всё равно не читают, а на плотной бумаге это уже мегабайты.
+const (
+	tapeLimitDefault = 200
+	tapeLimitMax     = 1000
+)
+
+// handleRobotsTape отдаёт ленту обезличенных сделок инструмента.
+func handleRobotsTape(src RobotSource) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))
+		// Склейка по умолчанию включена: за ней сюда и приходят. Сырая лента
+		// нужна только чтобы проверить саму склейку.
+		merged := r.URL.Query().Get("raw") != "1"
+		limit := tapeLimitDefault
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= tapeLimitMax {
+				limit = n
+			}
+		}
+
+		resp := tapeResponse{
+			Symbol: symbol,
+			Merged: merged,
+			Prints: []robots.TapePrint{},
+			AsOf:   time.Now(),
+		}
+		if src == nil || symbol == "" {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+
+		resp.Prints = src.Tape(symbol, limit, merged)
+		resp.Stream = src.StreamStatus()
+		for _, inst := range src.Instruments() {
+			if inst.Symbol == symbol {
+				found := inst
+				resp.Instrument = &found
+				break
+			}
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}

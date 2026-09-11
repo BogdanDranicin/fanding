@@ -2,15 +2,16 @@ import { useEffect } from 'react';
 import { useAlarmStore } from '../store/alarmStore';
 import { keepTabAlive, releaseTabAlive } from '../lib/tabKeepAlive';
 import { notifyAlarm } from '../lib/alarmNotify';
+import { syncWakeups } from '../lib/push';
 import {
+  alarmWakeups,
   ALARM_ARM_MS,
   ALARM_DRIFT_TOLERANCE_MS,
   ALARM_MAX_SLEEP_MS,
   alarmSleep,
   alarmTitle,
-  clockOf,
   isAlarmFresh,
-  mskDayStart,
+  mskClock,
   nextFireAt,
   playAlarmTone,
   scheduleAlarmTone,
@@ -21,10 +22,10 @@ import {
 // миллисекунду до отметки, крутился бы вхолостую до неё.
 const MIN_SLEEP_MS = 25;
 
-/** «ЧЧ:ММ» МСК из момента времени. */
-function mskClock(ms: number): string {
-  return clockOf(Math.round((ms - mskDayStart(ms)) / 60_000));
-}
+// PUSH_SYNC_MS — как часто расписание перекладывается на сервер. Список уезжает
+// на полсуток вперёд, так что реже было бы можно; чаще незачем: неизменившийся
+// список syncWakeups по сети не отправляет вовсе.
+const PUSH_SYNC_MS = 10 * 60_000;
 
 /**
  * Ведёт расписание пользовательских сигналов: раз в час, раз в полчаса, в
@@ -52,6 +53,26 @@ export function useTimeAlarms(): void {
   const enabled = useAlarmStore((s) => s.enabled);
   const volume = useAlarmStore((s) => s.volume);
   const pushFired = useAlarmStore((s) => s.pushFired);
+
+  // Ближайшие отметки уезжают на сервер, и он будит браузер push-ом. Это
+  // единственный канал, который доходит до заморожённой вкладки: в ней не
+  // выполняется ни один таймер, и звук, поставленный в очередь заранее, не
+  // звучит — аудиопоток остановлен вместе со страницей.
+  //
+  // Список пересчитывается от текущего момента: перед отправкой, по таймеру и
+  // при каждом возвращении к вкладке. Ничего не изменилось — запрос не уходит.
+  useEffect(() => {
+    const push = () => {
+      void syncWakeups(enabled ? alarmWakeups(alarms) : []);
+    };
+    push();
+    const id = setInterval(push, PUSH_SYNC_MS);
+    document.addEventListener('visibilitychange', push);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', push);
+    };
+  }, [alarms, enabled]);
 
   // Удержание вкладки заводится, пока есть что звонить, и снимается, когда
   // расписание опустело или сигналы выключили: держать вкладку живой просто так

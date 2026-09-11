@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useFundingStore } from '../store/fundingStore';
+import { useScaleStore } from '../store/scaleStore';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { fundingLevel, LEVEL_MARK, type FundingScale } from '../lib/fundingScale';
 import type { InstrumentFunding } from '../types/funding';
 
 // Document Picture-in-Picture — единственный способ получить в браузере окно
@@ -81,8 +83,12 @@ body {
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
-.cbw-up { color: #2ee66e; }
-.cbw-down { color: #ff5464; }
+.cbw-strong-up { color: #2ee66e; }
+.cbw-up { color: #ffc75a; }
+.cbw-down { color: #ff9a3c; }
+.cbw-strong-down { color: #ff5464; }
+.cbw-flat { color: #9aa4bb; }
+.cbw-mark { font-size: 11px; margin-right: 5px; vertical-align: 2px; }
 .cbw-pct {
   margin-left: auto;
   font-size: clamp(10px, 3.2vw, 13px);
@@ -107,18 +113,25 @@ const SYMS = [
   { key: 'EURRUBF', label: 'EUR' },
 ] as const;
 
-function Row({ label, inst }: { label: string; inst: InstrumentFunding | undefined }) {
+function Row({ label, inst, scale }: {
+  label: string;
+  inst: InstrumentFunding | undefined;
+  scale: FundingScale;
+}) {
   const value = inst?.cb_funding;
   const ref = inst?.official_rate;
-  // Пороги те же, что в таблице на странице: ±0.1 — уже заметный фандинг.
-  const cls = value == null ? '' : value >= 0.1 ? ' cbw-up' : value <= -0.1 ? ' cbw-down' : '';
+  // Пороги те же, что в таблице на странице: их задаёт пользователь в настройках.
+  const level = value == null ? 'none' : fundingLevel(value, ref, scale);
+  const cls = level === 'none' ? '' : ` cbw-${level}`;
   const pct = value != null && ref != null && ref > 0 ? (value / ref) * 100 : null;
 
   return (
     <div className="cbw-row">
       <span className="cbw-sym">{label}</span>
       <span className={`cbw-val${cls}`}>
-        {value != null ? fmt6.format(value) : <span className="cbw-none">—</span>}
+        {value != null
+          ? <><span className="cbw-mark">{LEVEL_MARK[level]}</span>{fmt6.format(value)}</>
+          : <span className="cbw-none">—</span>}
       </span>
       {pct != null && (
         <span className="cbw-pct">{pct >= 0 ? '+' : ''}{pct.toFixed(3)}%</span>
@@ -131,6 +144,7 @@ function Row({ label, inst }: { label: string; inst: InstrumentFunding | undefin
 function Widget() {
   const current = useFundingStore((s) => s.current);
   const status = useFundingStore((s) => s.wsStatus);
+  const scale = useScaleStore((s) => s.scale);
 
   const time = current
     ? new Date(current.ts).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })
@@ -143,7 +157,7 @@ function Widget() {
         <span className="cbw-time">{time} МСК</span>
       </div>
       {SYMS.map(({ key, label }) => (
-        <Row key={key} label={label} inst={current?.[key]} />
+        <Row key={key} label={label} inst={current?.[key]} scale={scale} />
       ))}
       {!current && (
         <div className="cbw-wait">
