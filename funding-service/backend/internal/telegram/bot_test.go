@@ -1,7 +1,10 @@
 package telegram
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +53,31 @@ func TestNonEmpty(t *testing.T) {
 	got := nonEmpty([]string{" ", "a", "", "  b "})
 	if len(got) != 2 || got[0] != "a" || got[1] != "  b " {
 		t.Errorf("nonEmpty = %#v, want [a, '  b ']", got)
+	}
+}
+
+func TestHideTokenRemovesTokenFromError(t *testing.T) {
+	const token = "8657025730:AAE-8FmAsbNXVr7WS62hEGcUaaaGnhoyMCo"
+	err := errors.New(`Post "https://api.telegram.org/bot` + token + `/getMe": dial tcp: connection refused`)
+
+	got := hideToken(err, token).Error()
+	if strings.Contains(got, token) {
+		t.Fatalf("токен остался в тексте ошибки: %s", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("причина ошибки потерялась: %s", got)
+	}
+
+	wrapped := fmt.Errorf("all telegram proxies failed: %w", hideToken(err, token))
+	if strings.Contains(wrapped.Error(), token) {
+		t.Errorf("токен просочился через обёртку: %s", wrapped.Error())
+	}
+
+	plain := errors.New("no usable proxy in TELEGRAM_PROXY_URL")
+	if hideToken(plain, token) != plain {
+		t.Error("ошибка без токена должна возвращаться как есть")
+	}
+	if hideToken(nil, token) != nil {
+		t.Error("nil должен оставаться nil")
 	}
 }

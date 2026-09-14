@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from repost import session_path
+from repost import env_bool, session_path
 
 
 def parse_proxy(url: str):
@@ -47,13 +47,14 @@ async def main() -> None:
     client = TelegramClient(
         StringSession(), int(api_id), api_hash,
         proxy=parse_proxy((os.getenv("TG_PROXY_URL") or "").strip()),
+        use_ipv6=env_bool("TG_IPV6", False),
     )
     try:
         await client.connect()
     except Exception as e:
         print("\n[СТОП] не удалось подключиться к Telegram (" + type(e).__name__ + "): " + str(e))
-        print("       Если сервер не ходит в Telegram напрямую — задайте в .env")
-        print("       TG_PROXY_URL=socks5://host:port (тот же прокси, что TELEGRAM_PROXY_URL")
+        print("       Если сервер не ходит в Telegram по IPv4 — включите в .env TG_IPV6=true")
+        print("       либо задайте TG_PROXY_URL=socks5://host:port (тот же прокси, что")
         print("       у бэкенда) и запустите login.py снова.\n")
         raise SystemExit(1)
 

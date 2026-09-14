@@ -99,6 +99,7 @@ class Config:
     live_delay_ms: int
     state_db: str
     proxy_url: str
+    use_ipv6: bool
 
     @staticmethod
     def load(require_chats: bool = True) -> "Config":
@@ -157,6 +158,7 @@ class Config:
             live_delay_ms=env_int("LIVE_DELAY_MS", 500),
             state_db=os.getenv("STATE_DB") or "./state.db",
             proxy_url=(os.getenv("TG_PROXY_URL") or "").strip(),
+            use_ipv6=env_bool("TG_IPV6", False),
         )
 
 
@@ -849,7 +851,7 @@ async def amain(args) -> None:
     check_session(cfg.session)
     client = TelegramClient(
         StringSession(cfg.session), cfg.api_id, cfg.api_hash,
-        proxy=parse_proxy(cfg.proxy_url),
+        proxy=parse_proxy(cfg.proxy_url), use_ipv6=cfg.use_ipv6,
     )
     # Текст переносим как есть: разметка берётся из entities исходного сообщения,
     # а не парсится заново (иначе символы _ * ` в тексте ломают сообщение).
@@ -859,9 +861,9 @@ async def amain(args) -> None:
         await client.connect()
     except Exception as e:
         die("не удалось подключиться к Telegram (" + type(e).__name__ + "): " + str(e) + "\n"
-            "       Если сервер не ходит в Telegram напрямую — задайте TG_PROXY_URL\n"
-            "       (тот же SOCKS5, что у бэкенда в TELEGRAM_PROXY_URL), например\n"
-            "       TG_PROXY_URL=socks5://host:port", code=1)
+            "       Если сервер не ходит в Telegram по IPv4 — включите TG_IPV6=true\n"
+            "       (у Telegram есть IPv6, и у многих хостеров он не заблокирован),\n"
+            "       либо задайте TG_PROXY_URL=socks5://host:port", code=1)
     if not await client.is_user_authorized():
         die("сессия недействительна: выполните login.py и пропишите свежий TG_SESSION", code=1)
 

@@ -42,7 +42,8 @@ func New(token string, proxyURLs []string, pool *pgxpool.Pool, store *storage.St
 // can reach it is required there; proxies are tried in order until one works.
 func newAPI(token string, proxyURLs []string, log zerolog.Logger) (*tgbotapi.BotAPI, error) {
 	if len(nonEmpty(proxyURLs)) == 0 {
-		return tgbotapi.NewBotAPI(token)
+		api, err := tgbotapi.NewBotAPI(token)
+		return api, hideToken(err, token)
 	}
 	var lastErr error
 	for _, raw := range proxyURLs {
@@ -59,7 +60,7 @@ func newAPI(token string, proxyURLs []string, log zerolog.Logger) (*tgbotapi.Bot
 		api, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, client)
 		if err != nil {
 			lastErr = err
-			log.Warn().Err(err).Str("proxy", proxyHost(raw)).Msg("telegram: proxy failed, trying next")
+			log.Warn().Err(hideToken(err, token)).Str("proxy", proxyHost(raw)).Msg("telegram: proxy failed, trying next")
 			continue
 		}
 		log.Info().Str("proxy", proxyHost(raw)).Msg("telegram: connected via proxy")
@@ -68,7 +69,7 @@ func newAPI(token string, proxyURLs []string, log zerolog.Logger) (*tgbotapi.Bot
 	if lastErr == nil {
 		lastErr = errors.New("no usable proxy in TELEGRAM_PROXY_URL")
 	}
-	return nil, fmt.Errorf("all telegram proxies failed: %w", lastErr)
+	return nil, fmt.Errorf("all telegram proxies failed: %w", hideToken(lastErr, token))
 }
 
 // proxyClient builds an HTTP client that tunnels through the given proxy.
@@ -110,6 +111,23 @@ func proxyHost(raw string) string {
 	return raw
 }
 
+// hideToken вырезает токен бота из текста ошибки. Сетевые ошибки Telegram несут
+// в себе полный URL запроса вместе с токеном, и он ложился в логи открытым.
+func hideToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	masked := strings.ReplaceAll(err.Error(), token, "***")
+	if masked == err.Error() {
+		return err
+	}
+	return errors.New(masked)
+}
+
+func (b *Bot) scrub(err error) error {
+	return hideToken(err, b.api.Token)
+}
+
 func nonEmpty(ss []string) []string {
 	out := ss[:0:0]
 	for _, s := range ss {
@@ -138,7 +156,7 @@ func (b *Bot) keepWarm(ctx context.Context) {
 			return
 		case <-t.C:
 			if _, err := b.api.GetMe(); err != nil {
-				b.log.Debug().Err(err).Msg("telegram: keep-warm ping failed")
+				b.log.Debug().Err(b.scrub(err)).Msg("telegram: keep-warm ping failed")
 			}
 		}
 	}
@@ -247,6 +265,6 @@ func (b *Bot) handleStop(ctx context.Context, msg *tgbotapi.Message) {
 
 func (b *Bot) send(chatID int64, text string) {
 	if _, err := b.api.Send(tgbotapi.NewMessage(chatID, text)); err != nil {
-		b.log.Warn().Err(err).Int64("chat_id", chatID).Msg("telegram send failed")
+		b.log.Warn().Err(b.scrub(err)).Int64("chat_id", chatID).Msg("telegram send failed")
 	}
 }

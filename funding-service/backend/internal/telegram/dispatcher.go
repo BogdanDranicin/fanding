@@ -34,6 +34,7 @@ type sender interface {
 // Dispatcher listens to settlement and publication signals and sends Telegram alerts.
 type Dispatcher struct {
 	api        sender
+	token      string
 	pool       *pgxpool.Pool
 	snapshotFn func() funding.FundingSnapshot
 	pubInfoFn  func() cbr.PublicationInfo
@@ -47,6 +48,7 @@ type Dispatcher struct {
 func NewDispatcher(bot *Bot, pool *pgxpool.Pool, snapshotFn func() funding.FundingSnapshot, pubInfoFn func() cbr.PublicationInfo, log zerolog.Logger) *Dispatcher {
 	return &Dispatcher{
 		api:        bot.api,
+		token:      bot.api.Token,
 		pool:       pool,
 		snapshotFn: snapshotFn,
 		pubInfoFn:  pubInfoFn,
@@ -199,7 +201,7 @@ func (d *Dispatcher) broadcast(ctx context.Context, text string, chatIDs []int64
 				msg.ParseMode = "HTML"
 				if _, err := d.api.Send(msg); err != nil {
 					failed.Add(1)
-					d.log.Warn().Err(err).Int64("chat_id", id).Msg("dispatcher: send failed")
+					d.log.Warn().Err(hideToken(err, d.token)).Int64("chat_id", id).Msg("dispatcher: send failed")
 					continue
 				}
 				firstN.CompareAndSwap(0, int64(time.Since(signalAt)))

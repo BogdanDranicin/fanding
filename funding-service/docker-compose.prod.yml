@@ -1,6 +1,7 @@
 networks:
   funding-net:
     driver: bridge
+    enable_ipv6: true
 
 services:
   postgres:
