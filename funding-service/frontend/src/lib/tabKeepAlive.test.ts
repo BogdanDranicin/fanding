@@ -1,15 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-let audioContexts = 0;
+class FakeOscillator {
+  type = 'sine';
+  frequency = { value: 0 };
+  started = false;
+  stopped = false;
+  connect(next: unknown) { return next; }
+  disconnect() {}
+  start() { this.started = true; }
+  stop() { this.stopped = true; }
+}
+
+class FakeGain {
+  gain = { value: 0 };
+  connect(next: unknown) { return next; }
+  disconnect() {}
+}
 
 class FakeAudioContext {
-  state = 'running';
+  state: 'suspended' | 'running' | 'closed' = 'running';
   destination = {};
+  oscillators: FakeOscillator[] = [];
+  resumeCalls = 0;
 
-  constructor() { audioContexts++; }
-  createOscillator() { return { start() {}, stop() {}, connect: (n: unknown) => n, disconnect() {} }; }
-  createGain() { return { gain: { value: 0 }, connect: (n: unknown) => n, disconnect() {} }; }
+  constructor() { audio = this as unknown as FakeAudioContext; }
+
+  createOscillator() {
+    const o = new FakeOscillator();
+    this.oscillators.push(o);
+    return o;
+  }
+
+  createGain() { return new FakeGain(); }
   addEventListener() {}
+
+  resume() {
+    this.resumeCalls++;
+    this.state = 'running';
+    return Promise.resolve();
+  }
+
+  live() { return this.oscillators.filter((o) => o.started && !o.stopped); }
 }
 
 class FakeLocks {
@@ -39,11 +70,13 @@ function fakeStorage() {
 let mod: typeof import('./tabKeepAlive');
 let locks: FakeLocks;
 let storage: Storage;
+let audio: FakeAudioContext | null = null;
 
-async function load(withLocks = true) {
+async function load(withLocks = true, prepare?: (s: Storage) => void) {
   locks = new FakeLocks();
   storage = fakeStorage();
-  audioContexts = 0;
+  audio = null;
+  prepare?.(storage);
   vi.stubGlobal('AudioContext', FakeAudioContext);
   vi.stubGlobal('localStorage', storage);
   vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {} });
@@ -61,40 +94,99 @@ afterEach(() => {
 });
 
 describe('удержание вкладки', () => {
-  it('держит вкладку локом и молча: звука на вкладке нет', async () => {
+  it('держит и локом, и неслышимым тоном: одного лока для долго скрытой вкладки мало', async () => {
     mod.keepTabAlive('alarms');
     await Promise.resolve();
 
     expect(locks.held).toBe(1);
-    expect(audioContexts).toBe(0);
-    expect(mod.keepAliveStatus().mode).toBe('lock');
+    expect(audio!.live()).toHaveLength(1);
+    expect(audio!.live()[0].frequency.value).toBe(30);
+    expect(mod.keepAliveStatus().mode).toBe('tone');
   });
 
-  it('держит один лок на любое число владельцев и отпускает на последнем', async () => {
+  it('держит один лок и один тон на любое число владельцев, снимает на последнем', async () => {
     mod.keepTabAlive('alarms');
     mod.keepTabAlive('funding');
     await Promise.resolve();
     expect(locks.granted).toBe(1);
+    expect(audio!.live()).toHaveLength(1);
 
     mod.releaseTabAlive('alarms');
     expect(locks.held).toBe(1);
+    expect(audio!.live()).toHaveLength(1);
 
     mod.releaseTabAlive('funding');
     await Promise.resolve();
     expect(locks.held).toBe(0);
+    expect(audio!.live()).toHaveLength(0);
+    expect(mod.keepAliveStatus().mode).toBe('none');
   });
 
-  it('без Web Locks вкладка остаётся без удержания, но звук не заводит', async () => {
+  it('без Web Locks вкладку держит один тон', async () => {
     await load(false);
     mod.keepTabAlive('alarms');
     await Promise.resolve();
 
-    expect(mod.keepAliveStatus().mode).toBe('none');
     expect(mod.keepAliveStatus().locks).toBe(false);
-    expect(audioContexts).toBe(0);
+    expect(mod.keepAliveStatus().mode).toBe('tone');
+    expect(audio!.live()).toHaveLength(1);
   });
 
-  it('заморозка вопреки локу только записывается, звук не включает', async () => {
+  it('выключенный в настройках тон не заводится и снимается на лету', async () => {
+    await load(true, (s) => s.setItem('tab_keepalive_tone', '0'));
+    mod.keepTabAlive('alarms');
+    await Promise.resolve();
+
+    expect(mod.keepAliveStatus().mode).toBe('lock');
+    expect(audio).toBeNull();
+
+    mod.setToneEnabled(true);
+    expect(audio!.live()).toHaveLength(1);
+
+    mod.setToneEnabled(false);
+    expect(audio!.live()).toHaveLength(0);
+    expect(storage.getItem('tab_keepalive_tone')).toBe('0');
+  });
+
+  it('ждёт разрешения на звук и заводит тон, когда контекст запустился', async () => {
+    const started = FakeAudioContext.prototype.resume;
+    FakeAudioContext.prototype.resume = function () {
+      this.resumeCalls++;
+      this.state = 'running';
+      return Promise.resolve();
+    };
+    const suspended = class extends FakeAudioContext {
+      constructor() { super(); this.state = 'suspended'; }
+    };
+    vi.stubGlobal('AudioContext', suspended);
+
+    mod.keepTabAlive('alarms');
+    expect(audio!.live()).toHaveLength(0);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audio!.resumeCalls).toBeGreaterThan(0);
+    expect(audio!.live()).toHaveLength(1);
+    FakeAudioContext.prototype.resume = started;
+  });
+
+  it('поднимает упавший тон на следующем пробуждении вкладки', async () => {
+    mod.keepTabAlive('alarms');
+    await Promise.resolve();
+    const first = audio!.live()[0];
+
+    audio!.state = 'suspended';
+    mod.__reviveForTests();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(first.stopped).toBe(true);
+    expect(audio!.live()).toHaveLength(1);
+    expect(audio!.live()[0]).not.toBe(first);
+  });
+
+  it('записывает заморозку вопреки удержанию', async () => {
     mod.keepTabAlive('alarms');
     await Promise.resolve();
 
@@ -102,9 +194,8 @@ describe('удержание вкладки', () => {
     await Promise.resolve();
 
     expect(mod.keepAliveStatus().frozeAt).not.toBeNull();
-    expect(mod.keepAliveStatus().mode).toBe('lock');
     expect(locks.held).toBe(1);
-    expect(audioContexts).toBe(0);
+    expect(audio!.live()).toHaveLength(1);
   });
 
   it('не считает отказом заморозку при уходе страницы в bfcache', async () => {
@@ -116,25 +207,6 @@ describe('удержание вкладки', () => {
     await Promise.resolve();
 
     expect(mod.keepAliveStatus().frozeAt).toBeNull();
-  });
-
-  it('забывает старую настройку постоянного звука', async () => {
-    locks = new FakeLocks();
-    const s = fakeStorage();
-    s.setItem('tab_keepalive_tone', '1');
-    vi.stubGlobal('localStorage', s);
-    vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {} });
-    vi.stubGlobal('window', { addEventListener() {}, removeEventListener() {} });
-    vi.stubGlobal('navigator', { locks });
-    vi.resetModules();
-    mod = await import('./tabKeepAlive');
-
-    mod.keepTabAlive('alarms');
-    await Promise.resolve();
-
-    expect(s.getItem('tab_keepalive_tone')).toBeNull();
-    expect(mod.keepAliveStatus().mode).toBe('lock');
-    expect(audioContexts).toBe(0);
   });
 
   it('забывает заморозку старше недели', async () => {

@@ -7,17 +7,20 @@ import {
   sendPushTest,
   type PushState,
 } from '../lib/push';
-import { keepAliveStatus, type KeepAliveStatus } from '../lib/tabKeepAlive';
+import {
+  isToneEnabled,
+  keepAliveStatus,
+  setToneEnabled,
+  type KeepAliveStatus,
+} from '../lib/tabKeepAlive';
 
 /**
- * «Сигнал в фоне»: единственная настройка, от которой зависит, прозвучит ли
- * будильник, когда на вкладку не смотрят.
- *
- * Раньше здесь была развилка из подпорок — держать вкладку локом, держать её
- * неслышимым звуком, — и обе не работали: браузер всё равно замораживает
- * вкладку, которую не открывали минут пять, а в замороженной странице не идут
- * ни таймеры, ни звук, поставленный в очередь заранее. Push эту развилку
- * убирает: сервер будит браузер сам, и вкладке для этого жить не обязательно.
+ * «Сигнал в фоне»: от чего зависит, прозвучит ли будильник, когда на вкладку не
+ * смотрят. Push будит браузер с сервера и работает даже при закрытом окне, но
+ * играет он уведомлением, а не звуком страницы. Чтобы сигнал давала сама
+ * вкладка — своим файлом и своей громкостью, — она должна остаться живой:
+ * одного Web Lock для этого не хватило, долго скрытую вкладку браузер всё равно
+ * заморозил, поэтому неслышимый тон вернулся и держится по умолчанию.
  */
 function stateText(state: PushState): string {
   switch (state) {
@@ -34,6 +37,13 @@ function stateText(state: PushState): string {
   }
 }
 
+function aliveText(a: KeepAliveStatus): string {
+  if (a.mode === 'tone') return 'неслышимый звук и Web Lock';
+  if (a.mode === 'lock') return 'Web Lock';
+  if (a.blocked) return 'звук ещё не разрешён браузером — кликните по странице';
+  return a.locks ? 'удержания нет' : 'браузер не умеет Web Lock';
+}
+
 function frozeDate(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -44,6 +54,7 @@ export function PushSettings() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [alive, setAlive] = useState<KeepAliveStatus | null>(null);
+  const [tone, setTone] = useState(isToneEnabled);
 
   const refresh = useCallback(() => {
     void pushState().then(setState);
@@ -133,12 +144,26 @@ export function PushSettings() {
 
       {note && <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>{note}</span>}
 
-      {/* Удержание вкладки осталось как было и работает, пока браузер его
-          слушается. Это уже не единственная надежда, поэтому и рассказывать о
-          нём подробно незачем — одна строка состояния. */}
+      <label className="settings-row">
+        <input
+          type="checkbox"
+          checked={tone}
+          onChange={(e) => {
+            setToneEnabled(e.target.checked);
+            setTone(e.target.checked);
+            setAlive(keepAliveStatus());
+          }}
+        />
+        <span>
+          Держать вкладку неслышимым звуком, пока чего-то ждём (на вкладке появится
+          значок динамика; без него долго скрытая вкладка замерзает и играть сигнал
+          сама уже не может)
+        </span>
+      </label>
+
       {alive?.wanted && (
         <span style={{ color: 'var(--text-dim)', fontSize: 12.5 }}>
-          Вкладку заодно держим Web Lock: {alive.mode === 'lock' ? 'удержание взято' : 'удержания нет'}
+          Вкладку держим: {aliveText(alive)}
           {alive.frozeAt != null && `, последняя заморозка ${frozeDate(alive.frozeAt)}`}.
         </span>
       )}
