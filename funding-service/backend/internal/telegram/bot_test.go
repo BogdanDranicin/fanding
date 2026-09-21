@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestProxyClientSchemeDefaultsToHTTP(t *testing.T) {
@@ -13,7 +15,7 @@ func TestProxyClientSchemeDefaultsToHTTP(t *testing.T) {
 		raw      string
 		wantHost string // host:port the proxy URL should resolve to
 	}{
-		{"gMohPU:zMGpPy@213.139.222.80:9598", "213.139.222.80:9598"},
+		{"user:pass@198.51.100.7:9598", "198.51.100.7:9598"},
 		{"http://user:pass@1.2.3.4:9700", "1.2.3.4:9700"},
 		{"socks5://user:pass@1.2.3.5:9677", "1.2.3.5:9677"},
 	}
@@ -41,7 +43,7 @@ func TestProxyClientSchemeDefaultsToHTTP(t *testing.T) {
 }
 
 func TestProxyHostStripsCredentials(t *testing.T) {
-	if got := proxyHost("gMohPU:zMGpPy@213.139.222.80:9598"); got != "213.139.222.80:9598" {
+	if got := proxyHost("user:pass@198.51.100.7:9598"); got != "198.51.100.7:9598" {
 		t.Errorf("proxyHost = %q, want host without creds", got)
 	}
 	if got := proxyHost("http://1.2.3.4:9700"); got != "http://1.2.3.4:9700" {
@@ -57,7 +59,7 @@ func TestNonEmpty(t *testing.T) {
 }
 
 func TestHideTokenRemovesTokenFromError(t *testing.T) {
-	const token = "8657025730:AAE-8FmAsbNXVr7WS62hEGcUaaaGnhoyMCo"
+	const token = "111111111:TEST-token-not-a-real-one"
 	err := errors.New(`Post "https://api.telegram.org/bot` + token + `/getMe": dial tcp: connection refused`)
 
 	got := hideToken(err, token).Error()
@@ -79,5 +81,17 @@ func TestHideTokenRemovesTokenFromError(t *testing.T) {
 	}
 	if hideToken(nil, token) != nil {
 		t.Error("nil должен оставаться nil")
+	}
+}
+
+func TestHasWebhookDetectsHijack(t *testing.T) {
+	if hasWebhook(tgbotapi.WebhookInfo{}) {
+		t.Error("пустой URL — webhook не выставлен")
+	}
+	if hasWebhook(tgbotapi.WebhookInfo{URL: "   "}) {
+		t.Error("пробелы в URL — webhook не выставлен")
+	}
+	if !hasWebhook(tgbotapi.WebhookInfo{URL: "https://evil.example/hook"}) {
+		t.Error("чужой webhook должен быть замечен")
 	}
 }

@@ -80,7 +80,7 @@ func newAPI(token string, proxyURLs []string, log zerolog.Logger) (*tgbotapi.Bot
 // занимает своё соединение постоянно (оно НЕ idle, переиспользовать его нельзя),
 // поэтому рассылка всегда идёт по отдельному; при дефолтных настройках оно
 // протухало между публикациями, и первое сообщение дня платило полный дозвон
-// через прокси плюс TLS-handshake — сотни миллисекунд. keepWarm держит это
+// через прокси плюс TLS-handshake — сотни миллисекунд. watchWebhook держит это
 // соединение живым, а MaxIdleConnsPerHost позволяет параллельным отправкам
 // не дозваниваться заново.
 func proxyClient(raw string) (*http.Client, error) {
@@ -138,33 +138,63 @@ func nonEmpty(ss []string) []string {
 	return out
 }
 
-// keepWarmInterval — как часто пинговать api.telegram.org, чтобы в пуле всегда
-// лежало готовое соединение. Должно быть заметно меньше IdleConnTimeout.
-const keepWarmInterval = 60 * time.Second
+// webhookCheckInterval — как часто спрашивать у Telegram состояние webhook.
+// Должно быть заметно меньше IdleConnTimeout: этот же запрос держит соединение
+// с api.telegram.org горячим.
+const webhookCheckInterval = 60 * time.Second
 
-// keepWarm раз в минуту дёргает getMe. Смысл не в ответе, а в соединении:
-// публикация ЦБ случается раз в сутки, и без пинга рассылка каждый раз начиналась
-// с холодного дозвона через прокси и TLS-handshake — это и была основная часть
-// отставания Telegram от сайта. Один дешёвый запрос в минуту (лимитов Telegram
-// не касается) держит соединение горячим, так что Send уходит сразу.
-func (b *Bot) keepWarm(ctx context.Context) {
-	t := time.NewTicker(keepWarmInterval)
+// hasWebhook сообщает, что боту выставлен webhook. Мы работаем только длинным
+// поллингом, поэтому любой webhook здесь чужой.
+func hasWebhook(info tgbotapi.WebhookInfo) bool {
+	return strings.TrimSpace(info.URL) != ""
+}
+
+// dropForeignWebhook снимает webhook, если он появился. Пока он висит, Telegram
+// отдаёт апдейты по нему, а getUpdates отвечает Conflict — так выглядит захват
+// бота по утёкшему токену: команды пользователей уходят чужому серверу.
+//
+// Возвращает адрес снятого webhook (пусто — снимать было нечего).
+func (b *Bot) dropForeignWebhook() string {
+	info, err := b.api.GetWebhookInfo()
+	if err != nil {
+		b.log.Debug().Err(b.scrub(err)).Msg("telegram: не удалось прочитать webhook info")
+		return ""
+	}
+	if !hasWebhook(info) {
+		return ""
+	}
+	b.log.Error().
+		Str("webhook", info.URL).
+		Int("pending", info.PendingUpdateCount).
+		Msg("telegram: боту выставлен чужой webhook — токен скомпрометирован, снимаю и жду смены токена")
+	if _, err := b.api.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: true}); err != nil {
+		b.log.Error().Err(b.scrub(err)).Msg("telegram: снять чужой webhook не удалось")
+		return ""
+	}
+	return info.URL
+}
+
+// watchWebhook раз в минуту проверяет, не перехватил ли кто апдейты, и заодно
+// держит соединение горячим. Публикация ЦБ случается раз в сутки, и без пинга
+// рассылка каждый раз начиналась с холодного дозвона и TLS-handshake — это и
+// была основная часть отставания Telegram от сайта.
+func (b *Bot) watchWebhook(ctx context.Context) {
+	t := time.NewTicker(webhookCheckInterval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := b.api.GetMe(); err != nil {
-				b.log.Debug().Err(b.scrub(err)).Msg("telegram: keep-warm ping failed")
-			}
+			b.dropForeignWebhook()
 		}
 	}
 }
 
 // Run starts long-polling and blocks until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) {
-	go b.keepWarm(ctx)
+	b.dropForeignWebhook()
+	go b.watchWebhook(ctx)
 
 	cfg := tgbotapi.NewUpdate(0)
 	cfg.Timeout = 30
