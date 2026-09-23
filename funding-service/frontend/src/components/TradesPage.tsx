@@ -5,9 +5,15 @@ import {
   directionLabel,
   fetchEvents,
   fetchPositions,
+  fetchPrices,
+  loadPercent,
+  pnlPercent,
   price,
+  quoteFor,
   savePosition,
+  signedPercent,
   when,
+  type Prices,
   type TradeEvent,
   type TradePosition,
   type TradePositionInput,
@@ -136,8 +142,17 @@ function PositionForm({ initial, authors, onSave, onCancel }: {
   );
 }
 
-function PositionCard({ p, authors, onChanged }: {
+function PnL({ v }: { v: number | null }) {
+  const cls = v == null ? '' : v > 0 ? ' trd-pnl-up' : v < 0 ? ' trd-pnl-down' : '';
+  return <span className={`trd-num${cls}`}>{signedPercent(v)}</span>;
+}
+
+// PositionRow — строка таблицы позиций. Раскрывается по клику: подробности,
+// исходное сообщение и правка — всё, что не влезает в колонки.
+function PositionRow({ p, current, showAuthor, authors, onChanged }: {
   p: TradePosition;
+  current: number | null;
+  showAuthor: boolean;
   authors: string[];
   onChanged: () => void;
 }) {
@@ -156,24 +171,25 @@ function PositionCard({ p, authors, onChanged }: {
   };
 
   const closed = p.status === 'closed';
+  const result = closed ? pnlPercent(p, p.close_price) : pnlPercent(p, current);
   return (
-    <details className={`jrn-card trd-card${closed ? ' trd-card-closed' : ''}`}>
-      <summary className="jrn-summary trd-summary">
-        <div className="trd-who">
-          <span className="trd-author">{p.author}{p.book ? ` · ${p.book}` : ''}</span>
-          <span className="trd-ticker">{p.ticker}</span>
-        </div>
-        <DirBadge d={p.direction} />
-        <div className="trd-facts">
-          <span className="jrn-rate"><i>РАЗМЕР</i>{p.size || '—'}</span>
-          <span className="jrn-rate"><i>ВХОД</i>{price(p.entry_price)}</span>
-          {closed
-            ? <span className="jrn-rate"><i>ВЫХОД</i>{price(p.close_price)}</span>
-            : <span className="jrn-rate"><i>СТОП</i>{p.stop || '—'}</span>}
-          <span className="jrn-rate"><i>{closed ? 'ЗАКРЫТА' : 'ОТКРЫТА'}</i>{when(closed ? p.closed_at : p.opened_at)}</span>
-        </div>
-        {p.manual && <span className="trd-manual" title="Правилась вручную">✎</span>}
-        <span className="jrn-chevron" aria-hidden="true">▸</span>
+    <details className={`trd-row${closed ? ' trd-row-closed' : ''}`}>
+      <summary className="trd-tr">
+        <span className="trd-td trd-td-ticker">
+          {showAuthor && <span className="trd-author">{p.author}{p.book ? ` · ${p.book}` : ''}</span>}
+          <span className="trd-ticker">{p.ticker}{p.manual && <span className="trd-manual" title="Правилась вручную"> ✎</span>}</span>
+        </span>
+        <span className="trd-td"><DirBadge d={p.direction} /></span>
+        <span className="trd-td trd-num" data-label="Доля">{p.size || '—'}</span>
+        <span className="trd-td trd-num" data-label="Вход">{price(p.entry_price)}</span>
+        <span className="trd-td trd-num" data-label={closed ? 'Выход' : 'Текущая'}>
+          {price(closed ? p.close_price : current)}
+        </span>
+        <span className="trd-td" data-label={closed ? 'Результат' : 'Прибыль/убыток'}><PnL v={result} /></span>
+        <span className="trd-td trd-td-muted" data-label="Стоп">{p.stop || '—'}</span>
+        <span className="trd-td trd-td-muted trd-num" data-label={closed ? 'Закрыта' : 'Открыта'}>
+          {when(closed ? p.closed_at : p.opened_at)}
+        </span>
       </summary>
 
       <div className="trd-details">
@@ -194,7 +210,6 @@ function PositionCard({ p, authors, onChanged }: {
               <div><span className="trd-label">Цели</span>{p.targets || '—'}</div>
               <div><span className="trd-label">Открыта</span>{when(p.opened_at)}</div>
               <div><span className="trd-label">Обновлена</span>{when(p.updated_at)}</div>
-              {p.stop && closed && <div><span className="trd-label">Стоп</span>{p.stop}</div>}
               {p.note && <div className="trd-wide"><span className="trd-label">Заметка</span>{p.note}</div>}
             </div>
             {p.last_text && (
@@ -207,8 +222,8 @@ function PositionCard({ p, authors, onChanged }: {
               <button type="button" className="btn-plain" onClick={() => setEditing(true)}>Изменить</button>
               {!closed && (
                 <button type="button" className="btn-plain"
-                  onClick={() => run(() => savePosition({ ...toInput(p), status: 'closed' }, p.id))}>
-                  Закрыть
+                  onClick={() => run(() => savePosition({ ...toInput(p), status: 'closed', close_price: current }, p.id))}>
+                  Закрыть{current != null ? ` по ${price(current)}` : ''}
                 </button>
               )}
               {closed && (
@@ -231,6 +246,49 @@ function PositionCard({ p, authors, onChanged }: {
   );
 }
 
+function TableHead({ closed, showAuthor }: { closed?: boolean; showAuthor?: boolean }) {
+  return (
+    <div className="trd-tr trd-thead" aria-hidden="true">
+      <span className="trd-td">{showAuthor ? 'Автор · инструмент' : 'Инструмент'}</span>
+      <span className="trd-td">Направление</span>
+      <span className="trd-td trd-num">Доля</span>
+      <span className="trd-td trd-num">Цена входа</span>
+      <span className="trd-td trd-num">{closed ? 'Цена выхода' : 'Текущая цена'}</span>
+      <span className="trd-td">{closed ? 'Результат' : 'Прибыль/убыток'}</span>
+      <span className="trd-td">Стоп</span>
+      <span className="trd-td trd-num">{closed ? 'Закрыта' : 'Открыта'}</span>
+    </div>
+  );
+}
+
+// Portfolio — блок одного автора (у Profit King — одного модельного
+// портфеля): шапка с загрузкой, как в его «Текущих позициях», и таблица.
+function Portfolio({ title, list, prices, authors, onChanged }: {
+  title: string;
+  list: TradePosition[];
+  prices: Prices;
+  authors: string[];
+  onChanged: () => void;
+}) {
+  const load = loadPercent(list);
+  return (
+    <section className="trd-portfolio">
+      <div className="trd-portfolio-head">
+        <span className="trd-portfolio-title">{title}</span>
+        <span className="trd-portfolio-fact"><i>ПОЗИЦИЙ</i>{list.length}</span>
+        {load != null && <span className="trd-portfolio-fact"><i>ЗАГРУЗКА</i>{load.toLocaleString('ru-RU')}%</span>}
+      </div>
+      <div className="trd-table">
+        <TableHead />
+        {list.map((p) => (
+          <PositionRow key={p.id} p={p} current={quoteFor(p.ticker, prices)} showAuthor={false}
+            authors={authors} onChanged={onChanged} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function EventRow({ e }: { e: TradeEvent }) {
   const label = ACTION_LABEL[e.action] ?? e.action;
   return (
@@ -246,10 +304,17 @@ function EventRow({ e }: { e: TradeEvent }) {
   );
 }
 
+// PRICES_MS — котировки для колонки «текущая цена». Бэкенд кэширует их на
+// минуту, чаще спрашивать незачем.
+const PRICES_MS = 30000;
+
+const BOOK_TITLE: Record<string, string> = { МП1: 'Модельный портфель 1', МП2: 'Модельный портфель 2' };
+
 export function TradesPage() {
   const [open, setOpen] = useState<TradePosition[]>([]);
   const [closed, setClosed] = useState<TradePosition[]>([]);
   const [events, setEvents] = useState<TradeEvent[]>([]);
+  const [prices, setPrices] = useState<Prices>({});
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [author, setAuthor] = useState('');
@@ -269,26 +334,54 @@ export function TradesPage() {
     }
   }, []);
 
-  // Первичная загрузка и опрос. load() меняет состояние только после ответа
+  const loadPrices = useCallback(async () => {
+    try {
+      setPrices(await fetchPrices());
+    } catch {
+      // Без котировок в колонке «текущая цена» останутся прочерки — это не ошибка страницы.
+    }
+  }, []);
+
+  // Первичная загрузка и опрос. Состояние меняется только после ответа
   // сервера, правило не видит это через async-границу.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); void loadPrices(); }, [load, loadPrices]);
   useEffect(() => {
     const id = setInterval(() => { if (!document.hidden) void load(); }, POLL_MS);
-    return () => clearInterval(id);
-  }, [load]);
+    const pid = setInterval(() => { if (!document.hidden) void loadPrices(); }, PRICES_MS);
+    return () => {
+      clearInterval(id);
+      clearInterval(pid);
+    };
+  }, [load, loadPrices]);
 
   const authors = useMemo(
     () => [...new Set([...open, ...closed].map((p) => p.author))].sort((a, b) => a.localeCompare(b, 'ru')),
     [open, closed],
   );
-  const byAuthor = (list: TradePosition[]) => (author ? list.filter((p) => p.author === author) : list);
-  const shownOpen = byAuthor(open);
-  const shownClosed = byAuthor(closed);
+
+  // Портфели: автор, а у Profit King — ещё и номер модельного портфеля.
+  const portfolios = useMemo(() => {
+    const groups = new Map<string, { title: string; list: TradePosition[] }>();
+    for (const p of open) {
+      if (author && p.author !== author) continue;
+      const key = `${p.author}|${p.book}`;
+      const title = p.book ? `${p.author} · ${BOOK_TITLE[p.book] ?? p.book}` : p.author;
+      const g = groups.get(key) ?? { title, list: [] };
+      g.list.push(p);
+      groups.set(key, g);
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => a.localeCompare(b, 'ru'))
+      .map(([key, g]) => ({ key, ...g }));
+  }, [open, author]);
+
+  const shownClosed = author ? closed.filter((p) => p.author === author) : closed;
   const shownEvents = author ? events.filter((e) => e.author === author) : events;
+  const reload = () => void load();
 
   return (
-    <div className="race-page">
+    <div className="race-page trd-page">
       <div className="race-header">
         <h2 className="race-title">Сделки авторов</h2>
         <button type="button" className="btn-plain" onClick={() => setCreating((c) => !c)}>
@@ -298,8 +391,9 @@ export function TradesPage() {
 
       <p className="race-subtitle">
         Позиции собираются из сообщений каналов по ключевым словам: «покупка», «взял шорт», «добрал»,
-        «закрыл 50%», «закрыл остаток», стоп и цели. Что понято не так — поправьте в карточке, правка
-        помечается ✎. В ленте ниже видно, из какой фразы взято каждое действие.
+        «закрыл 50%», «закрыл остаток», стоп и цели. Текущая цена — последняя сделка на Мосбирже, для
+        общих названий фьючерсов («Микс», «Si») — ближайший контракт. Что понято не так — нажмите на
+        строку и поправьте, правка помечается ✎.
       </p>
 
       {creating && (
@@ -334,24 +428,24 @@ export function TradesPage() {
 
       {error && <div className="trd-error">Не удалось загрузить: {error}</div>}
 
-      <div className="race-card-title">Открытые позиции · {shownOpen.length}</div>
-      {loaded && shownOpen.length === 0 && <p className="race-subtitle">Открытых позиций нет.</p>}
-      {shownOpen.length > 0 && (
-        <div className="jrn-list">
-          {shownOpen.map((p) => <PositionCard key={p.id} p={p} authors={authors} onChanged={() => void load()} />)}
-        </div>
-      )}
+      {loaded && portfolios.length === 0 && <p className="race-subtitle">Открытых позиций нет.</p>}
+      {portfolios.map((g) => (
+        <Portfolio key={g.key} title={g.title} list={g.list} prices={prices} authors={authors} onChanged={reload} />
+      ))}
 
       <details className="trd-section">
         <summary className="race-card-title trd-section-title">Закрытые · последние {shownClosed.length}</summary>
         {shownClosed.length > 0 && (
-          <div className="jrn-list">
-            {shownClosed.map((p) => <PositionCard key={p.id} p={p} authors={authors} onChanged={() => void load()} />)}
+          <div className="trd-table">
+            <TableHead closed showAuthor />
+            {shownClosed.map((p) => (
+              <PositionRow key={p.id} p={p} current={null} showAuthor authors={authors} onChanged={reload} />
+            ))}
           </div>
         )}
       </details>
 
-      <details className="trd-section" open>
+      <details className="trd-section">
         <summary className="race-card-title trd-section-title">Лента разбора</summary>
         {shownEvents.length === 0
           ? <p className="race-subtitle">Событий пока нет.</p>

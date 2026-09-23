@@ -2592,14 +2592,6 @@ details[open] > .accordion-summary::before {
 
 /* ── Сделки авторов ───────────────────────────────────────────────────────── */
 
-.trd-summary { gap: 14px; }
-
-.trd-who {
-  display: flex;
-  flex-direction: column;
-  min-width: 130px;
-}
-
 .trd-author {
   font-size: 11px;
   color: var(--text-muted);
@@ -2624,21 +2616,11 @@ details[open] > .accordion-summary::before {
 .trd-dir-long  { color: var(--accent-up);   background: var(--accent-up-soft); }
 .trd-dir-short { color: var(--accent-down); background: var(--accent-down-soft); }
 
-.trd-facts {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  flex: 1;
-  min-width: 0;
-}
-
 .trd-manual {
   color: var(--accent-warn);
   font-size: 13px;
   flex-shrink: 0;
 }
-
-.trd-card-closed .trd-ticker { color: var(--text-muted); }
 
 .trd-details {
   border-top: 1px solid var(--border);
@@ -2816,7 +2798,138 @@ details[open] > .accordion-summary::before {
 .trd-toast-close .alm-toast-mark { color: var(--text-primary); }
 
 @media (max-width: 640px) {
-  .trd-who { min-width: 0; }
-  .trd-facts { flex-basis: 100%; gap: 10px; }
   .trd-event-time, .trd-event-who { min-width: 0; }
 }
+
+.trd-portfolio {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.trd-portfolio-head {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.trd-portfolio-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-right: auto;
+}
+
+.trd-portfolio-fact {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.trd-portfolio-fact i {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  margin-right: 6px;
+}
+
+.trd-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.trd-section > .trd-table {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.trd-tr {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.3fr) 92px 96px 104px 116px 112px minmax(110px, 1.5fr) 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+summary.trd-tr {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+summary.trd-tr::-webkit-details-marker { display: none; }
+summary.trd-tr::marker { content: none; }
+summary.trd-tr:hover { background: var(--bg-elevated); }
+
+.trd-row:last-child > .trd-tr { border-bottom: none; }
+.trd-row[open] > .trd-tr { background: var(--bg-elevated); border-bottom: 1px solid var(--border); }
+.trd-row[open]:last-child > .trd-tr { border-bottom: 1px solid var(--border); }
+.trd-row:not(:last-child)[open] > .trd-details { border-bottom: 1px solid var(--border); }
+.trd-row > .trd-details { border-top: none; }
+
+.trd-thead {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.trd-td {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.trd-td-ticker {
+  display: flex;
+  flex-direction: column;
+}
+
+.trd-td-muted { color: var(--text-muted); font-size: 13px; }
+
+.trd-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.trd-tr > .trd-td:nth-child(6) { text-align: right; }
+
+.trd-pnl-up   { color: var(--accent-up); }
+.trd-pnl-down { color: var(--accent-down); }
+
+.trd-row-closed .trd-ticker { color: var(--text-muted); }
+
+@media (max-width: 720px) {
+  .trd-thead { display: none; }
+  .trd-tr {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+  }
+  .trd-td-ticker { grid-column: 1; }
+  .trd-tr > .trd-td:nth-child(2) { text-align: right; }
+  .trd-tr > .trd-td[data-label] {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    text-align: right;
+  }
+  .trd-tr > .trd-td[data-label]::before {
+    content: attr(data-label);
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: left;
+  }
+}
+

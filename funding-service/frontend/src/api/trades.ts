@@ -112,3 +112,60 @@ export const ACTION_LABEL: Record<string, string> = {
   manual_open: 'добавлено вручную',
   manual_edit: 'изменено вручную',
 };
+
+export type Prices = Record<string, number>;
+
+export async function fetchPrices(): Promise<Prices> {
+  const res = await authFetch('/api/v1/prices');
+  return (await json<Prices | null>(res, 'цены')) ?? {};
+}
+
+// Общие названия фьючерсов из сообщений («Микс», «Si») → префикс кода контракта
+// на FORTS. Цена берётся у ближайшего по сроку контракта: его и торгуют.
+const FUTURES_PREFIX: Record<string, string> = {
+  MIX: 'MX', RTS: 'RI', Si: 'Si', BR: 'BR', GOLD: 'GD', SILV: 'SV', PLT: 'PT', CNY: 'CR',
+};
+const MONTHS = 'FGHJKMNQUVXZ';
+
+function frontContract(prefix: string, prices: Prices): number | null {
+  const re = new RegExp(`^${prefix}([${MONTHS}])([0-9])$`);
+  let best: { key: number; price: number } | null = null;
+  for (const [code, value] of Object.entries(prices)) {
+    const m = re.exec(code);
+    if (!m) continue;
+    const key = Number(m[2]) * 12 + MONTHS.indexOf(m[1]);
+    if (!best || key < best.key) best = { key, price: value };
+  }
+  return best?.price ?? null;
+}
+
+/** Текущая цена инструмента позиции: акция TQBR, конкретный фьючерс или ближайший. */
+export function quoteFor(ticker: string, prices: Prices): number | null {
+  if (ticker in prices) return prices[ticker];
+  if (ticker === 'IMOEX') return prices.IMOEXF ?? null;
+  const prefix = FUTURES_PREFIX[ticker];
+  return prefix ? frontContract(prefix, prices) : null;
+}
+
+/** Прибыль/убыток позиции в процентах от входа, со знаком стороны. */
+export function pnlPercent(p: Pick<TradePosition, 'direction' | 'entry_price'>, current: number | null): number | null {
+  if (p.entry_price == null || p.entry_price === 0 || current == null) return null;
+  const move = (current - p.entry_price) / p.entry_price * 100;
+  return p.direction === 'short' ? -move : move;
+}
+
+/** Загрузка портфеля — сумма долей, если все размеры заданы в процентах. */
+export function loadPercent(list: TradePosition[]): number | null {
+  let sum = 0;
+  for (const p of list) {
+    const m = /^(\d+(?:[.,]\d+)?)%$/.exec(p.size.trim());
+    if (!m) return null;
+    sum += Number(m[1].replace(',', '.'));
+  }
+  return list.length > 0 ? sum : null;
+}
+
+export function signedPercent(v: number | null): string {
+  if (v == null) return '—';
+  return `${v > 0 ? '+' : ''}${v.toFixed(2).replace('.', ',')}%`;
+}
