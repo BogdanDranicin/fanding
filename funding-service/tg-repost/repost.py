@@ -26,9 +26,11 @@ import argparse
 import asyncio
 import copy
 import datetime as dt
+import json
 import logging
 import os
 import re
+import urllib.request
 import sqlite3
 import sys
 import tempfile
@@ -87,12 +89,13 @@ class Route:
     src_raw: str
     dst_raw: str
     dst_title_expected: str
+    trades: bool = False
 
     def key(self, name: str) -> str:
         return "route:" + str(self.num) + ":" + name
 
 
-ROUTE_VAR = re.compile(r"^ROUTE_(\d+)_(SRC|DST|TITLE)$")
+ROUTE_VAR = re.compile(r"^ROUTE_(\d+)_(SRC|DST|TITLE|TRADES)$")
 
 
 def load_routes() -> list[Route]:
@@ -113,7 +116,8 @@ def load_routes() -> list[Route]:
         if missing:
             die("маршрут ROUTE_" + str(num) + " неполный: не заданы " +
                 ", ".join("ROUTE_" + str(num) + "_" + p for p in missing))
-        routes.append(Route(num, parts["SRC"], parts["DST"], parts["TITLE"]))
+        trades = (parts.get("TRADES") or "").lower() in ("1", "true", "yes", "y", "on", "да")
+        routes.append(Route(num, parts["SRC"], parts["DST"], parts["TITLE"], trades))
     return routes
 
 
@@ -144,6 +148,8 @@ class Config:
     proxy_url: str
     use_ipv6: bool
     routes: list[Route]
+    trades_url: str
+    trades_token: str
 
     @staticmethod
     def load(require_chats: bool = True) -> "Config":
@@ -204,6 +210,8 @@ class Config:
             proxy_url=(os.getenv("TG_PROXY_URL") or "").strip(),
             use_ipv6=env_bool("TG_IPV6", False),
             routes=load_routes() if require_chats else [],
+            trades_url=(os.getenv("TRADES_URL") or "").strip(),
+            trades_token=(os.getenv("TRADES_TOKEN") or "").strip(),
         )
 
 
@@ -541,11 +549,66 @@ def check_route_set(pairs) -> None:
                 " — пересылка пошла бы по кругу.")
 
 
+class TradesFeed:
+    """Отправка сообщений каналов со сделками в бэкенд сайта (вкладка «Сделки»).
+
+    Это побочная ветка: пересылку в Telegram она не задерживает и уронить не
+    может. Запрос уходит в фоне, с тремя попытками; бэкенд сам отбрасывает
+    повтор того же сообщения, так что повторная отправка безопасна.
+    """
+
+    def __init__(self, url: str, token: str):
+        self.url = url
+        self.token = token
+        self.tasks: set = set()
+
+    def enabled(self) -> bool:
+        return bool(self.url and self.token)
+
+    def submit(self, src, msg) -> None:
+        if isinstance(msg, MessageService):
+            return
+        date = getattr(msg, "date", None) or dt.datetime.now(dt.timezone.utc)
+        payload = {
+            "channel_id": peer_key(src),
+            "channel_title": getattr(src, "title", "") or utils.get_display_name(src),
+            "msg_id": msg.id,
+            "date": date.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "text": msg.message or "",
+            "has_media": has_real_media(msg),
+            "reply_to": getattr(msg, "reply_to_msg_id", None),
+        }
+        task = asyncio.ensure_future(self._send(payload))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def _post(self, body: bytes) -> None:
+        req = urllib.request.Request(self.url, data=body, method="POST", headers={
+            "Content-Type": "application/json",
+            "X-Trades-Token": self.token,
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+
+    async def _send(self, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        for attempt in range(3):
+            try:
+                await asyncio.to_thread(self._post, body)
+                return
+            except Exception as e:
+                log.warning("сделки: не отправлено #%s (попытка %s): %s: %s",
+                            payload["msg_id"], attempt + 1, type(e).__name__, e)
+                await asyncio.sleep(2 * (attempt + 1))
+        log.error("сделки: сообщение #%s так и не ушло в бэкенд", payload["msg_id"])
+
+
 class Sender:
     """Единственная точка отправки. Перед каждым вызовом сверяет получателя."""
 
     def __init__(self, client: TelegramClient, cfg: Config, state: State, src, dst):
         self.client = client
+        self.trades: TradesFeed | None = None
         self.cfg = cfg
         self.state = state
         self.src = src
@@ -761,6 +824,8 @@ def short(msg) -> str:
 
 
 async def handle_one(sender: Sender, cfg: Config, msg, delay_ms: int) -> None:
+    if sender.trades is not None and not cfg.dry_run:
+        sender.trades.submit(sender.src, msg)
     if sender.state.already_posted(sender.src_key, msg.id):
         sender.skipped += 1
         log.debug("уже перенесено: %s", short(msg))
@@ -793,6 +858,9 @@ async def handle_one(sender: Sender, cfg: Config, msg, delay_ms: int) -> None:
 
 
 async def handle_group(sender: Sender, cfg: Config, group, delay_ms: int) -> None:
+    if sender.trades is not None and not cfg.dry_run:
+        for m in group:
+            sender.trades.submit(sender.src, m)
     group = [m for m in group if not sender.state.already_posted(sender.src_key, m.id)]
     group = [m for m in group if skip_reason(m, cfg)[0] is None]
     if not group:
@@ -1021,6 +1089,17 @@ async def amain(args) -> None:
 
     sender = Sender(client, cfg, state, src, dst)
     extra_senders = [(r, Sender(client, cfg, state, s, d)) for r, s, d in extra]
+
+    feed = TradesFeed(cfg.trades_url, cfg.trades_token)
+    trade_routes = [r for r, _ in extra_senders if r.trades]
+    if trade_routes and not feed.enabled():
+        log.warning("ROUTE_*_TRADES включён, но TRADES_URL/TRADES_TOKEN не заданы — сделки не отправляются")
+    elif trade_routes:
+        for route, s in extra_senders:
+            if route.trades:
+                s.trades = feed
+        print("СДЕЛКИ   : маршруты " + ", ".join("ROUTE_" + str(r.num) for r in trade_routes) +
+              " → " + cfg.trades_url)
 
     await send_canary(client, cfg, state, sender, "canary_sent")
     for route, s in extra_senders:

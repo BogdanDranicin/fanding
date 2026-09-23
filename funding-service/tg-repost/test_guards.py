@@ -110,7 +110,7 @@ def make_cfg(**over):
     for k in list(os.environ):
         if k.startswith(("TG_", "SRC_", "DST_", "MODE", "DRY_", "SEND_", "ALLOW_",
                          "HISTORY_", "LIVE_", "INCLUDE_", "ALBUMS", "STATE_DB",
-                         "FORWARD", "SHOW_AUTHOR", "AUTHOR_", "ROUTE_")):
+                         "FORWARD", "SHOW_AUTHOR", "AUTHOR_", "ROUTE_", "TRADES_")):
             del os.environ[k]
     os.environ.update({k: v for k, v in env.items() if v is not None})
     return repost.Config.load()
@@ -603,6 +603,73 @@ def t_route_catch_up_empty_source():
     assert cl.forwarded == [(repost.peer_key(rdst), repost.peer_key(rsrc), [1])], cl.forwarded
 
 
+def t_routes_trades_flag():
+    """ROUTE_<n>_TRADES=true включает отправку сделок только этому маршруту."""
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse A", ROUTE_1_TRADES="true",
+                   ROUTE_2_SRC="-100500", ROUTE_2_DST="-100600", ROUTE_2_TITLE="parse B")
+    assert [r.trades for r in cfg.routes] == [True, False], cfg.routes
+
+
+def run_trades(post, dry="false", with_feed=True):
+    rsrc, rdst = channel(300, "Profit King [Ded]"), channel(400, "parse Profit King")
+    st = fresh_state("trades_" + os.urandom(6).hex())
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN=dry, FORWARD="true",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse Profit King",
+                   ROUTE_1_TRADES="true")
+    cl = FakeClient(user(7), {-100300: rsrc, -100400: rdst}, [])
+    s, d = asyncio.run(repost.preflight(cl, cfg, st, cfg.routes[0]))
+    sender = repost.Sender(cl, cfg, st, s, d)
+    feed = repost.TradesFeed("http://backend:8080/api/v1/internal/trades/message", "tok")
+    feed._post = post
+    if with_feed:
+        sender.trades = feed
+
+    async def go():
+        await repost.handle_one(sender, cfg, msg(10, "Сбербанк покупка 25% 280"), 0)
+        await repost.handle_group(sender, cfg, [msg(11, "подпись", media=object(), grouped_id=5),
+                                                msg(12, "", media=object(), grouped_id=5)], 0)
+        await asyncio.gather(*list(feed.tasks))
+    asyncio.run(go())
+    return cl
+
+
+def t_trades_feed_posts_and_forwards():
+    """Маршрут со сделками шлёт каждое сообщение в бэкенд и пересылает как раньше."""
+    import json
+    got = []
+    cl = run_trades(lambda body: got.append(json.loads(body)))
+    assert [g["msg_id"] for g in got] == [10, 11, 12], got
+    assert got[0]["channel_id"] == repost.peer_key(channel(300, "x"))
+    assert got[0]["channel_title"] == "Profit King [Ded]" and got[0]["text"] == "Сбербанк покупка 25% 280"
+    assert got[0]["date"].endswith("Z") and got[1]["has_media"] is True
+    assert [f[2] for f in cl.forwarded] == [[10], [11, 12]], cl.forwarded
+
+
+def t_trades_feed_failure_does_not_block_forwarding():
+    """Бэкенд лежит — пересылка всё равно проходит, отправка сделок просто не удаётся."""
+    orig_sleep = asyncio.sleep
+
+    async def fast_sleep(t):
+        await orig_sleep(0)
+    repost.asyncio.sleep = fast_sleep
+    try:
+        def boom(body):
+            raise OSError("connection refused")
+        cl = run_trades(boom)
+    finally:
+        repost.asyncio.sleep = orig_sleep
+    assert [f[2] for f in cl.forwarded] == [[10], [11, 12]], cl.forwarded
+
+
+def t_trades_feed_silent_in_dry_run_and_without_flag():
+    """Холостой прогон и маршрут без TRADES в бэкенд ничего не шлют."""
+    got = []
+    run_trades(lambda body: got.append(body), dry="true")
+    run_trades(lambda body: got.append(body), with_feed=False)
+    assert got == [], got
+
+
 for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_title_mismatch,
            t_happy_and_binding, t_dry_run_sends_nothing, t_real_run_and_dedup,
            t_send_guard, t_parse_peer,
@@ -614,7 +681,10 @@ for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_titl
            t_forward_dry_run_sends_nothing,
            t_history_limit_takes_latest,
            t_routes_parsed, t_route_incomplete, t_route_preflight_and_binding,
-           t_route_set_guards, t_route_catch_up, t_route_catch_up_empty_source]:
+           t_route_set_guards, t_route_catch_up, t_route_catch_up_empty_source,
+           t_routes_trades_flag, t_trades_feed_posts_and_forwards,
+           t_trades_feed_failure_does_not_block_forwarding,
+           t_trades_feed_silent_in_dry_run_and_without_flag]:
     try:
         fn()
         results.append(("OK  ", fn.__name__))

@@ -55,6 +55,9 @@ type Config struct {
 	// PushProxyURL — прокси до push-сервиса, если он недоступен напрямую
 	// (та же беда, что с api.telegram.org). Пусто — соединяемся сами.
 	PushProxyURL string `envconfig:"PUSH_PROXY_URL"`
+	// TradesIngestToken — общий секрет с tg-repost: им подписано каждое
+	// сообщение канала со сделками. Пусто — приём сделок выключен.
+	TradesIngestToken string `envconfig:"TRADES_INGEST_TOKEN"`
 	Port         int    `envconfig:"BACKEND_PORT"          default:"8080"`
 	LogLevel     string `envconfig:"LOG_LEVEL"             default:"info"`
 }

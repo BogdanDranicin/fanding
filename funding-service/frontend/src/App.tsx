@@ -13,6 +13,8 @@ import { RacePage } from './components/RacePage';
 import { JournalPage } from './components/JournalPage';
 import { RobotsPage } from './components/RobotsPage';
 import { AlarmToasts } from './components/AlarmToasts';
+import { TradesPage } from './components/TradesPage';
+import { TradeToasts } from './components/TradeToasts';
 import { CbFundingWindow } from './components/CbFundingWindow';
 import { FeedNote } from './components/FeedNote';
 import './App.css';
@@ -20,13 +22,14 @@ import './App.css';
 const WS_URL = import.meta.env.VITE_WS_URL as string
   ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
-type Page = 'main' | 'settings' | 'calculator' | 'race' | 'journal' | 'robots';
+type Page = 'main' | 'settings' | 'calculator' | 'race' | 'journal' | 'robots' | 'trades';
 
-const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race', 'journal', 'robots'];
+const VALID_PAGES: Page[] = ['main', 'settings', 'calculator', 'race', 'journal', 'robots', 'trades'];
 
 // Страницы только для админов: «Журнал» и «Скорость» — служебная диагностика,
-// остальным их не показываем вовсе (и бэкенд отдаёт по ним 403).
-const ADMIN_PAGES: Page[] = ['race', 'journal'];
+// «Сделки» — пересказ платных каналов. Остальным их не показываем вовсе (и
+// бэкенд отдаёт по ним 403).
+const ADMIN_PAGES: Page[] = ['race', 'journal', 'trades'];
 
 function pageFromPath(): Page {
   const p = window.location.pathname.slice(1) as Page;
@@ -84,6 +87,7 @@ export default function App() {
     { page: 'main', label: 'Фандинг' },
     { page: 'calculator', label: 'Калькулятор' },
     { page: 'robots', label: 'Роботы' },
+    { page: 'trades', label: 'Сделки' },
     { page: 'race', label: 'Скорость' },
     { page: 'journal', label: 'Журнал' },
     { page: 'settings', label: 'Настройки' },
@@ -131,6 +135,7 @@ export default function App() {
         {shownPage === 'robots' && <RobotsPage />}
         {shownPage === 'race' && <RacePage />}
         {shownPage === 'journal' && <JournalPage />}
+        {shownPage === 'trades' && <TradesPage />}
         {shownPage === 'main' && (
           <>
             <FundingTable current={current} previous={previous} />
@@ -140,6 +145,7 @@ export default function App() {
       </main>
 
       <AlarmToasts />
+      {isAdmin && <TradeToasts />}
     </div>
   );
 }

@@ -31,7 +31,8 @@ var instruments = []instrumentMeta{
 // robotSrc может быть nil — тогда страница «Роботы» работает по одной истории из базы.
 // pushKey — открытый ключ VAPID; пустой означает, что push не настроен и
 // страница не будет предлагать уведомления.
-func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec, robotSrc RobotSource, pushKey string) http.Handler {
+// tradesToken — общий секрет с tg-repost для приёма сообщений каналов со сделками.
+func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, log zerolog.Logger, getSpecs func() map[string]moexiss.InstrumentSpec, robotSrc RobotSource, pushKey string, tradesToken string) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(allowedOrigin))
@@ -79,6 +80,17 @@ func NewRouter(store *storage.Store, botUsername string, allowedOrigin string, l
 	// решает всё равно сервер — иначе их видел бы любой, кто знает адрес.
 	r.With(auth, adminMiddleware).Get("/api/v1/cb-publications", handleCBPublications(store))
 	r.With(auth, adminMiddleware).Get("/api/v1/cbr-race", handleCBRRace)
+
+	// Сделки авторских каналов: сообщения присылает tg-repost, вкладка
+	// «Сделки» — только для админов, как и «Журнал»: это пересказ платных
+	// каналов, и на публичный сайт он попадать не должен.
+	r.Post("/api/v1/internal/trades/message", handleTradeIngest(store, tradesToken))
+	r.With(auth, adminMiddleware).Get("/api/v1/trades/positions", handleTradePositions(store))
+	r.With(auth, adminMiddleware).Get("/api/v1/trades/events", handleTradeEvents(store))
+	r.With(auth, adminMiddleware).Get("/api/v1/trades/last-event", handleTradeLastEvent(store))
+	r.With(auth, adminMiddleware, maxBodyMiddleware(8<<10)).Post("/api/v1/trades/positions", handleTradeSave(store))
+	r.With(auth, adminMiddleware, maxBodyMiddleware(8<<10)).Post("/api/v1/trades/positions/{id}", handleTradeSave(store))
+	r.With(auth, adminMiddleware).Post("/api/v1/trades/positions/{id}/delete", handleTradeDelete(store))
 
 	return r
 }

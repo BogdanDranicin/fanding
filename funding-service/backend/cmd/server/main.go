@@ -148,6 +148,7 @@ func main() {
 		moexSrc.GetSpecs,
 		robotSource(robotCollector),
 		pushPublicKey(pushSender),
+		cfg.TradesIngestToken,
 	)
 
 	router := http.NewServeMux()
