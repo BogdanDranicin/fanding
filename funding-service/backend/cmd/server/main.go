@@ -151,6 +151,10 @@ func main() {
 		cfg.TradesIngestToken,
 	)
 
+	// Цены входа и выхода, которых нет в сообщениях авторов, — с биржи на момент
+	// сообщения, как только этот момент доедет до публичных данных MOEX.
+	go api.RunTradePriceFill(ctx, store, log.Logger)
+
 	router := http.NewServeMux()
 
 	router.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

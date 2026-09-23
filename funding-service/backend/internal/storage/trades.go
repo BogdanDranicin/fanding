@@ -48,13 +48,14 @@ type TradeEvent struct {
 var ErrTradeNotFound = errors.New("trade position not found")
 
 const positionCols = `id, author, book, ticker, direction, size, entry_price, stop, targets, status,
-	opened_at, closed_at, close_price, note, manual, updated_at, last_text`
+	opened_at, closed_at, close_price, note, manual, updated_at, last_text, entry_auto, close_auto`
 
 func scanPosition(row pgx.Row) (trades.Position, error) {
 	var p trades.Position
 	var dir, status string
 	err := row.Scan(&p.ID, &p.Author, &p.Book, &p.Ticker, &dir, &p.Size, &p.EntryPrice, &p.Stop, &p.Targets,
-		&status, &p.OpenedAt, &p.ClosedAt, &p.ClosePrice, &p.Note, &p.Manual, &p.UpdatedAt, &p.LastText)
+		&status, &p.OpenedAt, &p.ClosedAt, &p.ClosePrice, &p.Note, &p.Manual, &p.UpdatedAt, &p.LastText,
+		&p.EntryAuto, &p.CloseAuto)
 	p.Direction = trades.Direction(dir)
 	p.Status = trades.Status(status)
 	return p, err
@@ -113,6 +114,9 @@ func (s *Store) IngestTradeMessage(ctx context.Context, in TradeMessageIn) (even
 	for _, c := range changes {
 		p := c.Position
 		if err := persistChange(ctx, tx, &p, ids); err != nil {
+			return nil, false, err
+		}
+		if err := enqueuePriceFills(ctx, tx, p); err != nil {
 			return nil, false, err
 		}
 		sig := c.Signal
@@ -316,7 +320,9 @@ func (s *Store) SaveTradePosition(ctx context.Context, p trades.Position) (trade
 		ct, execErr := tx.Exec(ctx, `
 			UPDATE trade_positions SET author = $2, book = $3, ticker = $4, direction = $5, size = $6,
 				entry_price = $7, stop = $8, targets = $9, status = $10, closed_at = $11, close_price = $12,
-				note = $13, manual = TRUE, updated_at = $14, opened_at = COALESCE($15, opened_at)
+				note = $13, manual = TRUE, updated_at = $14, opened_at = COALESCE($15, opened_at),
+				entry_auto = entry_auto AND entry_price IS NOT DISTINCT FROM $7,
+				close_auto = close_auto AND close_price IS NOT DISTINCT FROM $12
 			WHERE id = $1`,
 			p.ID, p.Author, p.Book, p.Ticker, string(p.Direction), p.Size, p.EntryPrice, p.Stop, p.Targets,
 			string(p.Status), p.ClosedAt, p.ClosePrice, p.Note, now, nullTime(p.OpenedAt))
@@ -327,6 +333,9 @@ func (s *Store) SaveTradePosition(ctx context.Context, p trades.Position) (trade
 	}
 	if err != nil {
 		return p, fmt.Errorf("save position: %w", err)
+	}
+	if err := enqueuePriceFills(ctx, tx, p); err != nil {
+		return p, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO trade_events (position_id, author, ticker, action, direction, size, price, manual, silent, at)
@@ -352,6 +361,105 @@ func (s *Store) DeleteTradePosition(ctx context.Context, id int64) error {
 		return ErrTradeNotFound
 	}
 	return nil
+}
+
+// enqueuePriceFills ставит в очередь подгрузку цены, которой нет в сообщении:
+// входа — на момент открытия, выхода — на момент закрытия. Повторное закрытие
+// после «Открыть снова» перезаписывает задачу новым моментом.
+func enqueuePriceFills(ctx context.Context, tx pgx.Tx, p trades.Position) error {
+	if p.ID <= 0 || p.Ticker == trades.UnknownTicker || p.Ticker == "" {
+		return nil
+	}
+	if p.EntryPrice == nil && !p.OpenedAt.IsZero() {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO trade_price_fills (position_id, field, ticker, at) VALUES ($1, 'entry', $2, $3)
+			ON CONFLICT (position_id, field) DO UPDATE SET ticker = EXCLUDED.ticker
+			WHERE trade_price_fills.done_at IS NULL`,
+			p.ID, p.Ticker, p.OpenedAt); err != nil {
+			return fmt.Errorf("enqueue entry price: %w", err)
+		}
+	}
+	if p.Status == trades.StatusClosed && p.ClosePrice == nil && p.ClosedAt != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO trade_price_fills (position_id, field, ticker, at) VALUES ($1, 'close', $2, $3)
+			ON CONFLICT (position_id, field) DO UPDATE SET ticker = EXCLUDED.ticker, at = EXCLUDED.at,
+				attempts = 0, next_try = now(), done_at = NULL, error = ''`,
+			p.ID, p.Ticker, *p.ClosedAt); err != nil {
+			return fmt.Errorf("enqueue close price: %w", err)
+		}
+	}
+	return nil
+}
+
+// PriceFill — задача подгрузки цены входа или выхода.
+type PriceFill struct {
+	ID         int64
+	PositionID int64
+	Field      string
+	Ticker     string
+	At         time.Time
+	Attempts   int
+}
+
+// DuePriceFills — задачи, чей момент уже старше notAfter (биржа отдаёт сделки
+// с задержкой) и чья очередная попытка наступила.
+func (s *Store) DuePriceFills(ctx context.Context, notAfter time.Time, limit int) ([]PriceFill, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, position_id, field, ticker, at, attempts FROM trade_price_fills
+		WHERE done_at IS NULL AND next_try <= now() AND at <= $1
+		ORDER BY at LIMIT $2`, notAfter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PriceFill
+	for rows.Next() {
+		var f PriceFill
+		if err := rows.Scan(&f.ID, &f.PositionID, &f.Field, &f.Ticker, &f.At, &f.Attempts); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CompletePriceFill записывает подгруженную цену — только в пустое поле:
+// цена из сообщения или поправленная руками главнее. Заодно цена появляется
+// у события открытия или закрытия в ленте.
+func (s *Store) CompletePriceFill(ctx context.Context, f PriceFill, price float64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := `UPDATE trade_positions SET entry_price = $2, entry_auto = TRUE WHERE id = $1 AND entry_price IS NULL`
+	action := "open"
+	if f.Field == "close" {
+		q = `UPDATE trade_positions SET close_price = $2, close_auto = TRUE
+			WHERE id = $1 AND close_price IS NULL AND status = 'closed'`
+		action = "close"
+	}
+	if _, err := tx.Exec(ctx, q, f.PositionID, price); err != nil {
+		return fmt.Errorf("fill price: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE trade_events SET price = $2
+		WHERE position_id = $1 AND action = $3 AND price IS NULL`, f.PositionID, price, action); err != nil {
+		return fmt.Errorf("fill event price: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE trade_price_fills SET done_at = now(), attempts = attempts + 1, error = ''
+		WHERE id = $1`, f.ID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RetryPriceFill откладывает задачу; final — сдаёмся (инструмента нет на
+// бирже), задача закрывается с текстом ошибки.
+func (s *Store) RetryPriceFill(ctx context.Context, id int64, reason string, next time.Time, final bool) error {
+	_, err := s.pool.Exec(ctx, `UPDATE trade_price_fills
+		SET attempts = attempts + 1, error = $2, next_try = $3, done_at = CASE WHEN $4 THEN now() END
+		WHERE id = $1`, id, reason, next, final)
+	return err
 }
 
 func nullTime(t time.Time) *time.Time {

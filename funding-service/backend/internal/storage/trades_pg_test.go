@@ -97,6 +97,40 @@ func TestTradesOnPostgres(t *testing.T) {
 		t.Fatalf("последний id %d != %d", last, events[0].ID)
 	}
 
+	fills, err := s.DuePriceFills(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("очередь цен: %v", err)
+	}
+	byField := map[string]PriceFill{}
+	for _, f := range fills {
+		byField[f.Field+"/"+f.Ticker] = f
+	}
+	gazpClose, ok := byField["close/GAZP"]
+	if !ok {
+		t.Fatalf("закрытие Газпрома без цены должно ждать подгрузки: %+v", fills)
+	}
+	if _, ok := byField["entry/ROSN"]; ok {
+		t.Fatalf("у Роснефти цена входа была в сообщении — подгружать нечего: %+v", fills)
+	}
+	if err := s.CompletePriceFill(ctx, gazpClose, 100.66); err != nil {
+		t.Fatalf("запись цены: %v", err)
+	}
+	closedNow, _ := s.ListTradePositions(ctx, "closed", 100)
+	for _, c := range closedNow {
+		if c.Ticker == "GAZP" && (c.ClosePrice == nil || *c.ClosePrice != 100.66 || !c.CloseAuto) {
+			t.Fatalf("подгруженная цена выхода: %+v", c)
+		}
+	}
+	evs, _ := s.ListTradeEvents(ctx, 0, 100)
+	for _, e := range evs {
+		if e.Ticker == "GAZP" && e.Action == "close" && (e.Price == nil || *e.Price != 100.66) {
+			t.Fatalf("цена должна появиться и в ленте: %+v", e)
+		}
+	}
+	if left, _ := s.DuePriceFills(ctx, time.Now(), 100); len(left) != len(fills)-1 {
+		t.Fatalf("выполненная задача не должна возвращаться: было %d, стало %d", len(fills), len(left))
+	}
+
 	p := open[0]
 	p.Size = "70%"
 	p.Note = "поправил руками"
@@ -109,6 +143,50 @@ func TestTradesOnPostgres(t *testing.T) {
 	if err != nil || saved.ClosedAt == nil {
 		t.Fatalf("ручное закрытие ставит время: %+v err=%v", saved, err)
 	}
+	manualPrice := 50.0
+	withPrice, err := s.SaveTradePosition(ctx, trades.Position{
+		Author: "Goodwin", Ticker: "VTBR", Direction: trades.DirShort, Status: trades.StatusOpen, EntryPrice: &manualPrice,
+	})
+	if err != nil {
+		t.Fatalf("ручная позиция с ценой: %v", err)
+	}
+	noPrice, err := s.SaveTradePosition(ctx, trades.Position{
+		Author: "Goodwin", Ticker: "SBER", Direction: trades.DirLong, Status: trades.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("ручная позиция без цены: %v", err)
+	}
+	fills, _ = s.DuePriceFills(ctx, time.Now(), 100)
+	var sberFill *PriceFill
+	for i, f := range fills {
+		if f.PositionID == withPrice.ID {
+			t.Fatalf("цена задана руками — в очередь не ставится: %+v", f)
+		}
+		if f.PositionID == noPrice.ID && f.Field == "entry" {
+			sberFill = &fills[i]
+		}
+	}
+	if sberFill == nil {
+		t.Fatal("ручная позиция без цены должна встать в очередь")
+	}
+	userPrice := 281.0
+	noPrice.EntryPrice = &userPrice
+	if _, err := s.SaveTradePosition(ctx, noPrice); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompletePriceFill(ctx, *sberFill, 1); err != nil {
+		t.Fatal(err)
+	}
+	openNow, _ := s.ListTradePositions(ctx, "open", 100)
+	for _, a := range openNow {
+		if a.ID == noPrice.ID && (a.EntryPrice == nil || *a.EntryPrice != 281 || a.EntryAuto) {
+			t.Fatalf("биржа не перезаписывает цену, введённую руками: %+v", a)
+		}
+	}
+	if err := s.RetryPriceFill(ctx, sberFill.ID, "нет сделок", time.Now().Add(time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+
 	created, err := s.SaveTradePosition(ctx, trades.Position{
 		Author: "Вадик [vadya93]", Ticker: "SMLT", Direction: trades.DirShort, Size: "4000 шт", Status: trades.StatusOpen,
 	})

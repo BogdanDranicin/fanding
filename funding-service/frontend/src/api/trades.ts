@@ -11,12 +11,14 @@ export interface TradePosition {
   direction: TradeDirection;
   size: string;
   entry_price: number | null;
+  entry_auto: boolean;
   stop: string;
   targets: string;
   status: TradeStatus;
   opened_at: string;
   closed_at: string | null;
   close_price: number | null;
+  close_auto: boolean;
   note: string;
   manual: boolean;
   updated_at: string;
@@ -182,6 +184,16 @@ export function loadPercent(list: TradePosition[]): number | null {
     sum += Number(m[1].replace(',', '.'));
   }
   return list.length > 0 ? sum : null;
+}
+
+// PRICE_WAIT_MS — сколько после сообщения ждём цену с биржи: публичные данные
+// MOEX отстают на 15 минут, подгрузка идёт раз в минуту.
+const PRICE_WAIT_MS = 20 * 60 * 1000;
+
+/** Цена ещё подгружается: в сообщении её не было, а биржа до момента сообщения не доехала. */
+export function priceLoading(value: number | null, at: string | null, ticker: string, now = Date.now()): boolean {
+  if (value != null || !at || ticker === '?') return false;
+  return now - new Date(at).getTime() < PRICE_WAIT_MS;
 }
 
 export function signedPercent(v: number | null): string {

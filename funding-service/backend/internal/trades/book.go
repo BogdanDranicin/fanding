@@ -22,12 +22,16 @@ type Position struct {
 	Direction  Direction  `json:"direction"`
 	Size       string     `json:"size"`
 	EntryPrice *float64   `json:"entry_price"`
+	// EntryAuto / CloseAuto — цена не из сообщения, а подгружена с биржи на
+	// момент его выхода.
+	EntryAuto  bool       `json:"entry_auto"`
 	Stop       string     `json:"stop"`
 	Targets    string     `json:"targets"`
 	Status     Status     `json:"status"`
 	OpenedAt   time.Time  `json:"opened_at"`
 	ClosedAt   *time.Time `json:"closed_at"`
 	ClosePrice *float64   `json:"close_price"`
+	CloseAuto  bool       `json:"close_auto"`
 	Note       string     `json:"note"`
 	Manual     bool       `json:"manual"`
 	UpdatedAt  time.Time  `json:"updated_at"`

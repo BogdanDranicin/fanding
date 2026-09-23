@@ -2933,3 +2933,6 @@ summary.trd-tr:hover { background: var(--bg-elevated); }
   }
 }
 
+
+.trd-auto { color: var(--text-muted); }
+.trd-pending { cursor: help; }

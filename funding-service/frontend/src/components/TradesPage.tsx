@@ -10,6 +10,7 @@ import {
   loadPercent,
   pnlPercent,
   price,
+  priceLoading,
   quoteFor,
   savePosition,
   signedPercent,
@@ -143,6 +144,18 @@ function PositionForm({ initial, authors, onSave, onCancel }: {
   );
 }
 
+// MsgPrice — цена входа или выхода: из сообщения как есть, подгруженная с
+// биржи — со знаком ≈, пока подгружается — песочные часы.
+function MsgPrice({ value, auto, loading }: { value: number | null; auto: boolean; loading: boolean }) {
+  if (value == null && loading) {
+    return <span className="trd-pending" title="Цены в сообщении нет — подгружается с биржи на момент сообщения">⏳</span>;
+  }
+  if (auto && value != null) {
+    return <span className="trd-auto" title="Цены в сообщении не было — взята с биржи на момент сообщения">≈{price(value)}</span>;
+  }
+  return <>{price(value)}</>;
+}
+
 function PnL({ v }: { v: number | null }) {
   const cls = v == null ? '' : v > 0 ? ' trd-pnl-up' : v < 0 ? ' trd-pnl-down' : '';
   return <span className={`trd-num${cls}`}>{signedPercent(v)}</span>;
@@ -184,9 +197,14 @@ function PositionRow({ p, current, showAuthor, authors, onChanged }: {
         </span>
         <span className="trd-td"><DirBadge d={p.direction} /></span>
         <span className="trd-td trd-num" data-label="Доля">{p.size || '—'}</span>
-        <span className="trd-td trd-num" data-label="Вход">{price(entry)}</span>
+        <span className="trd-td trd-num" data-label="Вход">
+          <MsgPrice value={entry} auto={p.entry_auto} loading={priceLoading(p.entry_price, p.opened_at, p.ticker)} />
+        </span>
         <span className="trd-td trd-num" data-label={closed ? 'Выход' : 'Текущая'}>
-          {price(closed ? p.close_price : current)}
+          {closed
+            ? <MsgPrice value={p.close_price} auto={p.close_auto}
+                loading={priceLoading(p.close_price, p.closed_at, p.ticker)} />
+            : price(current)}
         </span>
         <span className="trd-td" data-label={closed ? 'Результат' : 'Прибыль/убыток'}><PnL v={result} /></span>
         <span className="trd-td trd-td-muted" data-label="Стоп">{p.stop || '—'}</span>
@@ -225,8 +243,8 @@ function PositionRow({ p, current, showAuthor, authors, onChanged }: {
               <button type="button" className="btn-plain" onClick={() => setEditing(true)}>Изменить</button>
               {!closed && (
                 <button type="button" className="btn-plain"
-                  onClick={() => run(() => savePosition({ ...toInput(p), status: 'closed', close_price: current }, p.id))}>
-                  Закрыть{current != null ? ` по ${price(current)}` : ''}
+                  onClick={() => run(() => savePosition({ ...toInput(p), status: 'closed' }, p.id))}>
+                  Закрыть
                 </button>
               )}
               {closed && (
