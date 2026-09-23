@@ -109,6 +109,9 @@ func (s *Store) IngestTradeMessage(ctx context.Context, in TradeMessageIn) (even
 		return nil, false, err
 	}
 	changes := ledger.Apply(sigs, in.PostedAt, in.Text)
+	if err := applyLateClosePrices(ctx, tx, in, sigs, changes); err != nil {
+		return nil, false, err
+	}
 
 	ids := map[int64]int64{}
 	for _, c := range changes {
@@ -151,6 +154,38 @@ func (s *Store) IngestTradeMessage(ctx context.Context, in TradeMessageIn) (even
 		events = append(events, ev)
 	}
 	return events, false, tx.Commit(ctx)
+}
+
+// lateCloseWindow — сколько после закрытия цена автора ещё принимается. Автор
+// пишет «закрыл все», а через полчаса — список «Закрытые позиции: #NVTK по
+// 1055,5»: позиции к этому моменту уже закрыты, но цена в сообщении главнее
+// подгруженной с биржи.
+const lateCloseWindow = 6 * time.Hour
+
+func applyLateClosePrices(ctx context.Context, tx pgx.Tx, in TradeMessageIn, sigs []trades.Signal, changes []trades.Change) error {
+	applied := map[string]bool{}
+	for _, c := range changes {
+		if c.Action == trades.ActClose {
+			applied[c.Position.Ticker] = true
+		}
+	}
+	for _, sg := range sigs {
+		if sg.Action != trades.ActClose || sg.Price == nil || sg.Ticker == "" || applied[sg.Ticker] {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE trade_positions SET close_price = $3, close_auto = FALSE, last_text = $5
+			WHERE id = (
+				SELECT id FROM trade_positions
+				WHERE author = $1 AND ticker = $2 AND status = 'closed'
+				  AND (close_price IS NULL OR close_auto) AND NOT manual
+				  AND closed_at BETWEEN $4::timestamptz - $6::interval AND $4::timestamptz
+				ORDER BY closed_at DESC LIMIT 1)`,
+			in.ChannelTitle, sg.Ticker, *sg.Price, in.PostedAt, in.Text, lateCloseWindow.String()); err != nil {
+			return fmt.Errorf("late close price: %w", err)
+		}
+	}
+	return nil
 }
 
 // persistChange пишет позицию после сигнала. Отрицательный id — позиция,

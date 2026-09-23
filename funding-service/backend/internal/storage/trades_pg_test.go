@@ -131,6 +131,32 @@ func TestTradesOnPostgres(t *testing.T) {
 		t.Fatalf("выполненная задача не должна возвращаться: было %d, стало %d", len(fills), len(left))
 	}
 
+	gw := func(msgID int64, text string, when time.Time) {
+		t.Helper()
+		if _, _, err := s.IngestTradeMessage(ctx, TradeMessageIn{
+			ChannelID: -1003576641222, ChannelTitle: "Goodwin", MsgID: msgID, PostedAt: when, Text: text,
+		}); err != nil {
+			t.Fatalf("goodwin %d: %v", msgID, err)
+		}
+	}
+	base := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	gw(100, "#NVTK\nОткрыл шорт Новатэк 1033,2, стоп 1063", base)
+	gw(101, "Закрыл все позиции, на всякой чуши пытаются подвынести.", base.Add(3*time.Hour))
+	gw(102, "Закрытые позиции:\n\n#NVTK по 1055,5 (-2,16%)❌", base.Add(3*time.Hour+30*time.Minute))
+	gwClosed, _ := s.ListTradePositions(ctx, "closed", 100)
+	found := false
+	for _, c := range gwClosed {
+		if c.Author == "Goodwin" && c.Ticker == "NVTK" {
+			found = true
+			if c.ClosePrice == nil || *c.ClosePrice != 1055.5 || c.CloseAuto {
+				t.Fatalf("цена закрытия из позднего сообщения автора: %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("позиция Goodwin NVTK не нашлась среди закрытых")
+	}
+
 	p := open[0]
 	p.Size = "70%"
 	p.Note = "поправил руками"
