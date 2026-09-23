@@ -139,18 +139,37 @@ function frontContract(prefix: string, prices: Prices): number | null {
   return best?.price ?? null;
 }
 
-/** Текущая цена инструмента позиции: акция TQBR, конкретный фьючерс или ближайший. */
+/**
+ * Текущая цена инструмента позиции: общее название фьючерса — ближайший
+ * контракт, иначе акция TQBR или конкретный фьючерс по коду. Фьючерс проверяется
+ * первым: на TQBR есть фонд с тикером GOLD, а «золото» у авторов — фьючерс.
+ */
 export function quoteFor(ticker: string, prices: Prices): number | null {
+  const prefix = FUTURES_PREFIX[ticker];
+  if (prefix) return frontContract(prefix, prices);
   if (ticker in prices) return prices[ticker];
   if (ticker === 'IMOEX') return prices.IMOEXF ?? null;
-  const prefix = FUTURES_PREFIX[ticker];
-  return prefix ? frontContract(prefix, prices) : null;
+  return null;
+}
+
+/**
+ * Приводит цену входа к масштабу текущей. Авторы пишут фьючерс на индекс то
+ * «230 900», то «233,050» — запятая там разделяет тысячи, и разбор читает 233,05.
+ * Расхождение ровно на три порядка — это запись, а не движение цены.
+ */
+export function alignEntry(entry: number, current: number): number {
+  for (const k of [1000, 0.001]) {
+    const r = (entry * k) / current;
+    if (r > 0.7 && r < 1.3) return entry * k;
+  }
+  return entry;
 }
 
 /** Прибыль/убыток позиции в процентах от входа, со знаком стороны. */
 export function pnlPercent(p: Pick<TradePosition, 'direction' | 'entry_price'>, current: number | null): number | null {
   if (p.entry_price == null || p.entry_price === 0 || current == null) return null;
-  const move = (current - p.entry_price) / p.entry_price * 100;
+  const entry = alignEntry(p.entry_price, current);
+  const move = (current - entry) / entry * 100;
   return p.direction === 'short' ? -move : move;
 }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ACTION_LABEL,
+  alignEntry,
   deletePosition,
   directionLabel,
   fetchEvents,
@@ -172,6 +173,8 @@ function PositionRow({ p, current, showAuthor, authors, onChanged }: {
 
   const closed = p.status === 'closed';
   const result = closed ? pnlPercent(p, p.close_price) : pnlPercent(p, current);
+  const against = closed ? p.close_price : current;
+  const entry = p.entry_price != null && against != null ? alignEntry(p.entry_price, against) : p.entry_price;
   return (
     <details className={`trd-row${closed ? ' trd-row-closed' : ''}`}>
       <summary className="trd-tr">
@@ -181,7 +184,7 @@ function PositionRow({ p, current, showAuthor, authors, onChanged }: {
         </span>
         <span className="trd-td"><DirBadge d={p.direction} /></span>
         <span className="trd-td trd-num" data-label="Доля">{p.size || '—'}</span>
-        <span className="trd-td trd-num" data-label="Вход">{price(p.entry_price)}</span>
+        <span className="trd-td trd-num" data-label="Вход">{price(entry)}</span>
         <span className="trd-td trd-num" data-label={closed ? 'Выход' : 'Текущая'}>
           {price(closed ? p.close_price : current)}
         </span>
