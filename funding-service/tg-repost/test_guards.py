@@ -71,10 +71,11 @@ class FakeClient:
         # Telegram отдаёт сообщения от новых к старым — фейк повторяет этот порядок.
         return list(reversed(self.messages))[:limit]
 
-    def iter_messages(self, chat, **kw):
+    def iter_messages(self, chat, min_id=0, **kw):
         async def gen():
             for m in self.messages:
-                yield m
+                if m.id > min_id:
+                    yield m
         return gen()
 
     async def send_message(self, dst, message="", **kw):
@@ -109,7 +110,7 @@ def make_cfg(**over):
     for k in list(os.environ):
         if k.startswith(("TG_", "SRC_", "DST_", "MODE", "DRY_", "SEND_", "ALLOW_",
                          "HISTORY_", "LIVE_", "INCLUDE_", "ALBUMS", "STATE_DB",
-                         "FORWARD", "SHOW_AUTHOR", "AUTHOR_")):
+                         "FORWARD", "SHOW_AUTHOR", "AUTHOR_", "ROUTE_")):
             del os.environ[k]
     os.environ.update({k: v for k, v in env.items() if v is not None})
     return repost.Config.load()
@@ -502,6 +503,105 @@ def t_history_limit_takes_latest():
     assert [t[1] for t in cl.sent] == ["сообщение 4", "сообщение 5"], cl.sent
 
 
+def t_routes_parsed():
+    """ROUTE_<n>_* собираются по номерам; без них список пуст."""
+    assert make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222").routes == []
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                   ROUTE_2_SRC="-100500", ROUTE_2_DST="-100600", ROUTE_2_TITLE="parse B",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse A")
+    assert [(r.num, r.src_raw, r.dst_raw, r.dst_title_expected) for r in cfg.routes] == [
+        (1, "-100300", "-100400", "parse A"), (2, "-100500", "-100600", "parse B")], cfg.routes
+
+
+def t_route_incomplete():
+    """Маршрут без названия цели не запускается: сверка названия обязательна."""
+    expect_stop(lambda: make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                                 ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400"),
+                "неполный маршрут")
+
+
+def t_route_preflight_and_binding():
+    """Маршрут проверяется теми же предохранителями и привязан отдельно от основной пары."""
+    src, dst = channel(111, "Чат"), channel(222, "Мой архив")
+    rsrc, rdst = channel(300, "Profitgate"), channel(400, "parse Profitgate")
+    ents = {-100111: src, -100222: dst, -100300: rsrc, -100400: rdst}
+    st = fresh_state("route")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse Profitgate")
+    cl = FakeClient(user(7), ents, [msg(1)])
+    run_preflight(cl, cfg, st)
+    asyncio.run(repost.preflight(cl, cfg, st, cfg.routes[0]))
+    assert st.get("dst_id") == str(repost.peer_key(dst)), "основная привязка затёрта маршрутом"
+    assert st.get("route:1:dst_id") == str(repost.peer_key(rdst))
+
+    wrong = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                     ROUTE_1_SRC="-100300", ROUTE_1_DST="-100222", ROUTE_1_TITLE="parse Profitgate")
+    expect_stop(lambda: asyncio.run(repost.preflight(cl, wrong, st, wrong.routes[0])),
+                "название цели маршрута")
+
+    moved = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                     ROUTE_1_SRC="-100300", ROUTE_1_DST="-100222", ROUTE_1_TITLE="Мой архив")
+    expect_stop(lambda: asyncio.run(repost.preflight(cl, moved, st, moved.routes[0])),
+                "смена цели маршрута")
+
+    same = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222",
+                    ROUTE_2_SRC="-100300", ROUTE_2_DST="-100300", ROUTE_2_TITLE="Profitgate")
+    expect_stop(lambda: asyncio.run(repost.preflight(cl, same, fresh_state("route_same"), same.routes[0])),
+                "источник маршрута равен цели")
+
+
+def t_route_set_guards():
+    """Маршруты не пересекаются: ни общих источников, ни общих целей, ни цели-источника."""
+    a, b, c, d = channel(1, "A"), channel(2, "B"), channel(3, "C"), channel(4, "D")
+    repost.check_route_set([("main", a, b), ("r1", c, d)])
+    expect_stop(lambda: repost.check_route_set([("main", a, b), ("r1", a, d)]), "общий источник")
+    expect_stop(lambda: repost.check_route_set([("main", a, b), ("r1", c, b)]), "общая цель")
+    expect_stop(lambda: repost.check_route_set([("main", a, b), ("r1", b, d)]), "цель = источник")
+    expect_stop(lambda: repost.check_route_set([("main", a, b), ("r1", c, a)]), "по кругу")
+
+
+def t_route_catch_up():
+    """Первый запуск маршрута историю не переносит, после простоя догоняет только новое."""
+    rsrc, rdst = channel(300, "Profitgate"), channel(400, "parse Profitgate")
+    ents = {-100300: rsrc, -100400: rdst}
+    st = fresh_state("catchup")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", FORWARD="true",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse Profitgate")
+    route = cfg.routes[0]
+    history = [msg(i, "старое %d" % i) for i in range(1, 6)]
+    cl = FakeClient(user(7), ents, history)
+    s, d = asyncio.run(repost.preflight(cl, cfg, st, route))
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.catch_up(cl, cfg, sender, route))
+    assert cl.forwarded == [] and cl.sent == [], "первый запуск перенёс историю"
+    assert st.get("route:1:start_id") == "5"
+
+    cl.messages = history + [msg(6, "пока лежали"), msg(7, "")]
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.catch_up(cl, cfg, sender, route))
+    assert cl.forwarded == [(repost.peer_key(rdst), repost.peer_key(rsrc), [6])], cl.forwarded
+
+    cl.messages.append(msg(8, "ещё"))
+    sender = repost.Sender(cl, cfg, st, s, d)
+    asyncio.run(repost.catch_up(cl, cfg, sender, route))
+    assert cl.forwarded[1:] == [(repost.peer_key(rdst), repost.peer_key(rsrc), [8])], cl.forwarded
+
+
+def t_route_catch_up_empty_source():
+    """Пустой канал-источник: точка старта 0, дальше переносится всё новое."""
+    rsrc, rdst = channel(300, "Profitgate"), channel(400, "parse Profitgate")
+    st = fresh_state("catchup_empty")
+    cfg = make_cfg(SRC_CHAT="-100111", DST_CHAT="-100222", DRY_RUN="false", FORWARD="true",
+                   ROUTE_1_SRC="-100300", ROUTE_1_DST="-100400", ROUTE_1_TITLE="parse Profitgate")
+    route = cfg.routes[0]
+    cl = FakeClient(user(7), {-100300: rsrc, -100400: rdst}, [])
+    s, d = asyncio.run(repost.preflight(cl, cfg, st, route))
+    asyncio.run(repost.catch_up(cl, cfg, repost.Sender(cl, cfg, st, s, d), route))
+    assert st.get("route:1:start_id") == "0"
+    cl.messages = [msg(1, "первое")]
+    asyncio.run(repost.catch_up(cl, cfg, repost.Sender(cl, cfg, st, s, d), route))
+    assert cl.forwarded == [(repost.peer_key(rdst), repost.peer_key(rsrc), [1])], cl.forwarded
+
 
 for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_title_mismatch,
            t_happy_and_binding, t_dry_run_sends_nothing, t_real_run_and_dedup,
@@ -512,7 +612,9 @@ for fn in [t_same_chat, t_same_username, t_dst_is_user, t_no_post_rights, t_titl
            t_forward_is_default, t_forward_history_and_dedup, t_forward_album_one_call,
            t_forward_restricted_falls_back_to_copy, t_protected_source_copies,
            t_forward_dry_run_sends_nothing,
-           t_history_limit_takes_latest]:
+           t_history_limit_takes_latest,
+           t_routes_parsed, t_route_incomplete, t_route_preflight_and_binding,
+           t_route_set_guards, t_route_catch_up, t_route_catch_up_empty_source]:
     try:
         fn()
         results.append(("OK  ", fn.__name__))

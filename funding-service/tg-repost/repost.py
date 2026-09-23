@@ -28,6 +28,7 @@ import copy
 import datetime as dt
 import logging
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -75,6 +76,48 @@ def env_int(name: str, default: int) -> int:
 
 
 @dataclass
+class Route:
+    """Дополнительная пара «источник → цель» (ROUTE_<n>_*).
+
+    Основная пара (SRC_CHAT/DST_CHAT) живёт по старым правилам. Дополнительные
+    переносят только новое: историю не тащат, а после простоя догоняют то, что
+    пришло в источник с последнего запуска.
+    """
+    num: int
+    src_raw: str
+    dst_raw: str
+    dst_title_expected: str
+
+    def key(self, name: str) -> str:
+        return "route:" + str(self.num) + ":" + name
+
+
+ROUTE_VAR = re.compile(r"^ROUTE_(\d+)_(SRC|DST|TITLE)$")
+
+
+def load_routes() -> list[Route]:
+    """Собирает ROUTE_<n>_SRC / _DST / _TITLE. Неполный маршрут = аварийный выход.
+
+    Название цели у дополнительных маршрутов обязательно: промах по id среди
+    восьми пар заметить глазами труднее, чем в одной.
+    """
+    found: dict[int, dict[str, str]] = {}
+    for k, v in os.environ.items():
+        m = ROUTE_VAR.match(k)
+        if m:
+            found.setdefault(int(m.group(1)), {})[m.group(2)] = v.strip()
+    routes = []
+    for num in sorted(found):
+        parts = found[num]
+        missing = [p for p in ("SRC", "DST", "TITLE") if not parts.get(p)]
+        if missing:
+            die("маршрут ROUTE_" + str(num) + " неполный: не заданы " +
+                ", ".join("ROUTE_" + str(num) + "_" + p for p in missing))
+        routes.append(Route(num, parts["SRC"], parts["DST"], parts["TITLE"]))
+    return routes
+
+
+@dataclass
 class Config:
     api_id: int
     api_hash: str
@@ -100,6 +143,7 @@ class Config:
     state_db: str
     proxy_url: str
     use_ipv6: bool
+    routes: list[Route]
 
     @staticmethod
     def load(require_chats: bool = True) -> "Config":
@@ -159,6 +203,7 @@ class Config:
             state_db=os.getenv("STATE_DB") or "./state.db",
             proxy_url=(os.getenv("TG_PROXY_URL") or "").strip(),
             use_ipv6=env_bool("TG_IPV6", False),
+            routes=load_routes() if require_chats else [],
         )
 
 
@@ -342,6 +387,11 @@ class State:
         )
         self.db.commit()
 
+    def last_posted(self, src_id: int) -> int:
+        return self.db.execute(
+            "SELECT COALESCE(MAX(src_msg_id), 0) FROM posted WHERE src_id=?", (src_id,)
+        ).fetchone()[0]
+
     def count(self, src_id: int) -> int:
         return self.db.execute(
             "SELECT COUNT(*) FROM posted WHERE src_id=?", (src_id,)
@@ -351,23 +401,38 @@ class State:
 # --------------------------------------------------------------------------- guards
 
 
-async def preflight(client: TelegramClient, cfg: Config, state: State):
-    """Разбирает оба чата и валит запуск при любом сомнении. Возвращает (src, dst)."""
+async def preflight(client: TelegramClient, cfg: Config, state: State, route: Route | None = None):
+    """Разбирает оба чата и валит запуск при любом сомнении. Возвращает (src, dst).
+
+    Без route проверяется основная пара SRC_CHAT/DST_CHAT, с route — дополнительная.
+    """
     me = await client.get_me()
+
+    if route is None:
+        src_raw, dst_raw, title_expected = cfg.src_raw, cfg.dst_raw, cfg.dst_title_expected
+        src_name, dst_name, title_name = "SRC_CHAT", "DST_CHAT", "DST_TITLE_EXPECTED"
+        bind_key = lambda name: name
+    else:
+        src_raw, dst_raw, title_expected = route.src_raw, route.dst_raw, route.dst_title_expected
+        prefix = "ROUTE_" + str(route.num) + "_"
+        src_name, dst_name, title_name = prefix + "SRC", prefix + "DST", prefix + "TITLE"
+        bind_key = route.key
 
     hint = "\n       Подсказка: запустите с --dialogs, чтобы увидеть точные id ваших чатов."
     try:
-        src = await client.get_entity(parse_peer(cfg.src_raw))
+        src = await client.get_entity(parse_peer(src_raw))
     except Exception as e:
-        die("не удалось открыть SRC_CHAT='" + cfg.src_raw + "': " + str(e) + hint)
+        die("не удалось открыть " + src_name + "='" + src_raw + "': " + str(e) + hint)
     try:
-        dst = await client.get_entity(parse_peer(cfg.dst_raw))
+        dst = await client.get_entity(parse_peer(dst_raw))
     except Exception as e:
-        die("не удалось открыть DST_CHAT='" + cfg.dst_raw + "': " + str(e) + hint)
+        die("не удалось открыть " + dst_name + "='" + dst_raw + "': " + str(e) + hint)
 
     src_key, dst_key = peer_key(src), peer_key(dst)
 
     print("=" * 72)
+    if route is not None:
+        print("МАРШРУТ  : ROUTE_" + str(route.num))
     print("Аккаунт  : " + utils.get_display_name(me) + " (id=" + str(peer_key(me)) + ")")
     print("ИСТОЧНИК : " + describe(src))
     print("ЦЕЛЬ     : " + describe(dst))
@@ -376,7 +441,7 @@ async def preflight(client: TelegramClient, cfg: Config, state: State):
     # 1. Главный предохранитель: источник и цель — разные чаты.
     if src_key == dst_key:
         die("ИСТОЧНИК И ЦЕЛЬ — ОДИН И ТОТ ЖЕ ЧАТ. Перепост в самого себя запрещён.\n"
-            "       SRC_CHAT='" + cfg.src_raw + "' и DST_CHAT='" + cfg.dst_raw + "' "
+            "       " + src_name + "='" + src_raw + "' и " + dst_name + "='" + dst_raw + "' "
             "дали один id=" + str(src_key) + ".")
 
     # Тот же чат может прийти под разными записями (id и @username) — сверяем и их.
@@ -399,11 +464,11 @@ async def preflight(client: TelegramClient, cfg: Config, state: State):
 
     # 4. Независимая сверка по названию: если ждали одно, а открылось другое —
     #    значит, ошиблись id, и продолжать нельзя.
-    if cfg.dst_title_expected:
+    if title_expected:
         actual = (getattr(dst, "title", "") or "").strip()
-        if actual != cfg.dst_title_expected:
-            die("название цели не совпало с DST_TITLE_EXPECTED.\n"
-                "       ожидалось: «" + cfg.dst_title_expected + "»\n"
+        if actual != title_expected:
+            die("название цели не совпало с " + title_name + ".\n"
+                "       ожидалось: «" + title_expected + "»\n"
                 "       открылось: «" + actual + "»\n"
                 "       Либо указан не тот чат, либо канал переименовали — проверьте .env.")
     else:
@@ -419,24 +484,24 @@ async def preflight(client: TelegramClient, cfg: Config, state: State):
 
     # 6. Привязка: пара чатов фиксируется на первом запуске. Опечатка в .env позже
     #    не сможет молча увести поток в другой канал.
-    bound_src, bound_dst = state.get("src_id"), state.get("dst_id")
+    bound_src, bound_dst = state.get(bind_key("src_id")), state.get(bind_key("dst_id"))
     if bound_src is None:
-        state.set("src_id", str(src_key))
-        state.set("dst_id", str(dst_key))
-        state.set("dst_title", getattr(dst, "title", "") or "")
-        state.set("bound_at", dt.datetime.now(dt.timezone.utc).isoformat())
+        state.set(bind_key("src_id"), str(src_key))
+        state.set(bind_key("dst_id"), str(dst_key))
+        state.set(bind_key("dst_title"), getattr(dst, "title", "") or "")
+        state.set(bind_key("bound_at"), dt.datetime.now(dt.timezone.utc).isoformat())
         print("Привязка «источник → цель» зафиксирована в состоянии.")
     elif (int(bound_src), int(bound_dst)) != (src_key, dst_key):
         if not cfg.allow_retarget:
             die("конфиг указывает на другую пару чатов, чем при первом запуске.\n"
                 "       было : src=" + bound_src + " -> dst=" + bound_dst +
-                " («" + str(state.get("dst_title")) + "»)\n"
+                " («" + str(state.get(bind_key("dst_title"))) + "»)\n"
                 "       стало: src=" + str(src_key) + " -> dst=" + str(dst_key) + "\n"
                 "       Если смена намеренная — ALLOW_RETARGET=true. Иначе исправьте .env.")
         log.warning("ALLOW_RETARGET=true: пара чатов изменена на src=%s -> dst=%s", src_key, dst_key)
-        state.set("src_id", str(src_key))
-        state.set("dst_id", str(dst_key))
-        state.set("dst_title", getattr(dst, "title", "") or "")
+        state.set(bind_key("src_id"), str(src_key))
+        state.set(bind_key("dst_id"), str(dst_key))
+        state.set(bind_key("dst_title"), getattr(dst, "title", "") or "")
 
     if cfg.forward and getattr(src, "noforwards", False):
         log.warning("в источнике включена защита контента: пересылка невозможна, "
@@ -451,6 +516,29 @@ async def preflight(client: TelegramClient, cfg: Config, state: State):
     if cfg.dry_run:
         print("РЕЖИМ: DRY_RUN — ничего не отправляется, только лог того, что было бы отправлено.")
     return src, dst
+
+
+def check_route_set(pairs) -> None:
+    """Сверка маршрутов между собой: [(название, src, dst), ...].
+
+    По отдельности каждая пара может быть корректной, а вместе — нет: цель одного
+    маршрута оказалась источником другого (пересылка по кругу или в чужой чат),
+    два маршрута читают один источник (учёт перенесённого ведётся по источнику)
+    или сливаются в одну цель.
+    """
+    srcs: dict[int, str] = {}
+    dsts: dict[int, str] = {}
+    for name, src, dst in pairs:
+        s, d = peer_key(src), peer_key(dst)
+        if s in srcs:
+            die("источник " + describe(src) + " указан дважды: " + srcs[s] + " и " + name)
+        if d in dsts:
+            die("цель " + describe(dst) + " указана дважды: " + dsts[d] + " и " + name)
+        srcs[s], dsts[d] = name, name
+    for d, name in dsts.items():
+        if d in srcs:
+            die("цель маршрута " + name + " является источником маршрута " + srcs[d] +
+                " — пересылка пошла бы по кругу.")
 
 
 class Sender:
@@ -762,20 +850,29 @@ async def source_messages(client: TelegramClient, cfg: Config, src):
         yield msg
 
 
-async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
-    what = ("последние " + str(cfg.history_limit)) if cfg.history_limit else "вся история"
-    print("\n--- Перенос истории (" + what + ", от старых к новым) ---")
+async def transfer(sender: Sender, cfg: Config, messages, delay_ms: int, lock=None) -> None:
+    """Переносит поток сообщений от старых к новым, собирая альбомы.
 
+    lock — замок онлайн-обработчика того же маршрута: когда обработчик уже слушает
+    источник, догонялка и он не должны отправить одно сообщение дважды.
+    """
     pending = []
     pending_group = None
+
+    async def locked(coro_fn, *a):
+        if lock is None:
+            await coro_fn(*a)
+            return
+        async with lock:
+            await coro_fn(*a)
 
     async def flush():
         nonlocal pending, pending_group
         if pending:
-            await handle_group(sender, cfg, pending, cfg.history_delay_ms)
+            await locked(handle_group, sender, cfg, pending, delay_ms)
             pending, pending_group = [], None
 
-    async for msg in source_messages(client, cfg, sender.src):
+    async for msg in messages:
         gid = getattr(msg, "grouped_id", None)
         if cfg.albums and gid is not None:
             if pending_group is not None and gid != pending_group:
@@ -784,21 +881,51 @@ async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
             pending.append(msg)
             continue
         await flush()
-        await handle_one(sender, cfg, msg, cfg.history_delay_ms)
+        await locked(handle_one, sender, cfg, msg, delay_ms)
     await flush()
+
+
+async def backfill(client: TelegramClient, cfg: Config, sender: Sender) -> None:
+    what = ("последние " + str(cfg.history_limit)) if cfg.history_limit else "вся история"
+    print("\n--- Перенос истории (" + what + ", от старых к новым) ---")
+
+    await transfer(sender, cfg, source_messages(client, cfg, sender.src), cfg.history_delay_ms)
 
     print("--- История: отправлено " + str(sender.sent) +
           ", пропущено " + str(sender.skipped) +
           ", ошибок " + str(sender.failed) + " ---\n")
 
 
+async def catch_up(client: TelegramClient, cfg: Config, sender: Sender, route: Route) -> None:
+    """Дополнительный маршрут: только то, что пришло после первого запуска.
+
+    На первом запуске запоминаем последнее сообщение источника как точку старта —
+    старую историю в новый канал не переносим. Дальше после каждого рестарта
+    добираем сообщения новее и точки старта, и последнего перенесённого.
+    """
+    start = sender.state.get(route.key("start_id"))
+    if start is None:
+        top = await client.get_messages(sender.src, limit=1)
+        start_id = top[0].id if top else 0
+        sender.state.set(route.key("start_id"), str(start_id))
+        print("ROUTE_" + str(route.num) + ": точка старта #" + str(start_id) +
+              " — история не переносится, только новые сообщения.")
+        return
+
+    min_id = max(int(start), sender.state.last_posted(sender.src_key))
+    before = sender.sent
+    await transfer(sender, cfg,
+                   client.iter_messages(sender.src, reverse=True, min_id=min_id),
+                   cfg.live_delay_ms, lock=sender.lock)
+    print("ROUTE_" + str(route.num) + ": догнано после простоя " +
+          str(sender.sent - before) + " сообщений (новее #" + str(min_id) + ").")
+
+
 # ---------------------------------------------------------------------------- live
 
 
-async def run_live(client: TelegramClient, cfg: Config, sender: Sender) -> None:
-    # Без упоминания Ctrl+C: в логах фонового контейнера такая подсказка вводит
-    # в заблуждение — там Ctrl+C закрывает только просмотр логов.
-    print("--- Онлайн-режим: ждём новые сообщения ---")
+def listen(client: TelegramClient, cfg: Config, sender: Sender) -> None:
+    """Вешает онлайн-обработчики одного маршрута. Слушать начинают сразу."""
 
     @client.on(events.NewMessage(chats=sender.src))
     async def on_new(event):
@@ -819,6 +946,11 @@ async def run_live(client: TelegramClient, cfg: Config, sender: Sender) -> None:
             async with sender.lock:
                 await handle_group(sender, cfg, list(event.messages), cfg.live_delay_ms)
 
+
+async def run_live(client: TelegramClient) -> None:
+    # Без упоминания Ctrl+C: в логах фонового контейнера такая подсказка вводит
+    # в заблуждение — там Ctrl+C закрывает только просмотр логов.
+    print("--- Онлайн-режим: ждём новые сообщения ---")
     await client.run_until_disconnected()
     # Штатного завершения у онлайн-режима нет: раз отвалились — выходим с ошибкой,
     # чтобы docker (restart: on-failure) поднял процесс заново.
@@ -874,33 +1006,56 @@ async def amain(args) -> None:
 
     state = State(cfg.state_db)
     src, dst = await preflight(client, cfg, state)
+    extra = []
+    for route in cfg.routes:
+        r_src, r_dst = await preflight(client, cfg, state, route)
+        extra.append((route, r_src, r_dst))
+    check_route_set([("SRC_CHAT/DST_CHAT", src, dst)] +
+                    [("ROUTE_" + str(r.num), s, d) for r, s, d in extra])
 
     if args.check:
-        print("\nРежим --check: проверки пройдены, ничего не отправлено.")
+        print("\nРежим --check: проверки пройдены (маршрутов: " + str(1 + len(extra)) +
+              "), ничего не отправлено.")
         await client.disconnect()
         return
 
     sender = Sender(client, cfg, state, src, dst)
+    extra_senders = [(r, Sender(client, cfg, state, s, d)) for r, s, d in extra]
 
-    # «Канарейка»: одно видимое сообщение в цель до массового переноса — глазами
-    # убеждаемся, что поток идёт в нужный чат.
-    if not cfg.dry_run and cfg.send_canary and not state.get("canary_sent"):
-        sender.guard()
-        title = getattr(src, "title", "") or utils.get_display_name(src)
-        await client.send_message(
-            dst,
-            "✅ Проверка канала: сюда будет идти перепост из «" + title + "». "
-            "Если вы видите это сообщение не в том чате — остановите скрипт.",
-        )
-        state.set("canary_sent", dt.datetime.now(dt.timezone.utc).isoformat())
-        print("Канарейка отправлена в цель — убедитесь, что она пришла в нужный чат.")
+    await send_canary(client, cfg, state, sender, "canary_sent")
+    for route, s in extra_senders:
+        await send_canary(client, cfg, state, s, route.key("canary_sent"))
 
     if cfg.mode in ("history", "both"):
         await backfill(client, cfg, sender)
     if cfg.mode in ("live", "both"):
-        await run_live(client, cfg, sender)
+        listen(client, cfg, sender)
+        for route, s in extra_senders:
+            listen(client, cfg, s)
+        for route, s in extra_senders:
+            await catch_up(client, cfg, s, route)
+        await run_live(client)
+    elif extra_senders:
+        log.warning("MODE=history: дополнительные маршруты ROUTE_* переносят только новое и пропущены")
 
     await client.disconnect()
+
+
+async def send_canary(client: TelegramClient, cfg: Config, state: State, sender: Sender, key: str) -> None:
+    """«Канарейка»: одно видимое сообщение в цель до первого переноса — глазами
+    убеждаемся, что поток идёт в нужный чат. Отправляется один раз на маршрут."""
+    if cfg.dry_run or not cfg.send_canary or state.get(key):
+        return
+    sender.guard()
+    title = getattr(sender.src, "title", "") or utils.get_display_name(sender.src)
+    await client.send_message(
+        sender.dst,
+        "✅ Проверка канала: сюда будет идти перепост из «" + title + "». "
+        "Если вы видите это сообщение не в том чате — остановите скрипт.",
+    )
+    state.set(key, dt.datetime.now(dt.timezone.utc).isoformat())
+    print("Канарейка отправлена в «" + (getattr(sender.dst, "title", "") or "?") +
+          "» — убедитесь, что она пришла в нужный чат.")
 
 
 def main() -> None:
